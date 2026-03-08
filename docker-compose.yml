@@ -1,0 +1,43 @@
+services:
+  master:
+    build:
+      context: .
+      dockerfile: Dockerfile.master
+    environment:
+      MASTER_HOST: "0.0.0.0"
+      MASTER_PORT: "50051"
+      ARTIFACT_ROOT: "/shared/artifacts"
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./Dataset:/shared/datasets
+      - shared_artifacts:/shared/artifacts
+    networks:
+      - rfnet
+    cpus: 1.0
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    depends_on:
+      - master
+    environment:
+      WORKER_BIND_HOST: "0.0.0.0"
+      WORKER_PORT: "50061"
+      MASTER_HOST: "master"
+      MASTER_PORT: "50051"
+      ARTIFACT_ROOT: "/shared/artifacts"
+    volumes:
+      - ./Dataset:/shared/datasets
+      - shared_artifacts:/shared/artifacts
+    networks:
+      - rfnet
+    cpus: 1.0
+
+volumes:
+  shared_artifacts:
+
+networks:
+  rfnet:
+    driver: bridge

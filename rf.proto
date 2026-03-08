@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package distributedrf;
+
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  PENDING = 1;
+  RUNNING = 2;
+  COMPLETED = 3;
+  FAILED = 4;
+}
+
+message Empty {}
+
+message DenseMatrix {
+  repeated double values = 1;
+  int32 n_rows = 2;
+  int32 n_cols = 3;
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+  string host = 2;
+  int32 port = 3;
+}
+
+message RegisterWorkerResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  int32 running_tasks = 2;
+}
+
+message HeartbeatResponse {
+  bool ok = 1;
+}
+
+message SubmitTrainingRequest {
+  string dataset_url = 1;
+  string target_column = 2;
+  string model_type = 3;        // "classification" | "regression"
+  int32 n_trees = 4;
+  int32 max_depth = 5;          // <= 0 => None
+  int32 min_samples_split = 6;  // <= 1 => default 2
+  string max_features = 7;      // "sqrt" | "log2" | "0.5" | ""
+  bool bootstrap = 8;
+  int32 random_seed = 9;
+}
+
+message SubmitTrainingResponse {
+  string job_id = 1;
+  JobStatus status = 2;
+  string message = 3;
+}
+
+message GetTrainingStatusRequest {
+  string job_id = 1;
+}
+
+message GetTrainingStatusResponse {
+  string job_id = 1;
+  string model_id = 2;
+  JobStatus status = 3;
+  int32 total_trees = 4;
+  int32 completed_trees = 5;
+  string message = 6;
+  repeated string workers = 7;
+}
+
+message SubmitInferenceRequest {
+  string model_id = 1;
+  DenseMatrix features = 2;
+}
+
+message SubmitInferenceResponse {
+  JobStatus status = 1;
+  repeated string predicted_labels = 2; // classificazione
+  repeated double predicted_values = 3; // regressione
+  string message = 4;
+}
+
+message TrainedTreeArtifact {
+  int32 tree_index = 1;
+  string tree_path = 2;
+  string worker_id = 3;
+}
+
+message TrainShardRequest {
+  string job_id = 1;
+  string model_id = 2;
+  string dataset_url = 3;
+  string target_column = 4;
+  string model_type = 5;
+
+  int32 start_tree_index = 6;
+  int32 n_trees = 7;
+
+  int32 max_depth = 8;
+  int32 min_samples_split = 9;
+  string max_features = 10;
+  bool bootstrap = 11;
+  int32 random_seed = 12;
+
+  string artifact_dir = 13;
+}
+
+message TrainShardResponse {
+  string worker_id = 1;
+  bool success = 2;
+  string error = 3;
+  repeated TrainedTreeArtifact artifacts = 4;
+}
+
+message PredictShardRequest {
+  string model_id = 1;
+  string model_type = 2;
+  DenseMatrix features = 3;
+  repeated string tree_paths = 4;
+  repeated string class_labels = 5; // usato solo in classificazione
+}
+
+message PredictShardResponse {
+  string worker_id = 1;
+  bool success = 2;
+  string error = 3;
+  repeated double values = 4; // voti parziali o somme parziali
+  int32 n_rows = 5;
+  int32 n_cols = 6;
+}
+
+service CoordinatorService {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  rpc SubmitTraining(SubmitTrainingRequest) returns (SubmitTrainingResponse);
+  rpc GetTrainingStatus(GetTrainingStatusRequest) returns (GetTrainingStatusResponse);
+  rpc SubmitInference(SubmitInferenceRequest) returns (SubmitInferenceResponse);
+}
+
+service WorkerService {
+  rpc TrainShard(TrainShardRequest) returns (TrainShardResponse);
+  rpc PredictShard(PredictShardRequest) returns (PredictShardResponse);
+}
