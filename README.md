@@ -1,7 +1,6 @@
 TODO
 in ordine:
 
-alberi per training NON distribuito
 
 client che fa partire il training
 
@@ -9,7 +8,8 @@ client che fa partire il training
 Leggere:
 introdotto docker per cointeiner dei diversi worker, master unico, worker arbitrari
 struttura distribuita instanziata dataset caricato, bisogna ora creare la base ML per iniziare il training
-e poi raffinare la parte distribuita
+e poi raffinare la parte distribuita.
+Ricordati che anche il master può fallire --> meccanismi di tolleranza ai guasti 
 
 
 Comandi:

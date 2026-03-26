@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+from enum import Enum
+
+
+class JobStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    VALIDATING = "VALIDATING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ExperimentStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    VALIDATING = "VALIDATING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class TaskStatus(str, Enum):
+    PENDING = "PENDING"
+    ASSIGNED = "ASSIGNED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+
+
+class TreeStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ModelStatus(str, Enum):
+    TRAINING = "TRAINING"
+    VALIDATED = "VALIDATED"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
+class WorkerLivenessStatus(str, Enum):
+    ALIVE = "ALIVE"
+    STALE = "STALE"
+    DEAD = "DEAD"
+
+
+class MasterRole(str, Enum):
+    LEADER = "LEADER"
+    FOLLOWER = "FOLLOWER"
+    CANDIDATE = "CANDIDATE"
+
+
+class CommandType(str, Enum):
+    CREATE_JOB = "CREATE_JOB"
+    REGISTER_PREPARED_DATASET = "REGISTER_PREPARED_DATASET"
+    CREATE_EXPERIMENT = "CREATE_EXPERIMENT"
+    REGISTER_TASK = "REGISTER_TASK"
+    ASSIGN_TRAINING_SHARD = "ASSIGN_TRAINING_SHARD"
+    MARK_SHARD_COMPLETED = "MARK_SHARD_COMPLETED"
+    MARK_SHARD_FAILED = "MARK_SHARD_FAILED"
+    SELECT_WINNING_EXPERIMENT = "SELECT_WINNING_EXPERIMENT"
+    PUBLISH_MODEL_MANIFEST = "PUBLISH_MODEL_MANIFEST"
