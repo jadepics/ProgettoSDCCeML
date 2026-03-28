@@ -21,8 +21,6 @@ import rf_v2_pb2_grpc as rf_pb2_grpc
 
 from common.contracts import TreeArtifactMetadata, WorkerProgressSnapshot
 from common.ids import generate_tree_id, tree_seed
-import paths
-
 
 # ============================================================
 # Artifact Store Abstraction
@@ -191,197 +189,38 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
     - è retry-safe: se un tree artifact esiste già, lo salta
     """
 
-    def __init__(self, config: WorkerConfig, state: WorkerState):
+    def __init__(self, config, state, shard_trainer, shard_predictor):
         self.config = config
         self.state = state
-        self.store: ArtifactStore = FilesystemArtifactStore(config.artifact_root)
+        self.trainer = shard_trainer
+        self.predictor = shard_predictor
 
     def TrainShard(self, request, context):
         self.state.inc()
-        completed_tree_ids: list[str] = []
-        failed_tree_ids: list[str] = []
-        trained_artifacts: list[rf_pb2.TrainedTreeArtifact] = []
-        running_tree_ids: list[str] = []
-
         try:
-            model_type = request.model_type.strip().lower()
-            if model_type not in {"classification", "regression"}:
-                raise ValueError("model_type must be 'classification' or 'regression'")
+            metas = self.trainer.train(request)
 
-            df = read_csv_dataset(request.dataset_url)
-            if request.target_column not in df.columns:
-                raise ValueError(f"Target column '{request.target_column}' not found")
-
-            y = df[request.target_column].to_numpy()
-            X = df.drop(columns=[request.target_column]).to_numpy(dtype=float)
-
-            max_depth = None if request.max_depth <= 0 else request.max_depth
-            min_samples_split = max(2, request.min_samples_split)
-            min_samples_leaf = max(1, request.min_samples_leaf)
-            max_features = parse_max_features(request.max_features)
-
-            # initial snapshot
-            self._write_progress_snapshot(
-                job_id=request.job_id,
-                experiment_id=request.experiment_id,
-                task_id=request.task_id,
-                completed_tree_ids=[],
-                running_tree_ids=[],
-                failed_tree_ids=[],
-            )
-
-            for offset in range(request.tree_count):
-                tree_index = request.start_tree_index + offset
-                tree_id = generate_tree_id(request.experiment_id, tree_index)
-                seed = tree_seed(request.seed_base, tree_index)
-
-                artifact_key = paths.tree_artifact_path(request.job_id, request.experiment_id, tree_index)
-                metadata_key = artifact_key + ".meta.json"
-
-                running_tree_ids = [tree_id]
-
-                self._write_progress_snapshot(
-                    job_id=request.job_id,
-                    experiment_id=request.experiment_id,
-                    task_id=request.task_id,
-                    completed_tree_ids=completed_tree_ids,
-                    running_tree_ids=running_tree_ids,
-                    failed_tree_ids=failed_tree_ids,
-                )
-
-                # retry-safe: skip if exists
-                if self.store.exists(artifact_key):
-                    if self.store.exists(metadata_key):
-                        meta_dict = self.store.load_json(metadata_key)
-                        meta = TreeArtifactMetadata(**meta_dict)
-                    else:
-                        meta = TreeArtifactMetadata(
-                            tree_id=tree_id,
-                            job_id=request.job_id,
-                            experiment_id=request.experiment_id,
-                            task_id=request.task_id,
-                            tree_index=tree_index,
-                            worker_id=self.config.worker_id,
-                            seed=seed,
-                            artifact_uri=artifact_key,
-                            status="COMPLETED",
-                            training_time_seconds=0.0,
-                        )
-                        self.store.save_json(metadata_key, asdict(meta))
-
-                    trained_artifacts.append(self._to_proto_tree_artifact(meta))
-
-                    if tree_id not in completed_tree_ids:
-                        completed_tree_ids.append(tree_id)
-
-                    running_tree_ids = []
-
-                    self._write_progress_snapshot(
-                        job_id=request.job_id,
-                        experiment_id=request.experiment_id,
-                        task_id=request.task_id,
-                        completed_tree_ids=completed_tree_ids,
-                        running_tree_ids=running_tree_ids,
-                        failed_tree_ids=failed_tree_ids,
-                    )
-
-                    continue
-
-                t0 = now_ts()
-
-                X_fit = X
-                y_fit = y
-                if request.bootstrap:
-                    rng = np.random.default_rng(seed)
-                    idx = rng.integers(0, X.shape[0], size=X.shape[0])
-                    X_fit = X[idx]
-                    y_fit = y[idx]
-
-                if model_type == "classification":
-                    model = DecisionTreeClassifier(
-                        max_depth=max_depth,
-                        min_samples_split=min_samples_split,
-                        min_samples_leaf=min_samples_leaf,
-                        max_features=max_features,
-                        random_state=seed,
-                    )
-                else:
-                    model = DecisionTreeRegressor(
-                        max_depth=max_depth,
-                        min_samples_split=min_samples_split,
-                        min_samples_leaf=min_samples_leaf,
-                        max_features=max_features,
-                        random_state=seed,
-                    )
-
-                model.fit(X_fit, y_fit)
-
-                self.store.save_joblib(artifact_key, model)
-
-                training_time = now_ts() - t0
-
-                meta = TreeArtifactMetadata(
-                    tree_id=tree_id,
-                    job_id=request.job_id,
-                    experiment_id=request.experiment_id,
-                    task_id=request.task_id,
-                    tree_index=tree_index,
-                    worker_id=self.config.worker_id,
-                    seed=seed,
-                    artifact_uri=artifact_key,
-                    status="COMPLETED",
-                    training_time_seconds=training_time,
-                )
-
-                self.store.save_json(metadata_key, asdict(meta))
-
-                trained_artifacts.append(self._to_proto_tree_artifact(meta))
-                completed_tree_ids.append(tree_id)
-                running_tree_ids = []
-
-                self._write_progress_snapshot(
-                    job_id=request.job_id,
-                    experiment_id=request.experiment_id,
-                    task_id=request.task_id,
-                    completed_tree_ids=completed_tree_ids,
-                    running_tree_ids=running_tree_ids,
-                    failed_tree_ids=failed_tree_ids,
-                )
+            artifacts = [
+                self._to_proto_tree_artifact(m)
+                for m in metas
+            ]
 
             return rf_pb2.TrainShardResponse(
                 worker_id=self.config.worker_id,
                 task_id=request.task_id,
                 attempt_id=request.attempt_id,
                 success=True,
-                error="",
-                artifacts=trained_artifacts,
+                artifacts=artifacts,
             )
 
-        except Exception as exc:
-            if running_tree_ids:
-                for tree_id in running_tree_ids:
-                    if tree_id not in failed_tree_ids:
-                        failed_tree_ids.append(tree_id)
-
-            try:
-                self._write_progress_snapshot(
-                    job_id=request.job_id,
-                    experiment_id=request.experiment_id,
-                    task_id=request.task_id,
-                    completed_tree_ids=completed_tree_ids,
-                    running_tree_ids=[],
-                    failed_tree_ids=failed_tree_ids,
-                )
-            except Exception:
-                pass
-
+        except Exception as e:
             return rf_pb2.TrainShardResponse(
                 worker_id=self.config.worker_id,
                 task_id=request.task_id,
                 attempt_id=request.attempt_id,
                 success=False,
-                error=str(exc),
-                artifacts=trained_artifacts,
+                error=str(e),
+                artifacts=[],
             )
         finally:
             self.state.dec()
@@ -389,55 +228,16 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
     def PredictShard(self, request, context):
         self.state.inc()
         try:
-            X = matrix_from_proto(request.features)
+            result = self.predictor.predict(request)
 
-            if not request.tree_artifact_uris:
-                raise ValueError("No tree artifact URIs provided")
-
-            model_type = request.model_type.strip().lower()
-
-            if model_type == "classification":
-                class_labels = list(request.class_labels)
-                if not class_labels:
-                    raise ValueError("class_labels required for classification")
-
-                class_to_idx = {label: i for i, label in enumerate(class_labels)}
-                votes = np.zeros((X.shape[0], len(class_labels)), dtype=float)
-
-                for artifact_key in request.tree_artifact_uris:
-                    model = self.store.load_joblib(artifact_key)
-                    pred = model.predict(X)
-                    for row_idx, label in enumerate(pred):
-                        votes[row_idx, class_to_idx[str(label)]] += 1.0
-
-                return rf_pb2.PredictShardResponse(
-                    worker_id=self.config.worker_id,
-                    success=True,
-                    error="",
-                    values=votes.ravel().tolist(),
-                    n_rows=votes.shape[0],
-                    n_cols=votes.shape[1],
-                )
-
-            elif model_type == "regression":
-                sums = np.zeros((X.shape[0], 1), dtype=float)
-
-                for artifact_key in request.tree_artifact_uris:
-                    model = self.store.load_joblib(artifact_key)
-                    pred = model.predict(X)
-                    sums[:, 0] += pred
-
-                return rf_pb2.PredictShardResponse(
-                    worker_id=self.config.worker_id,
-                    success=True,
-                    error="",
-                    values=sums.ravel().tolist(),
-                    n_rows=sums.shape[0],
-                    n_cols=sums.shape[1],
-                )
-
-            else:
-                raise ValueError("Unsupported model_type")
+            return rf_pb2.PredictShardResponse(
+                worker_id=self.config.worker_id,
+                success=True,
+                error="",
+                values=result.ravel().tolist(),
+                n_rows=result.shape[0],
+                n_cols=result.shape[1],
+            )
 
         except Exception as exc:
             return rf_pb2.PredictShardResponse(
@@ -450,34 +250,6 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             )
         finally:
             self.state.dec()
-
-    def _write_progress_snapshot(
-        self,
-        job_id: str,
-        experiment_id: str,
-        task_id: str,
-        completed_tree_ids: list[str],
-        running_tree_ids: list[str],
-        failed_tree_ids: list[str],
-    ) -> None:
-        snapshot = WorkerProgressSnapshot(
-            worker_id=self.config.worker_id,
-            task_id=task_id,
-            experiment_id=experiment_id,
-            completed_tree_ids=list(completed_tree_ids),
-            running_tree_ids=list(running_tree_ids),
-            failed_tree_ids=list(failed_tree_ids),
-            last_update_ts=now_ts(),
-        )
-
-        snapshot_key = paths.worker_snapshot_path(
-            job_id,
-            experiment_id,
-            self.config.worker_id,
-            task_id,
-        )
-
-        self.store.save_json(snapshot_key, asdict(snapshot))
 
     def _to_proto_tree_artifact(self, meta: TreeArtifactMetadata) -> rf_pb2.TrainedTreeArtifact:
         return rf_pb2.TrainedTreeArtifact(
@@ -493,6 +265,12 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 # ============================================================
 # Worker node lifecycle
 # ============================================================
+from storage.filesystem_store import FilesystemArtifactStore
+from storage import paths
+from worker.training.shard_trainer import ShardTrainer
+from worker.prediction.shard_predictor import ShardPredictor
+from worker.training.tree_artifact_writer import TreeArtifactWriter
+from worker.progress.worker_progress_store import WorkerProgressStore
 
 class WorkerNode:
     def __init__(self, config: WorkerConfig):
@@ -542,10 +320,31 @@ class WorkerNode:
 
     def serve(self) -> None:
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
+        store = FilesystemArtifactStore(self.config.artifact_root)
+        progress_store = WorkerProgressStore(store, paths)
+
+        writer = TreeArtifactWriter(
+            store=store,
+            paths=paths,
+            worker_id=self.config.worker_id,
+        )
+
+        trainer = ShardTrainer(
+            config=self.config,
+            state=self.state,
+            store=store,
+            paths=paths,
+            artifact_writer=writer,
+            progress_store=progress_store,
+        )
+
+        predictor = ShardPredictor(store=store)
+
         rf_pb2_grpc.add_WorkerServiceServicer_to_server(
-            WorkerService(self.config, self.state),
+            WorkerService(self.config, self.state, trainer, predictor),
             server,
         )
+
         server.add_insecure_port(f"{self.config.bind_host}:{self.config.port}")
         server.start()
 
