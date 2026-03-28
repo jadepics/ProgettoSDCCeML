@@ -4,11 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="First commit">
-      <change beforePath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="Introduzione artifact_store, filesystem_stoere e paths">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/storage/paths.py" beforeDir="false" afterPath="$PROJECT_DIR$/storage/paths.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -89,7 +88,8 @@
       <updated>1772718028304</updated>
       <workItem from="1774557139933" duration="1949000" />
       <workItem from="1774559557015" duration="480000" />
-      <workItem from="1774600460605" duration="4432000" />
+      <workItem from="1774600460605" duration="10626000" />
+      <workItem from="1774694994766" duration="2377000" />
     </task>
     <task id="LOCAL-00001" summary="First commit">
       <option name="closed" value="true" />
@@ -99,7 +99,15 @@
       <option name="project" value="LOCAL" />
       <updated>1772718604332</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="Introduzione artifact_store, filesystem_stoere e paths">
+      <option name="closed" value="true" />
+      <created>1774605271956</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1774605271956</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -107,7 +115,8 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="First commit" />
-    <option name="LAST_COMMIT_MESSAGE" value="First commit" />
+    <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
+    <option name="LAST_COMMIT_MESSAGE" value="Introduzione artifact_store, filesystem_stoere e paths" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

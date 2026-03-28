@@ -3,13 +3,11 @@ from __future__ import annotations
 import json
 import os
 import socket
-import tempfile
 import threading
 import time
 import uuid
 from concurrent import futures
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Optional
 
 import grpc
@@ -23,6 +21,64 @@ import rf_v2_pb2_grpc as rf_pb2_grpc
 
 from common.contracts import TreeArtifactMetadata, WorkerProgressSnapshot
 from common.ids import generate_tree_id, tree_seed
+import paths
+
+
+# ============================================================
+# Artifact Store Abstraction
+# ============================================================
+
+class ArtifactStore:
+    def exists(self, key: str) -> bool:
+        raise NotImplementedError
+
+    def save_json(self, key: str, data: dict) -> None:
+        raise NotImplementedError
+
+    def load_json(self, key: str) -> dict:
+        raise NotImplementedError
+
+    def save_joblib(self, key: str, obj) -> None:
+        raise NotImplementedError
+
+    def load_joblib(self, key: str):
+        raise NotImplementedError
+
+
+class FilesystemArtifactStore(ArtifactStore):
+    def __init__(self, root: str):
+        self.root = root
+        os.makedirs(self.root, exist_ok=True)
+
+    def _full_path(self, key: str) -> str:
+        return os.path.join(self.root, key)
+
+    def exists(self, key: str) -> bool:
+        return os.path.exists(self._full_path(key))
+
+    def save_json(self, key: str, data: dict) -> None:
+        path = self._full_path(key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
+
+    def load_json(self, key: str) -> dict:
+        path = self._full_path(key)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_joblib(self, key: str, obj) -> None:
+        path = self._full_path(key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = path + ".tmp"
+        joblib.dump(obj, tmp_path)
+        os.replace(tmp_path, path)
+
+    def load_joblib(self, key: str):
+        path = self._full_path(key)
+        return joblib.load(path)
 
 
 # ============================================================
@@ -88,31 +144,6 @@ def parse_max_features(value: str):
         return value
 
 
-def atomic_json_write(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8") as tmp:
-        json.dump(payload, tmp, indent=2)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
-
-
-def atomic_joblib_dump(obj, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(delete=False, dir=str(path.parent), suffix=".joblib") as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        joblib.dump(obj, tmp_path)
-        tmp_path.replace(path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-
-
 # ============================================================
 # Worker config/state
 # ============================================================
@@ -163,11 +194,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
     def __init__(self, config: WorkerConfig, state: WorkerState):
         self.config = config
         self.state = state
-        Path(self.config.artifact_root).mkdir(parents=True, exist_ok=True)
-
-    # --------------------------------------------------------
-    # RPC: training shard
-    # --------------------------------------------------------
+        self.store: ArtifactStore = FilesystemArtifactStore(config.artifact_root)
 
     def TrainShard(self, request, context):
         self.state.inc()
@@ -193,20 +220,11 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             min_samples_leaf = max(1, request.min_samples_leaf)
             max_features = parse_max_features(request.max_features)
 
-            experiment_dir = Path(request.artifact_output_dir)
-            trees_dir = experiment_dir / "trees"
-            metadata_dir = experiment_dir / "tree_metadata"
-            progress_dir = experiment_dir / "_worker_progress"
-
-            trees_dir.mkdir(parents=True, exist_ok=True)
-            metadata_dir.mkdir(parents=True, exist_ok=True)
-            progress_dir.mkdir(parents=True, exist_ok=True)
-
-            # snapshot iniziale
+            # initial snapshot
             self._write_progress_snapshot(
-                progress_dir=progress_dir,
-                task_id=request.task_id,
+                job_id=request.job_id,
                 experiment_id=request.experiment_id,
+                task_id=request.task_id,
                 completed_tree_ids=[],
                 running_tree_ids=[],
                 failed_tree_ids=[],
@@ -217,24 +235,26 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 tree_id = generate_tree_id(request.experiment_id, tree_index)
                 seed = tree_seed(request.seed_base, tree_index)
 
-                artifact_path = trees_dir / f"{tree_id}.joblib"
-                metadata_path = metadata_dir / f"{tree_id}.json"
+                artifact_key = paths.tree_artifact_path(request.job_id, request.experiment_id, tree_index)
+                metadata_key = artifact_key + ".meta.json"
 
                 running_tree_ids = [tree_id]
+
                 self._write_progress_snapshot(
-                    progress_dir=progress_dir,
-                    task_id=request.task_id,
+                    job_id=request.job_id,
                     experiment_id=request.experiment_id,
+                    task_id=request.task_id,
                     completed_tree_ids=completed_tree_ids,
                     running_tree_ids=running_tree_ids,
                     failed_tree_ids=failed_tree_ids,
                 )
 
-                # Retry-safe behavior:
-                # se il tree artifact esiste già, assumiamo che sia completato e lo saltiamo.
-                if artifact_path.exists():
-                    meta = self._load_tree_metadata_if_exists(metadata_path)
-                    if meta is None:
+                # retry-safe: skip if exists
+                if self.store.exists(artifact_key):
+                    if self.store.exists(metadata_key):
+                        meta_dict = self.store.load_json(metadata_key)
+                        meta = TreeArtifactMetadata(**meta_dict)
+                    else:
                         meta = TreeArtifactMetadata(
                             tree_id=tree_id,
                             job_id=request.job_id,
@@ -243,26 +263,28 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                             tree_index=tree_index,
                             worker_id=self.config.worker_id,
                             seed=seed,
-                            artifact_uri=str(artifact_path),
+                            artifact_uri=artifact_key,
                             status="COMPLETED",
                             training_time_seconds=0.0,
                         )
-                        atomic_json_write(metadata_path, asdict(meta))
+                        self.store.save_json(metadata_key, asdict(meta))
 
-                    trained_artifacts.append(
-                        self._to_proto_tree_artifact(meta)
-                    )
+                    trained_artifacts.append(self._to_proto_tree_artifact(meta))
+
                     if tree_id not in completed_tree_ids:
                         completed_tree_ids.append(tree_id)
+
                     running_tree_ids = []
+
                     self._write_progress_snapshot(
-                        progress_dir=progress_dir,
-                        task_id=request.task_id,
+                        job_id=request.job_id,
                         experiment_id=request.experiment_id,
+                        task_id=request.task_id,
                         completed_tree_ids=completed_tree_ids,
                         running_tree_ids=running_tree_ids,
                         failed_tree_ids=failed_tree_ids,
                     )
+
                     continue
 
                 t0 = now_ts()
@@ -293,9 +315,11 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                     )
 
                 model.fit(X_fit, y_fit)
-                atomic_joblib_dump(model, artifact_path)
+
+                self.store.save_joblib(artifact_key, model)
 
                 training_time = now_ts() - t0
+
                 meta = TreeArtifactMetadata(
                     tree_id=tree_id,
                     job_id=request.job_id,
@@ -304,20 +328,21 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                     tree_index=tree_index,
                     worker_id=self.config.worker_id,
                     seed=seed,
-                    artifact_uri=str(artifact_path),
+                    artifact_uri=artifact_key,
                     status="COMPLETED",
                     training_time_seconds=training_time,
                 )
-                atomic_json_write(metadata_path, asdict(meta))
+
+                self.store.save_json(metadata_key, asdict(meta))
 
                 trained_artifacts.append(self._to_proto_tree_artifact(meta))
                 completed_tree_ids.append(tree_id)
                 running_tree_ids = []
 
                 self._write_progress_snapshot(
-                    progress_dir=progress_dir,
-                    task_id=request.task_id,
+                    job_id=request.job_id,
                     experiment_id=request.experiment_id,
+                    task_id=request.task_id,
                     completed_tree_ids=completed_tree_ids,
                     running_tree_ids=running_tree_ids,
                     failed_tree_ids=failed_tree_ids,
@@ -339,12 +364,10 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                         failed_tree_ids.append(tree_id)
 
             try:
-                experiment_dir = Path(request.artifact_output_dir)
-                progress_dir = experiment_dir / "_worker_progress"
                 self._write_progress_snapshot(
-                    progress_dir=progress_dir,
-                    task_id=request.task_id,
+                    job_id=request.job_id,
                     experiment_id=request.experiment_id,
+                    task_id=request.task_id,
                     completed_tree_ids=completed_tree_ids,
                     running_tree_ids=[],
                     failed_tree_ids=failed_tree_ids,
@@ -363,16 +386,11 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
         finally:
             self.state.dec()
 
-    # --------------------------------------------------------
-    # RPC: prediction shard
-    # --------------------------------------------------------
-
     def PredictShard(self, request, context):
         self.state.inc()
         try:
             X = matrix_from_proto(request.features)
-            if X.size == 0:
-                raise ValueError("Empty input batch")
+
             if not request.tree_artifact_uris:
                 raise ValueError("No tree artifact URIs provided")
 
@@ -386,8 +404,8 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 class_to_idx = {label: i for i, label in enumerate(class_labels)}
                 votes = np.zeros((X.shape[0], len(class_labels)), dtype=float)
 
-                for artifact_uri in request.tree_artifact_uris:
-                    model = joblib.load(artifact_uri)
+                for artifact_key in request.tree_artifact_uris:
+                    model = self.store.load_joblib(artifact_key)
                     pred = model.predict(X)
                     for row_idx, label in enumerate(pred):
                         votes[row_idx, class_to_idx[str(label)]] += 1.0
@@ -404,8 +422,8 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             elif model_type == "regression":
                 sums = np.zeros((X.shape[0], 1), dtype=float)
 
-                for artifact_uri in request.tree_artifact_uris:
-                    model = joblib.load(artifact_uri)
+                for artifact_key in request.tree_artifact_uris:
+                    model = self.store.load_joblib(artifact_key)
                     pred = model.predict(X)
                     sums[:, 0] += pred
 
@@ -433,15 +451,11 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
         finally:
             self.state.dec()
 
-    # --------------------------------------------------------
-    # Internal helpers
-    # --------------------------------------------------------
-
     def _write_progress_snapshot(
         self,
-        progress_dir: Path,
-        task_id: str,
+        job_id: str,
         experiment_id: str,
+        task_id: str,
         completed_tree_ids: list[str],
         running_tree_ids: list[str],
         failed_tree_ids: list[str],
@@ -455,15 +469,15 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             failed_tree_ids=list(failed_tree_ids),
             last_update_ts=now_ts(),
         )
-        snapshot_path = progress_dir / f"{self.config.worker_id}_{task_id}.json"
-        atomic_json_write(snapshot_path, asdict(snapshot))
 
-    def _load_tree_metadata_if_exists(self, path: Path) -> Optional[TreeArtifactMetadata]:
-        if not path.exists():
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return TreeArtifactMetadata(**data)
+        snapshot_key = paths.worker_snapshot_path(
+            job_id,
+            experiment_id,
+            self.config.worker_id,
+            task_id,
+        )
+
+        self.store.save_json(snapshot_key, asdict(snapshot))
 
     def _to_proto_tree_artifact(self, meta: TreeArtifactMetadata) -> rf_pb2.TrainedTreeArtifact:
         return rf_pb2.TrainedTreeArtifact(
@@ -524,8 +538,7 @@ class WorkerNode:
 
                 time.sleep(interval_seconds)
 
-        thread = threading.Thread(target=_loop, daemon=True)
-        thread.start()
+        threading.Thread(target=_loop, daemon=True).start()
 
     def serve(self) -> None:
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
@@ -540,10 +553,7 @@ class WorkerNode:
         self.start_heartbeat_loop()
 
         advertised = self.config.advertise_host or self.config.bind_host
-        print(
-            f"[WORKER {self.config.worker_id}] listening on "
-            f"{advertised}:{self.config.port}"
-        )
+        print(f"[WORKER {self.config.worker_id}] listening on {advertised}:{self.config.port}")
         server.wait_for_termination()
 
 
@@ -564,4 +574,5 @@ if __name__ == "__main__":
         artifact_root=os.getenv("ARTIFACT_ROOT", "/shared/artifacts"),
         advertise_host=os.getenv("WORKER_ADVERTISE_HOST"),
     )
+
     WorkerNode(config).serve()
