@@ -4,9 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="refactoring worker.py e paths.py">
+    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="refactoring worker.py e creazione di shard_predictor.py, shard_trainder.py, tree_artifact_writer, worker_progress_store.py">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/worker/progress/worker_progress_store.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/progress/worker_progress_store.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -93,7 +93,7 @@
       <workItem from="1774600460605" duration="10626000" />
       <workItem from="1774694994766" duration="3422000" />
       <workItem from="1774720403281" duration="207000" />
-      <workItem from="1774730844650" duration="5746000" />
+      <workItem from="1774730844650" duration="8637000" />
     </task>
     <task id="LOCAL-00001" summary="First commit">
       <option name="closed" value="true" />
@@ -119,7 +119,15 @@
       <option name="project" value="LOCAL" />
       <updated>1774698083683</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="refactoring worker.py e creazione di shard_predictor.py, shard_trainder.py, tree_artifact_writer, worker_progress_store.py">
+      <option name="closed" value="true" />
+      <created>1774736813997</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1774736813997</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -129,7 +137,8 @@
     <MESSAGE value="First commit" />
     <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
     <MESSAGE value="refactoring worker.py e paths.py" />
-    <option name="LAST_COMMIT_MESSAGE" value="refactoring worker.py e paths.py" />
+    <MESSAGE value="refactoring worker.py e creazione di shard_predictor.py, shard_trainder.py, tree_artifact_writer, worker_progress_store.py" />
+    <option name="LAST_COMMIT_MESSAGE" value="refactoring worker.py e creazione di shard_predictor.py, shard_trainder.py, tree_artifact_writer, worker_progress_store.py" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>
