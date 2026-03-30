@@ -1,82 +1,74 @@
 from __future__ import annotations
 
+from typing import List
+
 import numpy as np
-import joblib
+
+from worker.storage.artifact_store import ArtifactStore
 
 
 class ShardPredictor:
+    """
+    Handles prediction for a shard of trees.
 
-    def __init__(self, store):
-        self.store = store
+    Responsibilities:
+    - Load trained trees from artifact store
+    - Run predictions
+    - Aggregate results
+    """
 
-    def predict(self, request):
-        X = self._matrix_from_proto(request.features)
+    def __init__(self, artifact_store: ArtifactStore):
+        self.artifact_store = artifact_store
 
-        if X.size == 0:
-            raise ValueError("Empty input batch")
+    def predict(
+        self,
+        experiment_id: str,
+        tree_ids: List[str],
+        X: np.ndarray,
+    ) -> List[float]:
 
-        if not request.tree_artifact_uris:
-            raise ValueError("No tree artifact URIs provided")
+        predictions_per_tree = []
 
-        model_type = request.model_type.strip().lower()
+        for tree_id in tree_ids:
+            artifact_key = self._build_artifact_key(experiment_id, tree_id)
 
-        if model_type == "classification":
-            return self._predict_classification(X, request)
+            # Load model
+            model = self.artifact_store.load_tree_artifact(artifact_key)
 
-        elif model_type == "regression":
-            return self._predict_regression(X, request)
+            # Predict
+            preds = model.predict(X)
+            predictions_per_tree.append(preds)
 
-        else:
-            raise ValueError("Unsupported model_type")
+        # Aggregate (majority voting or mean depending on task)
+        return self._aggregate(predictions_per_tree)
 
-    # --------------------------------------------------
-    # Classification
-    # --------------------------------------------------
+    def _build_artifact_key(self, experiment_id: str, tree_id: str) -> str:
+        """
+        Reconstructs the artifact key used during training.
+        Must match TreeArtifactWriter / paths.py logic.
+        """
+        return f"jobs/{experiment_id}/trees/{tree_id}.joblib"
 
-    def _predict_classification(self, X, request):
-        class_labels = list(request.class_labels)
+    def _aggregate(self, predictions_per_tree: List[np.ndarray]) -> List[float]:
+        """
+        Aggregation strategy:
+        - classification → majority vote
+        - regression → mean
+        """
 
-        # ✅ VALIDAZIONE CORRETTA (reintrodotta)
-        if not class_labels:
-            raise ValueError("class_labels required for classification")
+        if not predictions_per_tree:
+            return []
 
-        class_to_idx = {label: i for i, label in enumerate(class_labels)}
+        # Stack predictions: shape (n_trees, n_samples)
+        stacked = np.vstack(predictions_per_tree)
 
-        votes = np.zeros((X.shape[0], len(class_labels)), dtype=float)
+        # Majority vote (classification-like)
+        # You may adapt this depending on your task type
+        aggregated = []
 
-        for uri in request.tree_artifact_uris:
-            model = self._load_model(uri)
-            pred = model.predict(X)
+        for i in range(stacked.shape[1]):
+            column = stacked[:, i]
+            values, counts = np.unique(column, return_counts=True)
+            aggregated.append(values[np.argmax(counts)])
 
-            for row_idx, label in enumerate(pred):
-                votes[row_idx, class_to_idx[str(label)]] += 1.0
-
-        return votes
-
-    # --------------------------------------------------
-    # Regression
-    # --------------------------------------------------
-
-    def _predict_regression(self, X, request):
-        sums = np.zeros((X.shape[0], 1), dtype=float)
-
-        for uri in request.tree_artifact_uris:
-            model = self._load_model(uri)
-            pred = model.predict(X)
-            sums[:, 0] += pred
-
-        return sums
-
-    # --------------------------------------------------
-    # Helpers
-    # --------------------------------------------------
-
-    def _load_model(self, uri):
-        # opzionale: passare da ArtifactStore
-        return joblib.load(uri)
-
-    def _matrix_from_proto(self, msg):
-        arr = np.asarray(msg.values, dtype=float)
-        if msg.n_rows * msg.n_cols != arr.size:
-            raise ValueError("DenseMatrix shape mismatch")
-        return arr.reshape(msg.n_rows, msg.n_cols)
+        return aggregated

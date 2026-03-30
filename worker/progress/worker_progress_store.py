@@ -33,6 +33,11 @@ class WorkerProgressStore:
     # ------------------------
     # Task management
     # ------------------------
+    def load(self) -> None:
+        self._load()
+
+    def save(self) -> None:
+        self._persist()
 
     def start_task(self, task_id: str, metadata: Dict[str, Any]) -> None:
         self.state["tasks"][task_id] = {

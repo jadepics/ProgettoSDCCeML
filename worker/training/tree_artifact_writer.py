@@ -1,55 +1,60 @@
 from __future__ import annotations
 
-import time
 from dataclasses import asdict
 
 from common.contracts import TreeArtifactMetadata
-from common.ids import generate_tree_id
-
-
-def now_ts():
-    return time.time()
+from worker.storage.artifact_store import ArtifactStore
+from worker.storage.paths import (
+    tree_artifact_path,
+    tree_metadata_path,
+)
 
 
 class TreeArtifactWriter:
+    """
+    Responsabile del salvataggio degli alberi (artifact) e dei relativi metadata.
 
-    def __init__(self, store, paths, worker_id: str):
-        self.store = store
-        self.paths = paths
+    Garantisce:
+    - path deterministici
+    - separazione logica/physical storage
+    - consistenza tra artifact e metadata
+    """
+
+    def __init__(self, artifact_store: ArtifactStore, worker_id: str):
+        self.store = artifact_store
         self.worker_id = worker_id
 
     def write_tree(
         self,
-        *,
+        model,
         job_id: str,
         experiment_id: str,
         task_id: str,
         tree_index: int,
         seed: int,
-        model,
-        training_time: float,
+        training_time_seconds: float,
     ) -> TreeArtifactMetadata:
 
-        tree_id = generate_tree_id(experiment_id, tree_index)
-
-        artifact_key = self.paths.tree_artifact_path(
-            experiment_id, tree_id
+        # --------------------------------------------------
+        # 1. Chiave logica artifact
+        # --------------------------------------------------
+        artifact_key = tree_artifact_path(
+            job_id=job_id,
+            experiment_id=experiment_id,
+            tree_index=tree_index,
         )
 
-        metadata_key = self.paths.tree_metadata_path(
-            experiment_id, tree_id
-        )
+        # --------------------------------------------------
+        # 2. Salvataggio modello (delegato allo store)
+        # --------------------------------------------------
+        self.store.save_tree_artifact(artifact_key, model)
 
-        # ✅ idempotenza: se esiste già → non riscrivere
-        if self.store.exists(artifact_key):
-            meta = self._load_metadata_if_exists(metadata_key)
-            if meta:
-                return meta
+        # --------------------------------------------------
+        # 3. Costruzione metadata
+        # --------------------------------------------------
+        tree_id = f"{experiment_id}_tree_{tree_index}"
 
-        # salva modello
-        self.store.save_joblib(artifact_key, model)
-
-        meta = TreeArtifactMetadata(
+        metadata = TreeArtifactMetadata(
             tree_id=tree_id,
             job_id=job_id,
             experiment_id=experiment_id,
@@ -57,17 +62,26 @@ class TreeArtifactWriter:
             tree_index=tree_index,
             worker_id=self.worker_id,
             seed=seed,
-            artifact_uri=artifact_key,
+            artifact_uri=artifact_key,  # 👈 chiave logica, NON path fisico
             status="COMPLETED",
-            training_time_seconds=training_time,
+            training_time_seconds=training_time_seconds,
         )
 
-        self.store.save_json(metadata_key, asdict(meta))
+        # --------------------------------------------------
+        # 4. Chiave logica metadata
+        # --------------------------------------------------
+        metadata_key = tree_metadata_path(
+            job_id=job_id,
+            experiment_id=experiment_id,
+            tree_index=tree_index,
+        )
 
-        return meta
+        # --------------------------------------------------
+        # 5. Salvataggio metadata (via store)
+        # --------------------------------------------------
+        self.store.save_json(metadata_key, asdict(metadata))
 
-    def _load_metadata_if_exists(self, key):
-        if not self.store.exists(key):
-            return None
-        data = self.store.load_json(key)
-        return TreeArtifactMetadata(**data)
+        # --------------------------------------------------
+        # 6. Return
+        # --------------------------------------------------
+        return metadata

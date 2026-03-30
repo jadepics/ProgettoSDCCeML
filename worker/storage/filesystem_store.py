@@ -3,7 +3,7 @@ import os
 import joblib
 from typing import Any
 
-from .artifact_store import ArtifactStore
+from artifact_store import ArtifactStore
 
 
 class FilesystemArtifactStore(ArtifactStore):
