@@ -13,13 +13,16 @@ from typing import Optional
 import grpc
 import numpy as np
 import pandas as pd
-
+from masterPackage.shard_planner import ShardPlanner
+from masterPackage.worker_client import WorkerClient
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
 from masterPackage.data.data_preparation_service import DataPreparationService
 from masterPackage.data.dataset_loader import DatasetLoader
 from masterPackage.data.dataset_validator import DatasetValidator
 from masterPackage.data.split_manager import SplitManager
+from masterPackage.training_orchestrator import TrainingOrchestrator
+from masterPackage.experiment_planner import ExperimentPlanner
 
 from common.enums import (
     ExperimentStatus,
@@ -175,14 +178,26 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         self.job_repository = JobRepository(self.store)
         self.model_repository = ModelRepository(self.store)
         self.task_ledger = TaskLedger(self.store)
-
+        self.shard_planner = ShardPlanner(self.layout)
+        self.worker_client = WorkerClient(
+            timeout_train_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,
+            timeout_predict_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,
+        )
+        self.training_orchestrator = TrainingOrchestrator(
+            leadership_guard=self.leadership_guard,
+            worker_registry=self.registry,
+            task_ledger=self.task_ledger,
+            job_repository=self.job_repository,
+            shard_planner=self.shard_planner,
+            worker_client=self.worker_client,
+        )
         self.data_preparation_service = DataPreparationService(
             dataset_loader=DatasetLoader(),
             dataset_validator=DatasetValidator(),
             split_manager=SplitManager(),
             artifact_store=self.store,
         )
-
+        self.experiment_planner = ExperimentPlanner()
         # Consensus/leader guard: placeholder leader-only service.
         self.consensus = InMemoryLeaderConsensusService(is_leader=True)
         self.leadership_guard = LeadershipGuard(self.consensus)
@@ -277,7 +292,6 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 
         job_id = generate_job_id()
         model_id = str(uuid.uuid4())
-        experiment_id = generate_experiment_id(job_id, 0)
 
         max_depth_candidates = [
             value if value > 0 else None
@@ -326,6 +340,9 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             bootstrap=request.bootstrap,
         )
 
+        initial_experiment = self.experiment_planner.select_initial_experiment(training_request)
+        experiment_id = initial_experiment.experiment_id
+
         job_record = TrainingJobRecord(
             job_id=job_id,
             status=JobStatus.PENDING,
@@ -339,6 +356,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             updated_at=now_ts(),
         )
         self.job_repository.save(job_record)
+        self.job_repository.save_experiment(job_id, initial_experiment)
 
         threading.Thread(
             target=self._run_training_job,
@@ -412,192 +430,17 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             feature_names = prepared_dataset.schema.feature_names
             target_column = prepared_dataset.schema.target_column
 
-            forest_config = ForestConfiguration(
-                experiment_id=experiment_id,
-                task_type=model_type,
-                n_estimators=req.n_estimators_total,
-                max_depth=req.hyperparameter_space.max_depth_candidates[0],
-                max_features=req.hyperparameter_space.max_features_candidates[0],
-                min_samples_split=req.hyperparameter_space.min_samples_split_candidates[0],
-                min_samples_leaf=req.hyperparameter_space.min_samples_leaf_candidates[0],
-                criterion=req.hyperparameter_space.criterion_candidates[0],
-                bootstrap=req.bootstrap,
-                global_random_seed=req.global_random_seed,
-            )
+            experiment = self.job_repository.load_experiment(job_id, experiment_id)
+            if experiment is None:
+                raise RuntimeError(f"Experiment '{experiment_id}' not found")
 
-            alive_workers = self.registry.alive_workers()
-            if not alive_workers:
-                raise RuntimeError("No alive workers available during scheduling")
+            forest_config = experiment.forest_config
 
-            shard_specs = self._split_trees(forest_config.n_estimators, alive_workers)
-            if not shard_specs:
-                raise RuntimeError("No training shards could be created")
-
-            experiment = ExperimentRecord(
+            collected_artifacts = self.training_orchestrator.run_experiment(
+                job_id=job_id,
                 experiment_id=experiment_id,
                 forest_config=forest_config,
-                status=ExperimentStatus.RUNNING,
-                assigned_workers=[worker.worker_id for worker, _, _ in shard_specs],
-                expected_tree_count=forest_config.n_estimators,
-                completed_tree_count=0,
-                validation_metrics=None,
             )
-            self.job_repository.save_experiment(job_id, experiment)
-
-            collected_artifacts: list[TreeArtifactMetadata] = []
-
-            with ThreadPoolExecutor(max_workers=len(shard_specs)) as pool:
-                future_map = {}
-
-                for worker, start_idx, tree_count in shard_specs:
-                    task_id = generate_task_id(job_id, experiment_id, start_idx, tree_count)
-                    attempt_id = 1
-                    lease_expires_at_ts = now_ts() + 600.0
-
-                    shard = TrainingShard(
-                        task_id=task_id,
-                        attempt_id=attempt_id,
-                        job_id=job_id,
-                        experiment_id=experiment_id,
-                        assigned_worker_id=worker.worker_id,
-                        tree_start_index=start_idx,
-                        tree_count=tree_count,
-                        forest_config=forest_config,
-                        train_features_uri=prepared_dataset.train_features_uri,
-                        train_labels_uri=prepared_dataset.train_labels_uri,
-                        artifact_output_dir=str(self.layout.experiment_dir(job_id, experiment_id)),
-                        seed_base=req.global_random_seed,
-                        lease_expires_at_ts=lease_expires_at_ts,
-                    )
-
-                    task_record = TaskRecord(
-                        task_id=task_id,
-                        attempt_id=attempt_id,
-                        job_id=job_id,
-                        experiment_id=experiment_id,
-                        worker_id=worker.worker_id,
-                        status=TaskStatus.PENDING,
-                        tree_ids=[
-                            generate_tree_id(experiment_id, i)
-                            for i in range(start_idx, start_idx + tree_count)
-                        ],
-                        completed_tree_ids=[],
-                        failed_tree_ids=[],
-                        lease_expires_at_ts=lease_expires_at_ts,
-                        updated_at=now_ts(),
-                        error_message=None,
-                    )
-                    self.task_ledger.save(task_record)
-
-                    grpc_request = self._build_train_shard_request(shard)
-                    future = pool.submit(self._call_train_shard, worker, grpc_request)
-                    future_map[future] = (worker, shard)
-
-                for future in as_completed(future_map):
-                    worker, shard = future_map[future]
-                    response = future.result()
-
-                    if not response.success:
-                        retry_worker = self.registry.get_retry_candidate(
-                            exclude_worker_id=worker.worker_id
-                        )
-                        if retry_worker is None:
-                            self.task_ledger.mark_failed(shard.task_id, response.error)
-                            raise RuntimeError(
-                                f"Training shard failed on worker {worker.worker_id} "
-                                f"and no retry worker is available: {response.error}"
-                            )
-
-                        retry_attempt = shard.attempt_id + 1
-                        retry_lease_expires_at_ts = now_ts() + 600.0
-
-                        retry_shard = TrainingShard(
-                            task_id=shard.task_id,
-                            attempt_id=retry_attempt,
-                            job_id=shard.job_id,
-                            experiment_id=shard.experiment_id,
-                            assigned_worker_id=retry_worker.worker_id,
-                            tree_start_index=shard.tree_start_index,
-                            tree_count=shard.tree_count,
-                            forest_config=shard.forest_config,
-                            train_features_uri=shard.train_features_uri,
-                            train_labels_uri=shard.train_labels_uri,
-                            artifact_output_dir=shard.artifact_output_dir,
-                            seed_base=shard.seed_base,
-                            lease_expires_at_ts=retry_lease_expires_at_ts,
-                        )
-
-                        retry_task_record = TaskRecord(
-                            task_id=retry_shard.task_id,
-                            attempt_id=retry_attempt,
-                            job_id=retry_shard.job_id,
-                            experiment_id=retry_shard.experiment_id,
-                            worker_id=retry_worker.worker_id,
-                            status=TaskStatus.PENDING,
-                            tree_ids=[
-                                generate_tree_id(experiment_id, i)
-                                for i in range(
-                                    retry_shard.tree_start_index,
-                                    retry_shard.tree_start_index + retry_shard.tree_count,
-                                )
-                            ],
-                            completed_tree_ids=[],
-                            failed_tree_ids=[],
-                            lease_expires_at_ts=retry_lease_expires_at_ts,
-                            updated_at=now_ts(),
-                            error_message=None,
-                        )
-                        self.task_ledger.save(retry_task_record)
-
-                        retry_request = self._build_train_shard_request(retry_shard)
-                        response = self._call_train_shard(retry_worker, retry_request)
-                        shard = retry_shard
-
-                    if not response.success:
-                        self.task_ledger.mark_failed(shard.task_id, response.error)
-                        raise RuntimeError(
-                            f"Training shard failed permanently for task {shard.task_id}: "
-                            f"{response.error}"
-                        )
-
-                    shard_artifacts: list[TreeArtifactMetadata] = []
-                    for artifact in response.artifacts:
-                        meta = TreeArtifactMetadata(
-                            tree_id=artifact.tree_id,
-                            job_id=job_id,
-                            experiment_id=experiment_id,
-                            task_id=shard.task_id,
-                            tree_index=artifact.tree_index,
-                            worker_id=artifact.worker_id,
-                            seed=artifact.seed,
-                            artifact_uri=artifact.artifact_uri,
-                            status=TreeStatus.COMPLETED,
-                            training_time_seconds=0.0,      #TODO tempo per singolo albero, TrainedTreeArtifacts non lo porta ancora
-                        )
-                        shard_artifacts.append(meta)
-
-                    collected_artifacts.extend(shard_artifacts)
-
-                    completed_tree_ids = list(response.completed_tree_ids)
-                    if not completed_tree_ids:
-                        completed_tree_ids = [artifact.tree_id for artifact in shard_artifacts]
-
-                    self.task_ledger.mark_completed(
-                        task_id=shard.task_id,
-                        completed_tree_ids=completed_tree_ids,
-                    )
-
-                    completed_trees = self.task_ledger.count_completed_trees(job_id)
-                    record.message = f"Completed {completed_trees}/{forest_config.n_estimators} trees"
-                    record.updated_at = now_ts()
-                    self.job_repository.save(record)
-
-            collected_artifacts.sort(key=lambda item: item.tree_index)
-
-            if len(collected_artifacts) != forest_config.n_estimators:
-                raise RuntimeError(
-                    f"Expected {forest_config.n_estimators} trees, got {len(collected_artifacts)}"
-                )
 
             validation_metrics = ValidationMetrics(
                 experiment_id=experiment_id,
@@ -607,6 +450,12 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 feature_importances=[],
                 evaluated_at=now_ts(),
             )
+
+            experiment = self.job_repository.load_experiment(job_id, experiment_id)
+            if experiment is None:
+                raise RuntimeError(
+                    f"Experiment '{experiment_id}' not found after training orchestration"
+                )
 
             experiment.status = ExperimentStatus.COMPLETED
             experiment.completed_tree_count = len(collected_artifacts)
@@ -636,6 +485,10 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             )
 
             self.model_repository.save(manifest)
+
+            record = self.job_repository.load(job_id)
+            if record is None:
+                raise RuntimeError(f"Job '{job_id}' disappeared before completion update")
 
             record.status = JobStatus.COMPLETED
             record.message = "Training completed successfully"

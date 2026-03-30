@@ -7,18 +7,10 @@
     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="refactoring worker.py e paths.py">
-      <change beforePath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="aggiunto commento">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/common/storage_layout.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/storage_layout.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docker-compose.yml" beforeDir="false" afterPath="$PROJECT_DIR$/docker-compose.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/common/repositories.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/repositories.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/master/fault_tolerance.py" beforeDir="false" afterPath="$PROJECT_DIR$/masterPackage/fault_tolerance.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/proto/rf_v2.proto" beforeDir="false" afterPath="$PROJECT_DIR$/proto/rf_v2.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/rf.proto" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -41,12 +33,12 @@
     &quot;assignee&quot;: &quot;jadepics&quot;
   }
 }</component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "git@github.com:jadepics/ProgettoSDCCeML.git",
-    "accountId": "4de1de33-8135-4705-97f1-e05732611c9e"
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,
+    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
   }
-}]]></component>
+}</component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 8
 }</component>
@@ -131,7 +123,15 @@
       <option name="project" value="LOCAL" />
       <updated>1774698083683</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="aggiunto commento">
+      <option name="closed" value="true" />
+      <created>1774875188528</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1774875188528</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -141,7 +141,8 @@
     <MESSAGE value="First commit" />
     <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
     <MESSAGE value="refactoring worker.py e paths.py" />
-    <option name="LAST_COMMIT_MESSAGE" value="refactoring worker.py e paths.py" />
+    <MESSAGE value="aggiunto commento" />
+    <option name="LAST_COMMIT_MESSAGE" value="aggiunto commento" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>
