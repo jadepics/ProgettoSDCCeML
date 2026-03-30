@@ -1,137 +1,139 @@
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
-import joblib
 import time
-from dataclasses import asdict
 from typing import List
 
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+import numpy as np
 
-from common.contracts import TreeArtifactMetadata, WorkerProgressSnapshot
-from common.ids import generate_tree_id, tree_seed
+from common.contracts import (
+    TrainingShard,
+    ShardTrainingResult,
+    TreeArtifactMetadata,
+)
 
-
-def now_ts() -> float:
-    return time.time()
+from worker.training.bootstrap_sampler import BootstrapSampler
+from worker.training.decision_tree_factory import DecisionTreeFactory
+from worker.training.tree_artifact_writer import TreeArtifactWriter
+from worker.progress.worker_progress_store import WorkerProgressStore
 
 
 class ShardTrainer:
+    """
+    Core del training lato worker.
 
-    def __init__(self, config, state, store, paths, artifact_writer, progress_store):
-        self.config = config
-        self.state = state
-        self.store = store
-        self.paths = paths
-        self.writer = artifact_writer
+    Responsabilità:
+    - eseguire training shard
+    - delegare stato e idempotenza al WorkerProgressStore
+    """
+
+    def __init__(
+        self,
+        bootstrap_sampler: BootstrapSampler,
+        tree_factory: DecisionTreeFactory,
+        artifact_writer: TreeArtifactWriter,
+        progress_store: WorkerProgressStore,
+    ):
+        self.bootstrap_sampler = bootstrap_sampler
+        self.tree_factory = tree_factory
+        self.artifact_writer = artifact_writer
         self.progress_store = progress_store
 
-    def train(self, request) -> List[TreeArtifactMetadata]:
-        completed_tree_ids = []
-        failed_tree_ids = []
-        trained = []
-        running_tree_ids = []
+    def train(
+        self,
+        shard: TrainingShard,
+        X: np.ndarray,
+        y: np.ndarray,
+    ) -> ShardTrainingResult:
 
-        df = pd.read_csv(request.dataset_url)
-        y = df[request.target_column].to_numpy()
-        X = df.drop(columns=[request.target_column]).to_numpy(dtype=float)
+        # Recupera stato dal progress store
+        task = self.progress_store.get_task(shard.task_id)
 
-        # snapshot iniziale
-        self._snapshot(request, completed_tree_ids, [], failed_tree_ids)
+        completed_tree_ids: List[str] = []
+        failed_tree_ids: List[str] = []
 
-        for offset in range(request.tree_count):
-            tree_index = request.start_tree_index + offset
-            tree_id = generate_tree_id(request.experiment_id, tree_index)
-            seed = tree_seed(request.seed_base, tree_index)
+        if task:
+            completed_tree_ids = list(task.get("completed_tree_ids", []))
+            failed_tree_ids = list(task.get("failed_tree_ids", []))
 
-            artifact_key = self.paths.tree_artifact_path(
-                request.experiment_id, tree_id
-            )
-            metadata_key = self.paths.tree_metadata_path(
-                request.experiment_id, tree_id
-            )
+        tree_artifacts: List[TreeArtifactMetadata] = []
 
-            running_tree_ids = [tree_id]
-            self._snapshot(request, completed_tree_ids, running_tree_ids, failed_tree_ids)
+        for offset in range(shard.tree_count):
+            tree_index = shard.tree_start_index + offset
+            seed = shard.seed_base + tree_index
 
-            # idempotenza
-            if self.store.exists(artifact_key):
-                meta = self._load_metadata_if_exists(metadata_key)
-                if meta is None:
-                    meta = TreeArtifactMetadata(
-                        tree_id=tree_id,
-                        job_id=request.job_id,
-                        experiment_id=request.experiment_id,
-                        task_id=request.task_id,
-                        tree_index=tree_index,
-                        worker_id=self.config.worker_id,
-                        seed=seed,
-                        artifact_uri=artifact_key,
-                        status="COMPLETED",
-                        training_time_seconds=0.0,
-                    )
-                    self.store.save_json(metadata_key, asdict(meta))
+            tree_id = f"{shard.experiment_id}_tree_{tree_index}"
 
-                trained.append(meta)
-                completed_tree_ids.append(tree_id)
-                self._snapshot(request, completed_tree_ids, [], failed_tree_ids)
+            # ✅ Idempotenza: skip se già completato
+            if tree_id in completed_tree_ids:
                 continue
 
-            t0 = now_ts()
+            try:
+                t0 = time.time()
 
-            # bootstrap
-            X_fit, y_fit = X, y
-            if request.bootstrap:
-                rng = np.random.default_rng(seed)
-                idx = rng.integers(0, X.shape[0], size=X.shape[0])
-                X_fit = X[idx]
-                y_fit = y[idx]
+                # 1. bootstrap
+                indices = self.bootstrap_sampler.sample_indices(len(X), seed)
+                X_fit = X[indices]
+                y_fit = y[indices]
 
-            # model
-            if request.model_type == "classification":
-                model = DecisionTreeClassifier(random_state=seed)
-            else:
-                model = DecisionTreeRegressor(random_state=seed)
+                # 2. modello
+                model = self.tree_factory.create(
+                    max_depth=shard.forest_config.max_depth,
+                    min_samples_split=shard.forest_config.min_samples_split,
+                    min_samples_leaf=shard.forest_config.min_samples_leaf,
+                    max_features=shard.forest_config.max_features,
+                    seed=seed,
+                )
 
-            model.fit(X_fit, y_fit)
-            self.store.save_joblib(artifact_key, model)
+                # 3. training
+                model.fit(X_fit, y_fit)
 
-            training_time = now_ts() - t0
+                training_time = time.time() - t0
 
-            meta = self.writer.write_tree(
-                job_id=request.job_id,
-                experiment_id=request.experiment_id,
-                task_id=request.task_id,
-                tree_index=tree_index,
-                seed=seed,
-                model=model,
-                training_time=training_time,
-            )
+                # 4. persistenza
+                meta = self.artifact_writer.write_tree(
+                    model=model,
+                    job_id=shard.job_id,
+                    experiment_id=shard.experiment_id,
+                    task_id=shard.task_id,
+                    tree_index=tree_index,
+                    seed=seed,
+                    training_time_seconds=training_time,
+                )
 
-            self.store.save_json(metadata_key, asdict(meta))
+                tree_artifacts.append(meta)
 
-            trained.append(meta)
-            completed_tree_ids.append(tree_id)
+                completed_tree_ids.append(meta.tree_id)
 
-            self._snapshot(request, completed_tree_ids, [], failed_tree_ids)
+                # 👉 Aggiorna progress store (idempotenza centralizzata)
+                self.progress_store.update_progress(
+                    task_id=shard.task_id,
+                    shard_id=tree_index,
+                    progress=len(completed_tree_ids) / shard.tree_count,
+                )
 
-        return trained
+            except Exception:
+                failed_tree_ids.append(tree_id)
 
-    def _snapshot(self, request, completed, running, failed):
-        snapshot = WorkerProgressSnapshot(
-            worker_id=self.config.worker_id,
-            task_id=request.task_id,
-            experiment_id=request.experiment_id,
-            completed_tree_ids=list(completed),
-            running_tree_ids=list(running),
-            failed_tree_ids=list(failed),
-            last_update_ts=now_ts(),
+                self.progress_store.fail_task(
+                    shard.task_id,
+                    error=f"Tree {tree_id} failed",
+                )
+
+        success = len(failed_tree_ids) == 0
+
+        if success:
+            self.progress_store.complete_task(shard.task_id)
+
+        return ShardTrainingResult(
+            task_id=shard.task_id,
+            attempt_id=shard.attempt_id,
+            worker_id=shard.assigned_worker_id,
+            success=success,
+            tree_artifacts=tree_artifacts,
+            completed_tree_ids=completed_tree_ids,
+            failed_tree_ids=failed_tree_ids,
+            completed_tree_count=len(completed_tree_ids),
+            failed_tree_count=len(failed_tree_ids),
+            error_message=None if success else "Some trees failed",
+            elapsed_time_seconds=0.0,
         )
-
-        self.progress_store.save_snapshot(snapshot)
-
-    def _load_metadata_if_exists(self, key):
-        if not self.store.exists(key):
-            return None
-        return TreeArtifactMetadata(**self.store.load_json(key))

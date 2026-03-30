@@ -8,6 +8,9 @@ def current_time_seconds() -> float:
     """
     return time.time()
 
+def now_ts() -> float:
+    return time.time()
+
 @contextmanager
 def timer():
     """
