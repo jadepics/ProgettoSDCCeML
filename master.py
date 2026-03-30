@@ -572,7 +572,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                             seed=artifact.seed,
                             artifact_uri=artifact.artifact_uri,
                             status=TreeStatus.COMPLETED,
-                            training_time_seconds=0.0,
+                            training_time_seconds=0.0,      #TODO tempo per singolo albero, TrainedTreeArtifacts non lo porta ancora
                         )
                         shard_artifacts.append(meta)
 
