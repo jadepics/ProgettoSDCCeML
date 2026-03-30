@@ -69,7 +69,7 @@ message TrainedTreeArtifact {
   string artifact_uri = 4;
   string worker_id = 5;
   int32 seed = 6;
-}
+} //non c e training_time seconds vedi se serve
 
 message TrainShardRequest {
   string task_id = 1;

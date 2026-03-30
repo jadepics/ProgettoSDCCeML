@@ -16,7 +16,18 @@ import pandas as pd
 
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
+from masterPackage.data.data_preparation_service import DataPreparationService
+from masterPackage.data.dataset_loader import DatasetLoader
+from masterPackage.data.dataset_validator import DatasetValidator
+from masterPackage.data.split_manager import SplitManager
 
+from common.enums import (
+    ExperimentStatus,
+    JobStatus,
+    ModelStatus,
+    TaskStatus,
+    TreeStatus,
+)
 from common.contracts import (
     ExperimentRecord,
     ForestConfiguration,
@@ -43,7 +54,7 @@ from common.repositories import (
     TaskLedger,
 )
 from common.storage_layout import StorageLayout
-from master.fault_tolerance import (
+from masterPackage.fault_tolerance import (
     InMemoryLeaderConsensusService,
     LeadershipGuard,
 )
@@ -145,7 +156,7 @@ class WorkerRegistry:
 
 class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     """
-    Versione ponte del master:
+    Versione ponte del masterPackage:
     - usa contratti comuni
     - usa ID deterministici
     - usa ledger e manifest persistiti
@@ -165,12 +176,18 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         self.model_repository = ModelRepository(self.store)
         self.task_ledger = TaskLedger(self.store)
 
+        self.data_preparation_service = DataPreparationService(
+            dataset_loader=DatasetLoader(),
+            dataset_validator=DatasetValidator(),
+            split_manager=SplitManager(),
+            artifact_store=self.store,
+        )
+
         # Consensus/leader guard: placeholder leader-only service.
         self.consensus = InMemoryLeaderConsensusService(is_leader=True)
         self.leadership_guard = LeadershipGuard(self.consensus)
 
         self._lock = threading.Lock()
-
     # --------------------------------------------------------
     # RPC: worker lifecycle
     # --------------------------------------------------------
@@ -207,11 +224,47 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 message=f"Not leader: {exc}",
             )
 
-        if request.n_trees <= 0:
+        task_type = request.task_type.strip().lower()
+        if task_type not in {"classification", "regression"}:
             return rf_pb2.SubmitTrainingResponse(
                 job_id="",
                 status=rf_pb2.FAILED,
-                message="n_trees must be > 0",
+                message="task_type must be 'classification' or 'regression'",
+            )
+
+        if request.n_estimators_total <= 0:
+            return rf_pb2.SubmitTrainingResponse(
+                job_id="",
+                status=rf_pb2.FAILED,
+                message="n_estimators_total must be > 0",
+            )
+
+        if not request.dataset_url.strip():
+            return rf_pb2.SubmitTrainingResponse(
+                job_id="",
+                status=rf_pb2.FAILED,
+                message="dataset_url must be non-empty",
+            )
+
+        if not request.target_column.strip():
+            return rf_pb2.SubmitTrainingResponse(
+                job_id="",
+                status=rf_pb2.FAILED,
+                message="target_column must be non-empty",
+            )
+
+        if request.validation_ratio < 0.0 or request.test_ratio < 0.0:
+            return rf_pb2.SubmitTrainingResponse(
+                job_id="",
+                status=rf_pb2.FAILED,
+                message="validation_ratio and test_ratio must be >= 0",
+            )
+
+        if request.validation_ratio + request.test_ratio >= 1.0:
+            return rf_pb2.SubmitTrainingResponse(
+                job_id="",
+                status=rf_pb2.FAILED,
+                message="validation_ratio + test_ratio must be < 1.0",
             )
 
         alive_workers = self.registry.alive_workers()
@@ -224,36 +277,58 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 
         job_id = generate_job_id()
         model_id = str(uuid.uuid4())
-
-        # Per ora trattiamo una sola configurazione “resolved”.
-        # In seguito HyperparameterSpace + ExperimentPlanner genereranno più esperimenti.
         experiment_id = generate_experiment_id(job_id, 0)
+
+        max_depth_candidates = [
+            value if value > 0 else None
+            for value in request.max_depth_candidates
+        ]
+        if not max_depth_candidates:
+            max_depth_candidates = [None]
+
+        max_features_candidates = list(request.max_features_candidates)
+        if not max_features_candidates:
+            max_features_candidates = ["sqrt" if task_type == "classification" else "1.0"]
+
+        min_samples_split_candidates = list(request.min_samples_split_candidates)
+        if not min_samples_split_candidates:
+            min_samples_split_candidates = [2]
+
+        min_samples_leaf_candidates = list(request.min_samples_leaf_candidates)
+        if not min_samples_leaf_candidates:
+            min_samples_leaf_candidates = [1]
+
+        criterion_candidates = list(request.criterion_candidates)
+        if not criterion_candidates:
+            criterion_candidates = (
+                ["gini"] if task_type == "classification" else ["squared_error"]
+            )
 
         training_request = TrainingRequest(
             job_id=job_id,
             dataset_uri=request.dataset_url,
             target_column=request.target_column,
-            task_type=request.model_type.strip().lower(),
+            task_type=task_type,
             hyperparameter_space=HyperparameterSpace(
-                n_estimators_candidates=[request.n_trees],
-                max_depth_candidates=[request.max_depth if request.max_depth > 0 else None],
-                max_features_candidates=[request.max_features],
-                min_samples_split_candidates=[request.min_samples_split],
-                min_samples_leaf_candidates=[1],
-                criterion_candidates=["gini"] if request.model_type.strip().lower() == "classification" else ["squared_error"],
+                n_estimators_candidates=[request.n_estimators_total],
+                max_depth_candidates=max_depth_candidates,
+                max_features_candidates=max_features_candidates,
+                min_samples_split_candidates=min_samples_split_candidates,
+                min_samples_leaf_candidates=min_samples_leaf_candidates,
+                criterion_candidates=criterion_candidates,
                 bootstrap=request.bootstrap,
-                global_random_seed=request.random_seed,
+                global_random_seed=request.global_random_seed,
             ),
-            n_estimators_total=request.n_trees,
-            validation_ratio=0.0,  # fase successiva
-            test_ratio=0.0,        # fase successiva
-            global_random_seed=request.random_seed,
+            n_estimators_total=request.n_estimators_total,
+            validation_ratio=request.validation_ratio,
+            test_ratio=request.test_ratio,
+            global_random_seed=request.global_random_seed,
             bootstrap=request.bootstrap,
         )
 
         job_record = TrainingJobRecord(
             job_id=job_id,
-            status="PENDING",
+            status=JobStatus.PENDING,
             training_request=training_request,
             prepared_dataset=None,
             experiment_ids=[experiment_id],
@@ -309,24 +384,33 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         try:
             self.leadership_guard.require_leader()
 
-            record.status = "RUNNING"
+            record.status = JobStatus.RUNNING
             record.message = "Training in progress"
             record.updated_at = now_ts()
             self.job_repository.save(record)
 
             req = record.training_request
-            model_type = req.task_type
+            model_type = req.task_type.strip().lower()
             if model_type not in {"classification", "regression"}:
-                raise ValueError("task_type/model_type must be 'classification' or 'regression'")
+                raise ValueError("task_type must be 'classification' or 'regression'")
 
-            # TODO fase 3: questo blocco sarà rimpiazzato da DataPreparationService
-            df = read_csv_dataset(req.dataset_uri)
-            if req.target_column not in df.columns:
-                raise ValueError(f"Target column '{req.target_column}' not found in dataset")
+            prepared_dataset = self.data_preparation_service.prepare(
+                job_id=req.job_id,
+                dataset_uri=req.dataset_uri,
+                target_column=req.target_column,
+                task_type=req.task_type,
+                validation_ratio=req.validation_ratio,
+                test_ratio=req.test_ratio,
+                random_seed=req.global_random_seed,
+            )
 
-            class_labels: list[str] = []
-            if model_type == "classification":
-                class_labels = sorted(df[req.target_column].astype(str).unique().tolist())
+            record.prepared_dataset = prepared_dataset
+            record.updated_at = now_ts()
+            self.job_repository.save(record)
+
+            class_labels = prepared_dataset.class_labels or []
+            feature_names = prepared_dataset.schema.feature_names
+            target_column = prepared_dataset.schema.target_column
 
             forest_config = ForestConfiguration(
                 experiment_id=experiment_id,
@@ -341,23 +425,25 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 global_random_seed=req.global_random_seed,
             )
 
-            # Persistiamo un record di esperimento base.
+            alive_workers = self.registry.alive_workers()
+            if not alive_workers:
+                raise RuntimeError("No alive workers available during scheduling")
+
+            shard_specs = self._split_trees(forest_config.n_estimators, alive_workers)
+            if not shard_specs:
+                raise RuntimeError("No training shards could be created")
+
             experiment = ExperimentRecord(
                 experiment_id=experiment_id,
                 forest_config=forest_config,
-                status="RUNNING",
-                assigned_workers=[],
+                status=ExperimentStatus.RUNNING,
+                assigned_workers=[worker.worker_id for worker, _, _ in shard_specs],
                 expected_tree_count=forest_config.n_estimators,
                 completed_tree_count=0,
                 validation_metrics=None,
             )
             self.job_repository.save_experiment(job_id, experiment)
 
-            alive_workers = self.registry.alive_workers()
-            if not alive_workers:
-                raise RuntimeError("No alive workers available during scheduling")
-
-            shard_specs = self._split_trees(forest_config.n_estimators, alive_workers)
             collected_artifacts: list[TreeArtifactMetadata] = []
 
             with ThreadPoolExecutor(max_workers=len(shard_specs)) as pool:
@@ -366,84 +452,139 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 for worker, start_idx, tree_count in shard_specs:
                     task_id = generate_task_id(job_id, experiment_id, start_idx, tree_count)
                     attempt_id = 1
-                    seed_base = req.global_random_seed
+                    lease_expires_at_ts = now_ts() + 600.0
 
                     shard = TrainingShard(
                         task_id=task_id,
+                        attempt_id=attempt_id,
                         job_id=job_id,
                         experiment_id=experiment_id,
-                        worker_id=worker.worker_id,
+                        assigned_worker_id=worker.worker_id,
                         tree_start_index=start_idx,
                         tree_count=tree_count,
                         forest_config=forest_config,
-                        train_features_uri=req.dataset_uri,  # TODO fase 3: train split URI reale
-                        train_labels_uri=req.target_column,  # TODO fase 3: labels URI reale
-                        artifact_output_dir=self.layout.experiment_dir(job_id, experiment_id),
-                        seed_base=seed_base,
+                        train_features_uri=prepared_dataset.train_features_uri,
+                        train_labels_uri=prepared_dataset.train_labels_uri,
+                        artifact_output_dir=str(self.layout.experiment_dir(job_id, experiment_id)),
+                        seed_base=req.global_random_seed,
+                        lease_expires_at_ts=lease_expires_at_ts,
                     )
 
                     task_record = TaskRecord(
                         task_id=task_id,
+                        attempt_id=attempt_id,
                         job_id=job_id,
                         experiment_id=experiment_id,
                         worker_id=worker.worker_id,
-                        attempt_id=attempt_id,
-                        status="PENDING",
-                        lease_expiration_ts=None,
+                        status=TaskStatus.PENDING,
                         tree_ids=[
                             generate_tree_id(experiment_id, i)
                             for i in range(start_idx, start_idx + tree_count)
                         ],
                         completed_tree_ids=[],
+                        failed_tree_ids=[],
+                        lease_expires_at_ts=lease_expires_at_ts,
                         updated_at=now_ts(),
+                        error_message=None,
                     )
                     self.task_ledger.save(task_record)
 
-                    grpc_request = self._build_train_shard_request(model_id, req, shard, attempt_id)
-                    fut = pool.submit(self._call_train_shard, worker, grpc_request)
-                    future_map[fut] = (worker, shard, attempt_id, req)
+                    grpc_request = self._build_train_shard_request(shard)
+                    future = pool.submit(self._call_train_shard, worker, grpc_request)
+                    future_map[future] = (worker, shard)
 
-                for fut in as_completed(future_map):
-                    worker, shard, attempt_id, req = future_map[fut]
+                for future in as_completed(future_map):
+                    worker, shard = future_map[future]
+                    response = future.result()
 
-                    response = fut.result()
                     if not response.success:
-                        retry_worker = self.registry.get_retry_candidate(exclude_worker_id=worker.worker_id)
+                        retry_worker = self.registry.get_retry_candidate(
+                            exclude_worker_id=worker.worker_id
+                        )
                         if retry_worker is None:
+                            self.task_ledger.mark_failed(shard.task_id, response.error)
                             raise RuntimeError(
-                                f"Training shard failed on worker {worker.worker_id} and no retry worker available: {response.error}"
+                                f"Training shard failed on worker {worker.worker_id} "
+                                f"and no retry worker is available: {response.error}"
                             )
 
-                        retry_attempt = attempt_id + 1
-                        retry_request = self._build_train_shard_request(model_id, req, shard, retry_attempt)
+                        retry_attempt = shard.attempt_id + 1
+                        retry_lease_expires_at_ts = now_ts() + 600.0
+
+                        retry_shard = TrainingShard(
+                            task_id=shard.task_id,
+                            attempt_id=retry_attempt,
+                            job_id=shard.job_id,
+                            experiment_id=shard.experiment_id,
+                            assigned_worker_id=retry_worker.worker_id,
+                            tree_start_index=shard.tree_start_index,
+                            tree_count=shard.tree_count,
+                            forest_config=shard.forest_config,
+                            train_features_uri=shard.train_features_uri,
+                            train_labels_uri=shard.train_labels_uri,
+                            artifact_output_dir=shard.artifact_output_dir,
+                            seed_base=shard.seed_base,
+                            lease_expires_at_ts=retry_lease_expires_at_ts,
+                        )
+
+                        retry_task_record = TaskRecord(
+                            task_id=retry_shard.task_id,
+                            attempt_id=retry_attempt,
+                            job_id=retry_shard.job_id,
+                            experiment_id=retry_shard.experiment_id,
+                            worker_id=retry_worker.worker_id,
+                            status=TaskStatus.PENDING,
+                            tree_ids=[
+                                generate_tree_id(experiment_id, i)
+                                for i in range(
+                                    retry_shard.tree_start_index,
+                                    retry_shard.tree_start_index + retry_shard.tree_count,
+                                )
+                            ],
+                            completed_tree_ids=[],
+                            failed_tree_ids=[],
+                            lease_expires_at_ts=retry_lease_expires_at_ts,
+                            updated_at=now_ts(),
+                            error_message=None,
+                        )
+                        self.task_ledger.save(retry_task_record)
+
+                        retry_request = self._build_train_shard_request(retry_shard)
                         response = self._call_train_shard(retry_worker, retry_request)
+                        shard = retry_shard
 
                     if not response.success:
                         self.task_ledger.mark_failed(shard.task_id, response.error)
                         raise RuntimeError(
-                            f"Training shard failed permanently for task {shard.task_id}: {response.error}"
+                            f"Training shard failed permanently for task {shard.task_id}: "
+                            f"{response.error}"
                         )
 
-                    shard_artifacts = []
-                    for a in response.artifacts:
+                    shard_artifacts: list[TreeArtifactMetadata] = []
+                    for artifact in response.artifacts:
                         meta = TreeArtifactMetadata(
-                            tree_id=a.tree_id,
+                            tree_id=artifact.tree_id,
                             job_id=job_id,
                             experiment_id=experiment_id,
                             task_id=shard.task_id,
-                            tree_index=a.tree_index,
-                            worker_id=a.worker_id,
-                            seed=a.seed,
-                            artifact_uri=a.artifact_uri,
-                            status="COMPLETED",
-                            training_time_seconds=a.training_time_seconds,
+                            tree_index=artifact.tree_index,
+                            worker_id=artifact.worker_id,
+                            seed=artifact.seed,
+                            artifact_uri=artifact.artifact_uri,
+                            status=TreeStatus.COMPLETED,
+                            training_time_seconds=0.0,
                         )
                         shard_artifacts.append(meta)
 
                     collected_artifacts.extend(shard_artifacts)
+
+                    completed_tree_ids = list(response.completed_tree_ids)
+                    if not completed_tree_ids:
+                        completed_tree_ids = [artifact.tree_id for artifact in shard_artifacts]
+
                     self.task_ledger.mark_completed(
                         task_id=shard.task_id,
-                        completed_tree_ids=[a.tree_id for a in shard_artifacts],
+                        completed_tree_ids=completed_tree_ids,
                     )
 
                     completed_trees = self.task_ledger.count_completed_trees(job_id)
@@ -451,13 +592,13 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                     record.updated_at = now_ts()
                     self.job_repository.save(record)
 
-            collected_artifacts = sorted(collected_artifacts, key=lambda x: x.tree_index)
+            collected_artifacts.sort(key=lambda item: item.tree_index)
+
             if len(collected_artifacts) != forest_config.n_estimators:
                 raise RuntimeError(
                     f"Expected {forest_config.n_estimators} trees, got {len(collected_artifacts)}"
                 )
 
-            # Validation placeholder: fase 6
             validation_metrics = ValidationMetrics(
                 experiment_id=experiment_id,
                 accuracy=0.0,
@@ -467,7 +608,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 evaluated_at=now_ts(),
             )
 
-            experiment.status = "COMPLETED"
+            experiment.status = ExperimentStatus.COMPLETED
             experiment.completed_tree_count = len(collected_artifacts)
             experiment.validation_metrics = validation_metrics
             self.job_repository.save_experiment(job_id, experiment)
@@ -479,21 +620,24 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 model_type=model_type,
                 forest_config=forest_config,
                 class_labels=class_labels,
-                feature_names=[c for c in df.columns if c != req.target_column],
-                target_column=req.target_column,
-                train_split_uri=req.dataset_uri,
-                validation_split_uri="",
-                test_split_uri="",
+                feature_names=feature_names,
+                target_column=target_column,
+                train_features_uri=prepared_dataset.train_features_uri,
+                train_labels_uri=prepared_dataset.train_labels_uri,
+                validation_features_uri=prepared_dataset.validation_features_uri,
+                validation_labels_uri=prepared_dataset.validation_labels_uri,
+                test_features_uri=prepared_dataset.test_features_uri,
+                test_labels_uri=prepared_dataset.test_labels_uri,
                 tree_artifacts=collected_artifacts,
                 validation_metrics=validation_metrics,
                 test_metrics=None,
                 created_at=now_ts(),
-                status="READY",
+                status=ModelStatus.READY,
             )
 
             self.model_repository.save(manifest)
 
-            record.status = "COMPLETED"
+            record.status = JobStatus.COMPLETED
             record.message = "Training completed successfully"
             record.selected_experiment_id = experiment_id
             record.updated_at = now_ts()
@@ -502,58 +646,69 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         except Exception as exc:
             record = self.job_repository.load(job_id)
             if record is not None:
-                record.status = "FAILED"
+                record.status = JobStatus.FAILED
                 record.message = str(exc)
                 record.updated_at = now_ts()
                 self.job_repository.save(record)
 
-    def _split_trees(self, n_trees: int, workers: list[WorkerInfo]) -> list[tuple[WorkerInfo, int, int]]:
+    def _split_trees(
+            self,
+            n_trees: int,
+            workers: list[WorkerInfo],
+    ) -> list[tuple[WorkerInfo, int, int]]:
+        if n_trees <= 0:
+            raise ValueError("n_trees must be > 0")
+        if not workers:
+            return []
+
         chunks: list[tuple[WorkerInfo, int, int]] = []
         base = n_trees // len(workers)
         rem = n_trees % len(workers)
 
         start = 0
-        for i, worker in enumerate(workers):
-            count = base + (1 if i < rem else 0)
-            if count == 0:
+        for index, worker in enumerate(workers):
+            tree_count = base + (1 if index < rem else 0)
+            if tree_count <= 0:
                 continue
-            chunks.append((worker, start, count))
-            start += count
+
+            chunks.append((worker, start, tree_count))
+            start += tree_count
+
         return chunks
 
     def _build_train_shard_request(
-        self,
-        model_id: str,
-        req: TrainingRequest,
-        shard: TrainingShard,
-        attempt_id: int,
+            self,
+            shard: TrainingShard,
     ) -> rf_pb2.TrainShardRequest:
-        """
-        Mapping master-side TrainingShard -> protobuf request.
-        Adatta i nomi qui se il proto definitivo usa campi diversi.
-        """
         fc = shard.forest_config
+
+        max_depth = 0 if fc.max_depth is None else fc.max_depth
+        max_features = "none" if fc.max_features is None else str(fc.max_features)
+        lease_expires_at_unix_ms = int(shard.lease_expires_at_ts * 1000)
+
         return rf_pb2.TrainShardRequest(
             task_id=shard.task_id,
-            attempt_id=attempt_id,
+            attempt_id=shard.attempt_id,
             job_id=shard.job_id,
             experiment_id=shard.experiment_id,
-            model_id=model_id,
-            worker_id=shard.worker_id,
-            dataset_url=req.dataset_uri,
-            target_column=req.target_column,
-            model_type=fc.task_type,
-            start_tree_index=shard.tree_start_index,
+            assigned_worker_id=shard.assigned_worker_id,
+            tree_start_index=shard.tree_start_index,
             tree_count=shard.tree_count,
-            max_depth=fc.max_depth or 0,
+            task_type=fc.task_type,
+            n_estimators=fc.n_estimators,
+            max_depth=max_depth,
+            max_features=max_features,
             min_samples_split=fc.min_samples_split,
             min_samples_leaf=fc.min_samples_leaf,
-            max_features=str(fc.max_features),
+            criterion=fc.criterion,
             bootstrap=fc.bootstrap,
-            seed_base=shard.seed_base,
+            global_random_seed=fc.global_random_seed,
+            train_features_uri=shard.train_features_uri,
+            train_labels_uri=shard.train_labels_uri,
             artifact_output_dir=shard.artifact_output_dir,
+            seed_base=shard.seed_base,
+            lease_expires_at_unix_ms=lease_expires_at_unix_ms,
         )
-
     def _call_train_shard(
         self,
         worker: WorkerInfo,

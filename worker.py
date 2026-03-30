@@ -126,7 +126,7 @@ def parse_dataset_url(dataset_url: str) -> str:
 
 
 def read_csv_dataset(dataset_url: str) -> pd.DataFrame:
-    path_or_url = parse_dataset_url(dataset_url)
+    path_or_url =   parse_dataset_url(dataset_url)
     return pd.read_csv(path_or_url)
 
 
@@ -361,7 +361,7 @@ class WorkerNode:
 # ============================================================
 
 if __name__ == "__main__":
-    master_host = os.getenv("MASTER_HOST", "master")
+    master_host = os.getenv("MASTER_HOST", "masterPackage")
     master_port = int(os.getenv("MASTER_PORT", "50051"))
 
     config = WorkerConfig(

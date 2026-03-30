@@ -25,7 +25,7 @@ services:
     environment:
       WORKER_BIND_HOST: "0.0.0.0"
       WORKER_PORT: "50061"
-      MASTER_HOST: "master"
+      MASTER_HOST: "masterPackage"
       MASTER_PORT: "50051"
       ARTIFACT_ROOT: "/shared/artifacts"
     volumes:

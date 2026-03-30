@@ -99,7 +99,7 @@ class LeadershipGuard:
 
     def require_leader(self) -> None:
         if not self.consensus_service.is_leader():
-            raise PermissionError("Operation allowed only on the current leader master")
+            raise PermissionError("Operation allowed only on the current leader masterPackage")
 
     def assert_leader_for(self, job_id: str) -> None:
         try:
