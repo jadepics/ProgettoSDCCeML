@@ -7,9 +7,8 @@
     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="aggiunto commento">
+    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="ristrutturato master">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/common/repositories.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/repositories.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -39,6 +38,10 @@
     &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
   }
 }</component>
+  <component name="KubernetesApiPersistence">{}</component>
+  <component name="KubernetesApiProvider">{
+  &quot;isMigrated&quot;: true
+}</component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 8
 }</component>
@@ -58,8 +61,10 @@
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
     &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
     &quot;git-widget-placeholder&quot;: &quot;master&quot;,
     &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
     &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
@@ -98,6 +103,7 @@
       <workItem from="1774694994766" duration="3422000" />
       <workItem from="1774720403281" duration="207000" />
       <workItem from="1774730844650" duration="5746000" />
+      <workItem from="1774964855112" duration="688000" />
     </task>
     <task id="LOCAL-00001" summary="First commit">
       <option name="closed" value="true" />
@@ -131,7 +137,15 @@
       <option name="project" value="LOCAL" />
       <updated>1774875188528</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="ristrutturato master">
+      <option name="closed" value="true" />
+      <created>1774886067552</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1774886067552</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -142,7 +156,8 @@
     <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
     <MESSAGE value="refactoring worker.py e paths.py" />
     <MESSAGE value="aggiunto commento" />
-    <option name="LAST_COMMIT_MESSAGE" value="aggiunto commento" />
+    <MESSAGE value="ristrutturato master" />
+    <option name="LAST_COMMIT_MESSAGE" value="ristrutturato master" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

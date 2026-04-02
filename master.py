@@ -23,6 +23,9 @@ from masterPackage.data.dataset_validator import DatasetValidator
 from masterPackage.data.split_manager import SplitManager
 from masterPackage.training_orchestrator import TrainingOrchestrator
 from masterPackage.experiment_planner import ExperimentPlanner
+from masterPackage.model_manifest_builder import ModelManifestBuilder
+from masterPackage.inference_coordinator import InferenceCoordinator
+from masterPackage.validation_coordinator import ValidationCoordinator
 
 from common.enums import (
     ExperimentStatus,
@@ -172,6 +175,9 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 
         self.artifact_root = Path(artifact_root)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
+        # Consensus/leader guard: placeholder leader-only service.
+        self.consensus = InMemoryLeaderConsensusService(is_leader=True)
+        self.leadership_guard = LeadershipGuard(self.consensus)
 
         self.store = SharedArtifactStore(str(self.artifact_root))
         self.layout = StorageLayout(str(self.artifact_root))
@@ -197,10 +203,19 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             split_manager=SplitManager(),
             artifact_store=self.store,
         )
+        self.inference_coordinator = InferenceCoordinator(
+            leadership_guard=self.leadership_guard,
+            worker_registry=self.registry,
+            worker_client=self.worker_client,
+            model_repository=self.model_repository,
+        )
+        self.validation_coordinator = ValidationCoordinator(
+            leadership_guard=self.leadership_guard,
+            worker_registry=self.registry,
+            worker_client=self.worker_client,
+        )
+        self.model_manifest_builder = ModelManifestBuilder()
         self.experiment_planner = ExperimentPlanner()
-        # Consensus/leader guard: placeholder leader-only service.
-        self.consensus = InMemoryLeaderConsensusService(is_leader=True)
-        self.leadership_guard = LeadershipGuard(self.consensus)
 
         self._lock = threading.Lock()
     # --------------------------------------------------------
@@ -426,9 +441,6 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             record.updated_at = now_ts()
             self.job_repository.save(record)
 
-            class_labels = prepared_dataset.class_labels or []
-            feature_names = prepared_dataset.schema.feature_names
-            target_column = prepared_dataset.schema.target_column
 
             experiment = self.job_repository.load_experiment(job_id, experiment_id)
             if experiment is None:
@@ -442,14 +454,16 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 forest_config=forest_config,
             )
 
-            validation_metrics = ValidationMetrics(
+            validation_result = self.validation_coordinator.validate_experiment(
                 experiment_id=experiment_id,
-                accuracy=0.0,
-                classification_report={},
-                confusion_matrix=[],
-                feature_importances=[],
-                evaluated_at=now_ts(),
+                task_type=model_type,
+                validation_features_uri=prepared_dataset.validation_features_uri,
+                validation_labels_uri=prepared_dataset.validation_labels_uri,
+                tree_artifacts=collected_artifacts,
+                class_labels=prepared_dataset.class_labels or [],
             )
+
+            validation_metrics = validation_result.metrics
 
             experiment = self.job_repository.load_experiment(job_id, experiment_id)
             if experiment is None:
@@ -462,30 +476,20 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             experiment.validation_metrics = validation_metrics
             self.job_repository.save_experiment(job_id, experiment)
 
-            manifest = ModelManifest(
+            manifest = self.model_manifest_builder.build(
                 model_id=model_id,
                 job_id=job_id,
                 experiment_id=experiment_id,
                 model_type=model_type,
                 forest_config=forest_config,
-                class_labels=class_labels,
-                feature_names=feature_names,
-                target_column=target_column,
-                train_features_uri=prepared_dataset.train_features_uri,
-                train_labels_uri=prepared_dataset.train_labels_uri,
-                validation_features_uri=prepared_dataset.validation_features_uri,
-                validation_labels_uri=prepared_dataset.validation_labels_uri,
-                test_features_uri=prepared_dataset.test_features_uri,
-                test_labels_uri=prepared_dataset.test_labels_uri,
+                prepared_dataset=prepared_dataset,
                 tree_artifacts=collected_artifacts,
                 validation_metrics=validation_metrics,
                 test_metrics=None,
-                created_at=now_ts(),
                 status=ModelStatus.READY,
             )
 
             self.model_repository.save(manifest)
-
             record = self.job_repository.load(job_id)
             if record is None:
                 raise RuntimeError(f"Job '{job_id}' disappeared before completion update")
@@ -577,101 +581,31 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 
     def SubmitInference(self, request, context):
         try:
-            self.leadership_guard.require_leader()
-        except Exception as exc:
-            return rf_pb2.SubmitInferenceResponse(
-                status=rf_pb2.FAILED,
-                message=f"Not leader: {exc}",
-            )
-
-        manifest = self.model_repository.load(request.model_id)
-        if manifest is None:
-            return rf_pb2.SubmitInferenceResponse(
-                status=rf_pb2.FAILED,
-                message="Model not found",
-            )
-
-        alive_workers = self.registry.alive_workers()
-        if not alive_workers:
-            return rf_pb2.SubmitInferenceResponse(
-                status=rf_pb2.FAILED,
-                message="No alive workers available",
-            )
-
-        try:
             X = matrix_from_proto(request.features)
-            if X.size == 0:
-                raise ValueError("Empty inference batch")
 
-            tree_uris = [t.artifact_uri for t in manifest.tree_artifacts]
-            shards = self._split_tree_uris(tree_uris, len(alive_workers))
-            features_msg = matrix_to_proto(X)
+            result = self.inference_coordinator.run_inference(
+                model_id=request.model_id,
+                features=X,
+            )
 
-            responses = []
-            with ThreadPoolExecutor(max_workers=len(shards)) as pool:
-                future_map = {}
-                used_workers = alive_workers[: len(shards)]
-
-                for worker, uri_shard in zip(used_workers, shards):
-                    shard_req = rf_pb2.PredictShardRequest(
-                        model_id=manifest.model_id,
-                        model_type=manifest.model_type,
-                        features=features_msg,
-                        tree_artifact_uris=uri_shard,
-                        class_labels=manifest.class_labels,
-                    )
-                    fut = pool.submit(self._call_predict_shard, worker, shard_req)
-                    future_map[fut] = (worker, shard_req)
-
-                for fut in as_completed(future_map):
-                    worker, shard_req = future_map[fut]
-                    response = fut.result()
-
-                    if not response.success:
-                        retry_worker = self.registry.get_retry_candidate(worker.worker_id)
-                        if retry_worker is not None:
-                            response = self._call_predict_shard(retry_worker, shard_req)
-
-                    if not response.success:
-                        raise RuntimeError(
-                            f"Inference shard failed on worker {worker.worker_id}: {response.error}"
-                        )
-
-                    responses.append(response)
-
-            if manifest.model_type == "classification":
-                votes = np.zeros((X.shape[0], len(manifest.class_labels)), dtype=float)
-                for resp in responses:
-                    votes += np.asarray(resp.values, dtype=float).reshape(resp.n_rows, resp.n_cols)
-
-                pred_idx = np.argmax(votes, axis=1)
-                predicted_labels = [manifest.class_labels[i] for i in pred_idx]
-
+            if result.task_type == "classification":
                 return rf_pb2.SubmitInferenceResponse(
                     status=rf_pb2.COMPLETED,
-                    predicted_labels=predicted_labels,
+                    predicted_labels=result.predicted_labels or [],
                     message="Inference completed",
                 )
 
-            else:
-                sums = np.zeros((X.shape[0], 1), dtype=float)
-                for resp in responses:
-                    sums += np.asarray(resp.values, dtype=float).reshape(resp.n_rows, resp.n_cols)
-
-                preds = (sums[:, 0] / len(manifest.tree_artifacts)).tolist()
-
-                return rf_pb2.SubmitInferenceResponse(
-                    status=rf_pb2.COMPLETED,
-                    predicted_values=preds,
-                    message="Inference completed",
-                )
+            return rf_pb2.SubmitInferenceResponse(
+                status=rf_pb2.COMPLETED,
+                predicted_values=result.predicted_values or [],
+                message="Inference completed",
+            )
 
         except Exception as exc:
             return rf_pb2.SubmitInferenceResponse(
                 status=rf_pb2.FAILED,
                 message=str(exc),
             )
-
     def _call_predict_shard(
         self,
         worker: WorkerInfo,
