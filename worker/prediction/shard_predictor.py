@@ -22,53 +22,52 @@ class ShardPredictor:
 
     def predict(
         self,
-        experiment_id: str,
-        tree_ids: List[str],
+        artifact_uris: List[str],
         X: np.ndarray,
-    ) -> List[float]:
+    ) -> np.ndarray:
+
+        if not artifact_uris:
+            raise ValueError("No artifact URIs provided for prediction")
 
         predictions_per_tree = []
 
-        for tree_id in tree_ids:
-            artifact_key = self._build_artifact_key(experiment_id, tree_id)
+        # --------------------------------------------------
+        # Load + predict per tree
+        # --------------------------------------------------
+        for uri in artifact_uris:
 
-            # Load model
-            model = self.artifact_store.load_tree_artifact(artifact_key)
+            if not self.artifact_store.tree_artifact_exists(uri):
+                raise FileNotFoundError(f"Artifact not found: {uri}")
 
-            # Predict
+            model = self.artifact_store.load_tree_artifact(uri)
+
             preds = model.predict(X)
             predictions_per_tree.append(preds)
 
-        # Aggregate (majority voting or mean depending on task)
+        # --------------------------------------------------
+        # Aggregate predictions
+        # --------------------------------------------------
         return self._aggregate(predictions_per_tree)
 
-    def _build_artifact_key(self, experiment_id: str, tree_id: str) -> str:
+    def _aggregate(self, predictions_per_tree: List[np.ndarray]) -> np.ndarray:
         """
-        Reconstructs the artifact key used during training.
-        Must match TreeArtifactWriter / paths.py logic.
-        """
-        return f"jobs/{experiment_id}/trees/{tree_id}.joblib"
+        Majority voting aggregation for classification.
 
-    def _aggregate(self, predictions_per_tree: List[np.ndarray]) -> List[float]:
-        """
-        Aggregation strategy:
-        - classification → majority vote
-        - regression → mean
+        Shape:
+            predictions_per_tree: (n_trees, n_samples)
+        Returns:
+            (n_samples,)
         """
 
-        if not predictions_per_tree:
-            return []
+        stacked = np.vstack(predictions_per_tree)  # (n_trees, n_samples)
 
-        # Stack predictions: shape (n_trees, n_samples)
-        stacked = np.vstack(predictions_per_tree)
+        n_samples = stacked.shape[1]
+        final_predictions = []
 
-        # Majority vote (classification-like)
-        # You may adapt this depending on your task type
-        aggregated = []
-
-        for i in range(stacked.shape[1]):
+        for i in range(n_samples):
             column = stacked[:, i]
-            values, counts = np.unique(column, return_counts=True)
-            aggregated.append(values[np.argmax(counts)])
 
-        return aggregated
+            values, counts = np.unique(column, return_counts=True)
+            final_predictions.append(values[np.argmax(counts)])
+
+        return np.array(final_predictions)

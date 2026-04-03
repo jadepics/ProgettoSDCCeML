@@ -1,0 +1,1093 @@
+Index: .idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08__Changes_.xml
+===================================================================
+diff --git a/.idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08__Changes_.xml b/.idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08__Changes_.xml
+deleted file mode 100644
+--- a/.idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08__Changes_.xml	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ /dev/null	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
+@@ -1,4 +0,0 @@
+-<changelist name="Uncommitted_changes_before_Update_at_26_03_2026_19_08_[Changes]" date="1774548519595" recycled="true" deleted="true">
+-  <option name="PATH" value="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08_[Changes]/shelved.patch" />
+-  <option name="DESCRIPTION" value="Uncommitted changes before Update at 26/03/2026 19:08 [Changes]" />
+-</changelist>
+\ No newline at end of file
+Index: .idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08_[Changes]/shelved.patch
+===================================================================
+diff --git a/.idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08_[Changes]/shelved.patch b/.idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08_[Changes]/shelved.patch
+deleted file mode 100644
+--- a/.idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08_[Changes]/shelved.patch	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ /dev/null	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
+@@ -1,198 +0,0 @@
+-Index: worker.py
+-IDEA additional info:
+-Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+-<+>from __future__ import annotations\r\n\r\nimport os\r\nimport socket\r\nimport uuid\r\nimport threading\r\nimport time\r\nimport uuid\r\nfrom concurrent import futures\r\nfrom dataclasses import dataclass\r\nfrom pathlib import Path\r\n\r\nimport grpc\r\nimport joblib\r\nimport numpy as np\r\nimport pandas as pd\r\nfrom sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor\r\n\r\nimport rf_pb2\r\nimport rf_pb2_grpc\r\n\r\ndef generate_worker_id() -> str:\r\n    explicit = os.getenv(\"WORKER_ID\")\r\n    if explicit:\r\n        return explicit\r\n    return f\"worker-{socket.gethostname()}-{uuid.uuid4().hex[:8]}\"\r\n\r\n\r\ndef detect_advertise_host(master_host: str, master_port: int) -> str:\r\n    explicit = os.getenv(\"WORKER_ADVERTISE_HOST\")\r\n    if explicit:\r\n        return explicit\r\n\r\n    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\r\n    try:\r\n        # Non invia traffico reale, serve solo per capire quale IP locale usare\r\n        sock.connect((master_host, master_port))\r\n        return sock.getsockname()[0]\r\n    except Exception:\r\n        try:\r\n            return socket.gethostbyname(socket.gethostname())\r\n        except Exception:\r\n            return \"127.0.0.1\"\r\n    finally:\r\n        sock.close()\r\n\r\ndef matrix_from_proto(msg: rf_pb2.DenseMatrix) -> np.ndarray:\r\n    arr = np.asarray(msg.values, dtype=float)\r\n    if msg.n_rows * msg.n_cols != arr.size:\r\n        raise ValueError(\"DenseMatrix shape mismatch\")\r\n    return arr.reshape(msg.n_rows, msg.n_cols)\r\n\r\n\r\ndef parse_dataset_url(dataset_url: str) -> str:\r\n    if dataset_url.startswith(\"file://\"):\r\n        return dataset_url.replace(\"file://\", \"\", 1)\r\n    return dataset_url\r\n\r\n\r\ndef read_csv_dataset(dataset_url: str) -> pd.DataFrame:\r\n    path_or_url = parse_dataset_url(dataset_url)\r\n    return pd.read_csv(path_or_url)\r\n\r\n\r\ndef parse_max_features(value: str):\r\n    value = (value or \"\").strip().lower()\r\n    if value in {\"\", \"none\"}:\r\n        return None\r\n    if value in {\"sqrt\", \"log2\"}:\r\n        return value\r\n    try:\r\n        return float(value)\r\n    except ValueError:\r\n        return value\r\n\r\n\r\n@dataclass\r\nclass WorkerConfig:\r\n    worker_id: str\r\n    bind_host: str\r\n    port: int\r\n    master_host: str\r\n    master_port: int\r\n    artifact_root: str = \"/shared/artifacts\"\r\n    advertise_host: Optional[str] = None\r\n\r\n\r\nclass WorkerState:\r\n    def __init__(self) -> None:\r\n        self.running_tasks = 0\r\n        self._lock = threading.Lock()\r\n\r\n    def inc(self) -> None:\r\n        with self._lock:\r\n            self.running_tasks += 1\r\n\r\n    def dec(self) -> None:\r\n        with self._lock:\r\n            self.running_tasks = max(0, self.running_tasks - 1)\r\n\r\n    def get(self) -> int:\r\n        with self._lock:\r\n            return self.running_tasks\r\n\r\n\r\nclass WorkerService(rf_pb2_grpc.WorkerServiceServicer):\r\n    def __init__(self, config: WorkerConfig, state: WorkerState):\r\n        self.config = config\r\n        self.state = state\r\n        Path(self.config.artifact_root).mkdir(parents=True, exist_ok=True)\r\n\r\n    def TrainShard(self, request, context):\r\n        self.state.inc()\r\n        try:\r\n            model_type = request.model_type.strip().lower()\r\n            if model_type not in {\"classification\", \"regression\"}:\r\n                raise ValueError(\"model_type must be 'classification' or 'regression'\")\r\n\r\n            df = read_csv_dataset(request.dataset_url)\r\n            if request.target_column not in df.columns:\r\n                raise ValueError(f\"Target column '{request.target_column}' not found\")\r\n\r\n            y = df[request.target_column].to_numpy()\r\n            X = df.drop(columns=[request.target_column]).to_numpy(dtype=float)\r\n\r\n            max_depth = None if request.max_depth <= 0 else request.max_depth\r\n            min_samples_split = max(2, request.min_samples_split)\r\n            max_features = parse_max_features(request.max_features)\r\n\r\n            model_dir = Path(request.artifact_dir) / request.model_id\r\n            model_dir.mkdir(parents=True, exist_ok=True)\r\n\r\n            artifacts = []\r\n\r\n            for offset in range(request.n_trees):\r\n                tree_index = request.start_tree_index + offset\r\n                tree_seed = request.random_seed + tree_index\r\n\r\n                X_fit = X\r\n                y_fit = y\r\n                if request.bootstrap:\r\n                    rng = np.random.default_rng(tree_seed)\r\n                    idx = rng.integers(0, X.shape[0], size=X.shape[0])\r\n                    X_fit = X[idx]\r\n                    y_fit = y[idx]\r\n\r\n                if model_type == \"classification\":\r\n                    model = DecisionTreeClassifier(\r\n                        max_depth=max_depth,\r\n                        min_samples_split=min_samples_split,\r\n                        max_features=max_features,\r\n                        random_state=tree_seed,\r\n                    )\r\n                else:\r\n                    model = DecisionTreeRegressor(\r\n                        max_depth=max_depth,\r\n                        min_samples_split=min_samples_split,\r\n                        max_features=max_features,\r\n                        random_state=tree_seed,\r\n                    )\r\n\r\n                model.fit(X_fit, y_fit)\r\n\r\n                tree_path = model_dir / f\"tree_{tree_index}.joblib\"\r\n                joblib.dump(model, tree_path)\r\n\r\n                artifacts.append(\r\n                    rf_pb2.TrainedTreeArtifact(\r\n                        tree_index=tree_index,\r\n                        tree_path=str(tree_path),\r\n                        worker_id=self.config.worker_id,\r\n                    )\r\n                )\r\n\r\n            return rf_pb2.TrainShardResponse(\r\n                worker_id=self.config.worker_id,\r\n                success=True,\r\n                error=\"\",\r\n                artifacts=artifacts,\r\n            )\r\n\r\n        except Exception as exc:\r\n            return rf_pb2.TrainShardResponse(\r\n                worker_id=self.config.worker_id,\r\n                success=False,\r\n                error=str(exc),\r\n                artifacts=[],\r\n            )\r\n        finally:\r\n            self.state.dec()\r\n\r\n    def PredictShard(self, request, context):\r\n        self.state.inc()\r\n        try:\r\n            X = matrix_from_proto(request.features)\r\n            if X.size == 0:\r\n                raise ValueError(\"Empty input batch\")\r\n            if not request.tree_paths:\r\n                raise ValueError(\"No tree paths provided\")\r\n\r\n            model_type = request.model_type.strip().lower()\r\n\r\n            if model_type == \"classification\":\r\n                class_labels = list(request.class_labels)\r\n                if not class_labels:\r\n                    raise ValueError(\"class_labels required for classification\")\r\n\r\n                class_to_idx = {label: i for i, label in enumerate(class_labels)}\r\n                votes = np.zeros((X.shape[0], len(class_labels)), dtype=float)\r\n\r\n                for tree_path in request.tree_paths:\r\n                    model = joblib.load(tree_path)\r\n                    pred = model.predict(X)\r\n                    for row_idx, label in enumerate(pred):\r\n                        votes[row_idx, class_to_idx[str(label)]] += 1.0\r\n\r\n                return rf_pb2.PredictShardResponse(\r\n                    worker_id=self.config.worker_id,\r\n                    success=True,\r\n                    error=\"\",\r\n                    values=votes.ravel().tolist(),\r\n                    n_rows=votes.shape[0],\r\n                    n_cols=votes.shape[1],\r\n                )\r\n\r\n            elif model_type == \"regression\":\r\n                sums = np.zeros((X.shape[0], 1), dtype=float)\r\n\r\n                for tree_path in request.tree_paths:\r\n                    model = joblib.load(tree_path)\r\n                    pred = model.predict(X)\r\n                    sums[:, 0] += pred\r\n\r\n                return rf_pb2.PredictShardResponse(\r\n                    worker_id=self.config.worker_id,\r\n                    success=True,\r\n                    error=\"\",\r\n                    values=sums.ravel().tolist(),\r\n                    n_rows=sums.shape[0],\r\n                    n_cols=sums.shape[1],\r\n                )\r\n\r\n            else:\r\n                raise ValueError(\"Unsupported model_type\")\r\n\r\n        except Exception as exc:\r\n            return rf_pb2.PredictShardResponse(\r\n                worker_id=self.config.worker_id,\r\n                success=False,\r\n                error=str(exc),\r\n                values=[],\r\n                n_rows=0,\r\n                n_cols=0,\r\n            )\r\n        finally:\r\n            self.state.dec()\r\n\r\n\r\nclass WorkerNode:\r\n    def __init__(self, config: WorkerConfig):\r\n        self.config = config\r\n        self.state = WorkerState()\r\n\r\n    @property\r\n    def master_address(self) -> str:\r\n        return f\"{self.config.master_host}:{self.config.master_port}\"\r\n\r\n    def register_to_master(self) -> None:\r\n        advertise_host = self.config.advertise_host or detect_advertise_host(\r\n            self.config.master_host,\r\n            self.config.master_port,\r\n        )\r\n\r\n        with grpc.insecure_channel(self.master_address) as channel:\r\n            stub = rf_pb2_grpc.CoordinatorServiceStub(channel)\r\n            stub.RegisterWorker(\r\n                rf_pb2.RegisterWorkerRequest(\r\n                    worker_id=self.config.worker_id,\r\n                    host=advertise_host,\r\n                    port=self.config.port,\r\n                ),\r\n                timeout=10,\r\n            )\r\n\r\n    def start_heartbeat_loop(self, interval_seconds: float = 5.0) -> None:\r\n        def _loop():\r\n            while True:\r\n                try:\r\n                    with grpc.insecure_channel(self.master_address) as channel:\r\n                        stub = rf_pb2_grpc.CoordinatorServiceStub(channel)\r\n                        stub.Heartbeat(\r\n                            rf_pb2.HeartbeatRequest(\r\n                                worker_id=self.config.worker_id,\r\n                                running_tasks=self.state.get(),\r\n                            ),\r\n                            timeout=5,\r\n                        )\r\n                except grpc.RpcError:\r\n                    pass\r\n\r\n                time.sleep(interval_seconds)\r\n\r\n        thread = threading.Thread(target=_loop, daemon=True)\r\n        thread.start()\r\n\r\n    def serve(self) -> None:\r\n        server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))\r\n        rf_pb2_grpc.add_WorkerServiceServicer_to_server(\r\n            WorkerService(self.config, self.state),\r\n            server,\r\n        )\r\n        server.add_insecure_port(f\"{self.config.bind_host}:{self.config.port}\")\r\n        server.start()\r\n\r\n        self.register_to_master()\r\n        self.start_heartbeat_loop()\r\n\r\n        print(\r\n            f\"[WORKER {self.config.worker_id}] listening on \"\r\n            f\"{self.config.host}:{self.config.port}\"\r\n        )\r\n        server.wait_for_termination()\r\n\r\n\r\nif __name__ == \"__main__\":\r\n    master_host = os.getenv(\"MASTER_HOST\", \"master\")\r\n    master_port = int(os.getenv(\"MASTER_PORT\", \"50051\"))\r\n\r\n    config = WorkerConfig(\r\n        worker_id=generate_worker_id(),\r\n        bind_host=os.getenv(\"WORKER_BIND_HOST\", \"0.0.0.0\"),\r\n        port=int(os.getenv(\"WORKER_PORT\", \"50061\")),\r\n        master_host=master_host,\r\n        master_port=master_port,\r\n        artifact_root=os.getenv(\"ARTIFACT_ROOT\", \"/shared/artifacts\"),\r\n        advertise_host=os.getenv(\"WORKER_ADVERTISE_HOST\"),\r\n    )\r\n    WorkerNode(config).serve()
+-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+-<+>UTF-8
+-===================================================================
+-diff --git a/worker.py b/worker.py
+---- a/worker.py	(revision 44dba93a5a1933da8ea7d762a5a36ad04fcd0b55)
+-+++ b/worker.py	(date 1774338656129)
+-@@ -44,6 +44,7 @@
+-     finally:
+-         sock.close()
+- 
+-+
+- def matrix_from_proto(msg: rf_pb2.DenseMatrix) -> np.ndarray:
+-     arr = np.asarray(msg.values, dtype=float)
+-     if msg.n_rows * msg.n_cols != arr.size:
+-Index: .idea/workspace.xml
+-IDEA additional info:
+-Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+-<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"First commit\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/common.py\" beforeDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;jadepics&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\">{\r\n  &quot;selectedUrlAndAccountId&quot;: {\r\n    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,\r\n    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;\r\n  }\r\n}</component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 8\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\"><![CDATA[{\r\n  \"keyToString\": {\r\n    \"ModuleVcsDetector.initialDetectionPerformed\": \"true\",\r\n    \"RunOnceActivity.ShowReadmeOnStart\": \"true\",\r\n    \"RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252\": \"true\",\r\n    \"RunOnceActivity.git.unshallow\": \"true\",\r\n    \"git-widget-placeholder\": \"master\",\r\n    \"last_opened_file_path\": \"C:/Users/micci/PycharmProjects/PythonProject1/Dataset\"\r\n  }\r\n}]]></component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"CopyFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"\" />\r\n      <created>1772718028304</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1772718028304</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00001\" summary=\"First commit\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772718604332</created>\r\n      <option name=\"number\" value=\"00001\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772718604332</updated>\r\n    </task>\r\n    <option name=\"localTasksCounter\" value=\"2\" />\r\n    <servers />\r\n  </component>\r\n  <component name=\"VcsManagerConfiguration\">\r\n    <MESSAGE value=\"First commit\" />\r\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"First commit\" />\r\n  </component>\r\n</project>
+-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+-<+>UTF-8
+-===================================================================
+-diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+---- a/.idea/workspace.xml	(revision 44dba93a5a1933da8ea7d762a5a36ad04fcd0b55)
+-+++ b/.idea/workspace.xml	(date 1774348377310)
+-@@ -5,8 +5,11 @@
+-   </component>
+-   <component name="ChangeListManager">
+-     <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="First commit">
+-+      <change beforePath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" afterDir="false" />
+-+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+-       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+--      <change beforePath="$PROJECT_DIR$/common.py" beforeDir="false" />
+-+      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+-+      <change beforePath="$PROJECT_DIR$/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker.py" afterDir="false" />
+-     </list>
+-     <option name="SHOW_DIALOG" value="false" />
+-     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+-@@ -31,8 +34,8 @@
+- }</component>
+-   <component name="GithubPullRequestsUISettings">{
+-   &quot;selectedUrlAndAccountId&quot;: {
+--    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,
+--    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
+-+    &quot;url&quot;: &quot;https://github.com/jadepics/ProgettoSDCCeML.git&quot;,
+-+    &quot;accountId&quot;: &quot;64b32a3e-6402-44ac-8316-64089203d618&quot;
+-   }
+- }</component>
+-   <component name="ProjectColorInfo">{
+-@@ -46,16 +49,26 @@
+-     <option name="hideEmptyMiddlePackages" value="true" />
+-     <option name="showLibraryContents" value="true" />
+-   </component>
+--  <component name="PropertiesComponent"><![CDATA[{
+--  "keyToString": {
+--    "ModuleVcsDetector.initialDetectionPerformed": "true",
+--    "RunOnceActivity.ShowReadmeOnStart": "true",
+--    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+--    "RunOnceActivity.git.unshallow": "true",
+--    "git-widget-placeholder": "master",
+--    "last_opened_file_path": "C:/Users/micci/PycharmProjects/PythonProject1/Dataset"
+-+  <component name="PropertiesComponent">{
+-+  &quot;keyToString&quot;: {
+-+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+-+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+-+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+-+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+-+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+-+    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+-+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+-+    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+-+    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,
+-+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+-+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+-+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+-+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+-+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+-+    &quot;settings.editor.selected.configurable&quot;: &quot;com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable&quot;,
+-+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+-   }
+--}]]></component>
+-+}</component>
+-   <component name="RecentsManager">
+-     <key name="CopyFile.RECENT_KEYS">
+-       <recent name="C:\Users\micci\PycharmProjects\PythonProject1\Dataset" />
+-@@ -64,7 +77,8 @@
+-   <component name="SharedIndexes">
+-     <attachedChunks>
+-       <set>
+--        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
+-+        <option value="bundled-js-predefined-d6986cc7102b-9b0f141eb926-JavaScript-PY-253.31033.139" />
+-+        <option value="bundled-python-sdk-2653e85de345-6d6dccd035ac-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.31033.139" />
+-       </set>
+-     </attachedChunks>
+-   </component>
+-@@ -75,6 +89,10 @@
+-       <option name="number" value="Default" />
+-       <option name="presentableId" value="Default" />
+-       <updated>1772718028304</updated>
+-+      <workItem from="1773049629510" duration="617000" />
+-+      <workItem from="1773050287621" duration="7302000" />
+-+      <workItem from="1773928133086" duration="309000" />
+-+      <workItem from="1774338575920" duration="673000" />
+-     </task>
+-     <task id="LOCAL-00001" summary="First commit">
+-       <option name="closed" value="true" />
+-@@ -87,8 +105,30 @@
+-     <option name="localTasksCounter" value="2" />
+-     <servers />
+-   </component>
+-+  <component name="TypeScriptGeneratedFilesManager">
+-+    <option name="version" value="3" />
+-+  </component>
+-+  <component name="Vcs.Log.Tabs.Properties">
+-+    <option name="TAB_STATES">
+-+      <map>
+-+        <entry key="MAIN">
+-+          <value>
+-+            <State />
+-+          </value>
+-+        </entry>
+-+      </map>
+-+    </option>
+-+  </component>
+-   <component name="VcsManagerConfiguration">
+-     <MESSAGE value="First commit" />
+-     <option name="LAST_COMMIT_MESSAGE" value="First commit" />
+-   </component>
+-+  <component name="github-copilot-workspace">
+-+    <instructionFileLocations>
+-+      <option value=".github/instructions" />
+-+    </instructionFileLocations>
+-+    <promptFileLocations>
+-+      <option value=".github/prompts" />
+-+    </promptFileLocations>
+-+  </component>
+- </project>
+-\ No newline at end of file
+-Index: .idea/misc.xml
+-IDEA additional info:
+-Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+-<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"Black\">\r\n    <option name=\"sdkName\" value=\"Python 3.13 (PythonProject1)\" />\r\n  </component>\r\n  <component name=\"ProjectRootManager\" version=\"2\" project-jdk-name=\"Python 3.13 (PythonProject1)\" project-jdk-type=\"Python SDK\" />\r\n</project>
+-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+-<+>UTF-8
+-===================================================================
+-diff --git a/.idea/misc.xml b/.idea/misc.xml
+---- a/.idea/misc.xml	(revision 44dba93a5a1933da8ea7d762a5a36ad04fcd0b55)
+-+++ b/.idea/misc.xml	(date 1773054577262)
+-@@ -3,5 +3,5 @@
+-   <component name="Black">
+-     <option name="sdkName" value="Python 3.13 (PythonProject1)" />
+-   </component>
+--  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.13 (PythonProject1)" project-jdk-type="Python SDK" />
+-+  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.11 (ProgettoSDCCeML)" project-jdk-type="Python SDK" />
+- </project>
+-\ No newline at end of file
+-Index: .idea/ProgSDCC&ML.iml
+-IDEA additional info:
+-Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+-<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<module type=\"PYTHON_MODULE\" version=\"4\">\r\n  <component name=\"NewModuleRootManager\">\r\n    <content url=\"file://$MODULE_DIR$\">\r\n      <excludeFolder url=\"file://$MODULE_DIR$/.venv\" />\r\n    </content>\r\n    <orderEntry type=\"jdk\" jdkName=\"Python 3.13 (PythonProject1)\" jdkType=\"Python SDK\" />\r\n    <orderEntry type=\"sourceFolder\" forTests=\"false\" />\r\n  </component>\r\n</module>
+-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+-<+>UTF-8
+-===================================================================
+-diff --git a/.idea/ProgSDCC&ML.iml b/.idea/ProgSDCC&ML.iml
+---- a/.idea/ProgSDCC&ML.iml	(revision 44dba93a5a1933da8ea7d762a5a36ad04fcd0b55)
+-+++ b/.idea/ProgSDCC&ML.iml	(date 1773054576839)
+-@@ -4,7 +4,7 @@
+-     <content url="file://$MODULE_DIR$">
+-       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+-     </content>
+--    <orderEntry type="jdk" jdkName="Python 3.13 (PythonProject1)" jdkType="Python SDK" />
+-+    <orderEntry type="jdk" jdkName="Python 3.11 (ProgettoSDCCeML)" jdkType="Python SDK" />
+-     <orderEntry type="sourceFolder" forTests="false" />
+-   </component>
+- </module>
+-\ No newline at end of file
+-Index: requirements.txt
+-IDEA additional info:
+-Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+-<+>grpcio\r\ngrpcio-tools\r\nnumpy\r\npandas\r\nscikit-learn\r\njoblib
+-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+-<+>UTF-8
+-===================================================================
+-diff --git a/requirements.txt b/requirements.txt
+---- a/requirements.txt	(revision 44dba93a5a1933da8ea7d762a5a36ad04fcd0b55)
+-+++ b/requirements.txt	(date 1773661134259)
+-@@ -3,4 +3,5 @@
+- numpy
+- pandas
+- scikit-learn
+--joblib
+-\ No newline at end of file
+-+joblib
+-+matplotlib
+-\ No newline at end of file
+Index: .idea/shelf/Uncommitted_changes_before_Update_at_27_03_2026_14_39__Changes_.xml
+===================================================================
+diff --git a/.idea/shelf/Uncommitted_changes_before_Update_at_27_03_2026_14_39__Changes_.xml b/.idea/shelf/Uncommitted_changes_before_Update_at_27_03_2026_14_39__Changes_.xml
+deleted file mode 100644
+--- a/.idea/shelf/Uncommitted_changes_before_Update_at_27_03_2026_14_39__Changes_.xml	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ /dev/null	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
+@@ -1,4 +0,0 @@
+-<changelist name="Uncommitted_changes_before_Update_at_27_03_2026_14_39_[Changes]" date="1774618887465" recycled="true" deleted="true">
+-  <option name="PATH" value="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_27_03_2026_14_39_[Changes]/shelved.patch" />
+-  <option name="DESCRIPTION" value="Uncommitted changes before Update at 27/03/2026 14:39 [Changes]" />
+-</changelist>
+\ No newline at end of file
+Index: .idea/shelf/Uncommitted_changes_before_Update_at_27_03_2026_14_39_[Changes]/shelved.patch
+===================================================================
+diff --git a/.idea/shelf/Uncommitted_changes_before_Update_at_27_03_2026_14_39_[Changes]/shelved.patch b/.idea/shelf/Uncommitted_changes_before_Update_at_27_03_2026_14_39_[Changes]/shelved.patch
+deleted file mode 100644
+--- a/.idea/shelf/Uncommitted_changes_before_Update_at_27_03_2026_14_39_[Changes]/shelved.patch	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ /dev/null	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
+@@ -1,68 +0,0 @@
+-Index: proto/rf_v2.proto
+-IDEA additional info:
+-Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+-<+>syntax = \"proto3\";\r\n\r\npackage distributedrf;\r\n\r\nenum JobStatus {\r\n  JOB_STATUS_UNSPECIFIED = 0;\r\n  PENDING = 1;\r\n  RUNNING = 2;\r\n  VALIDATING = 3;\r\n  COMPLETED = 4;\r\n  FAILED = 5;\r\n}\r\n\r\nmessage DenseMatrix {\r\n  repeated double values = 1;\r\n  int32 n_rows = 2;\r\n  int32 n_cols = 3;\r\n}\r\n\r\nmessage RegisterWorkerRequest {\r\n  string worker_id = 1;\r\n  string host = 2;\r\n  int32 port = 3;\r\n}\r\n\r\nmessage RegisterWorkerResponse {\r\n  bool accepted = 1;\r\n  string message = 2;\r\n}\r\n\r\nmessage HeartbeatRequest {\r\n  string worker_id = 1;\r\n  int32 running_tasks = 2;\r\n  repeated string active_task_ids = 3;\r\n}\r\n\r\nmessage HeartbeatResponse {\r\n  bool ok = 1;\r\n}\r\n\r\nmessage SubmitTrainingRequest {\r\n  string dataset_url = 1;\r\n  string target_column = 2;\r\n  string task_type = 3;     // classification | regression\r\n  int32 n_estimators_total = 4;\r\n  double validation_ratio = 5;\r\n  double test_ratio = 6;\r\n  bool bootstrap = 7;\r\n  int32 global_random_seed = 8;\r\n\r\n  // JSON or repeated fields can later replace this simplified bootstrap version.\r\n  repeated int32 max_depth_candidates = 9;\r\n  repeated string max_features_candidates = 10;\r\n  repeated int32 min_samples_split_candidates = 11;\r\n  repeated int32 min_samples_leaf_candidates = 12;\r\n  repeated string criterion_candidates = 13;\r\n}\r\n\r\nmessage SubmitTrainingResponse {\r\n  string job_id = 1;\r\n  JobStatus status = 2;\r\n  string message = 3;\r\n}\r\n\r\nmessage TrainedTreeArtifact {\r\n  string tree_id = 1;\r\n  string experiment_id = 2;\r\n  int32 tree_index = 3;\r\n  string artifact_uri = 4;\r\n  string worker_id = 5;\r\n  int32 seed = 6;\r\n}\r\n\r\nmessage TrainShardRequest {\r\n  string task_id = 1;\r\n  int32 attempt_id = 2;\r\n  string job_id = 3;\r\n  string experiment_id = 4;\r\n  string assigned_worker_id = 5;\r\n\r\n  int32 tree_start_index = 6;\r\n  int32 tree_count = 7;\r\n\r\n  string task_type = 8;\r\n  int32 n_estimators = 9;\r\n  int32 max_depth = 10;\r\n  string max_features = 11;\r\n  int32 min_samples_split = 12;\r\n  int32 min_samples_leaf = 13;\r\n  string criterion = 14;\r\n  bool bootstrap = 15;\r\n  int32 global_random_seed = 16;\r\n\r\n  string train_features_uri = 17;\r\n  string train_labels_uri = 18;\r\n  string artifact_output_dir = 19;\r\n  int32 seed_base = 20;\r\n  int64 lease_expires_at_unix_ms = 21;\r\n}\r\n\r\nmessage TrainShardResponse {\r\n  string task_id = 1;\r\n  int32 attempt_id = 2;\r\n  string worker_id = 3;\r\n  bool success = 4;\r\n  string error = 5;\r\n  repeated TrainedTreeArtifact artifacts = 6;\r\n  repeated string completed_tree_ids = 7;\r\n  repeated string failed_tree_ids = 8;\r\n  double elapsed_time_seconds = 9;\r\n}\r\n\r\nmessage PredictShardRequest {\r\n  string model_id = 1;\r\n  string experiment_id = 2;\r\n  string task_type = 3;\r\n  DenseMatrix features = 4;\r\n  repeated string tree_artifact_uris = 5;\r\n  repeated string class_labels = 6;\r\n}\r\n\r\nmessage PredictShardResponse {\r\n  string worker_id = 1;\r\n  bool success = 2;\r\n  string error = 3;\r\n  repeated double values = 4;\r\n  int32 n_rows = 5;\r\n  int32 n_cols = 6;\r\n}\r\n\r\nservice CoordinatorService {\r\n  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);\r\n  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);\r\n  rpc SubmitTraining(SubmitTrainingRequest) returns (SubmitTrainingResponse);\r\n}\r\n\r\nservice WorkerService {\r\n  rpc TrainShard(TrainShardRequest) returns (TrainShardResponse);\r\n  rpc PredictShard(PredictShardRequest) returns (PredictShardResponse);\r\n}\r\n
+-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+-<+>UTF-8
+-===================================================================
+-diff --git a/proto/rf_v2.proto b/proto/rf_v2.proto
+---- a/proto/rf_v2.proto	(revision 51ab215be8c26f26a5373d80351fb13613c1f503)
+-+++ b/proto/rf_v2.proto	(date 1774556713390)
+-@@ -69,7 +69,7 @@
+-   string artifact_uri = 4;
+-   string worker_id = 5;
+-   int32 seed = 6;
+--}
+-+} //non c e training_time seconds vedi se serve
+- 
+- message TrainShardRequest {
+-   string task_id = 1;
+-Index: .idea/workspace.xml
+-IDEA additional info:
+-Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+-<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"BufProjectSettings\">\r\n    <option name=\"bufCLIPath\" value=\"$ brew install bufbuild/buf/buf\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"First commit real\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/README.md\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/README.md\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/master.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/master.py\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/worker.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/worker.py\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;jadepics&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\">{\r\n  &quot;selectedUrlAndAccountId&quot;: {\r\n    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,\r\n    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;\r\n  }\r\n}</component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 8\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\"><![CDATA[{\r\n  \"keyToString\": {\r\n    \"ModuleVcsDetector.initialDetectionPerformed\": \"true\",\r\n    \"RunOnceActivity.ShowReadmeOnStart\": \"true\",\r\n    \"RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252\": \"true\",\r\n    \"RunOnceActivity.git.unshallow\": \"true\",\r\n    \"git-widget-placeholder\": \"master\",\r\n    \"last_opened_file_path\": \"C:/Users/micci/PycharmProjects/PythonProject1\",\r\n    \"settings.editor.selected.configurable\": \"tools.buf\"\r\n  }\r\n}]]></component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"CopyFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\" />\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"\" />\r\n      <created>1772718028304</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1772718028304</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00001\" summary=\"First commit\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772718604332</created>\r\n      <option name=\"number\" value=\"00001\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772718604332</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00002\" summary=\"First commit real\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772987298062</created>\r\n      <option name=\"number\" value=\"00002\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00002\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772987298062</updated>\r\n    </task>\r\n    <option name=\"localTasksCounter\" value=\"3\" />\r\n    <servers />\r\n  </component>\r\n  <component name=\"VcsManagerConfiguration\">\r\n    <MESSAGE value=\"First commit\" />\r\n    <MESSAGE value=\"First commit real\" />\r\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"First commit real\" />\r\n  </component>\r\n</project>
+-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+-<+>UTF-8
+-===================================================================
+-diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+---- a/.idea/workspace.xml	(revision 51ab215be8c26f26a5373d80351fb13613c1f503)
+-+++ b/.idea/workspace.xml	(date 1774557014772)
+-@@ -7,11 +7,9 @@
+-     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
+-   </component>
+-   <component name="ChangeListManager">
+--    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="First commit real">
+-+    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="Inizializzazione distribuita con i contratti comuni, modificato master e worker, master ora ha l'implmentazione iniziare come leader">
+-       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+--      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+--      <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
+--      <change beforePath="$PROJECT_DIR$/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker.py" afterDir="false" />
+-+      <change beforePath="$PROJECT_DIR$/proto/rf_v2.proto" beforeDir="false" afterPath="$PROJECT_DIR$/proto/rf_v2.proto" afterDir="false" />
+-     </list>
+-     <option name="SHOW_DIALOG" value="false" />
+-     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+-@@ -99,12 +97,21 @@
+-       <option name="project" value="LOCAL" />
+-       <updated>1772987298062</updated>
+-     </task>
+--    <option name="localTasksCounter" value="3" />
+-+    <task id="LOCAL-00003" summary="Inizializzazione distribuita con i contratti comuni, modificato master e worker, master ora ha l'implmentazione iniziare come leader">
+-+      <option name="closed" value="true" />
+-+      <created>1774548425063</created>
+-+      <option name="number" value="00003" />
+-+      <option name="presentableId" value="LOCAL-00003" />
+-+      <option name="project" value="LOCAL" />
+-+      <updated>1774548425063</updated>
+-+    </task>
+-+    <option name="localTasksCounter" value="4" />
+-     <servers />
+-   </component>
+-   <component name="VcsManagerConfiguration">
+-     <MESSAGE value="First commit" />
+-     <MESSAGE value="First commit real" />
+--    <option name="LAST_COMMIT_MESSAGE" value="First commit real" />
+-+    <MESSAGE value="Inizializzazione distribuita con i contratti comuni, modificato master e worker, master ora ha l'implmentazione iniziare come leader" />
+-+    <option name="LAST_COMMIT_MESSAGE" value="Inizializzazione distribuita con i contratti comuni, modificato master e worker, master ora ha l'implmentazione iniziare come leader" />
+-   </component>
+- </project>
+-\ No newline at end of file
+Index: worker/prediction/shard_predictor.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nfrom typing import List\r\n\r\nimport numpy as np\r\n\r\nfrom worker.storage.artifact_store import ArtifactStore\r\n\r\n\r\nclass ShardPredictor:\r\n    \"\"\"\r\n    Handles prediction for a shard of trees.\r\n\r\n    Responsibilities:\r\n    - Load trained trees from artifact store\r\n    - Run predictions\r\n    - Aggregate results\r\n    \"\"\"\r\n\r\n    def __init__(self, artifact_store: ArtifactStore):\r\n        self.artifact_store = artifact_store\r\n\r\n    def predict(\r\n        self,\r\n        experiment_id: str,\r\n        tree_ids: List[str],\r\n        X: np.ndarray,\r\n    ) -> List[float]:\r\n\r\n        predictions_per_tree = []\r\n\r\n        for tree_id in tree_ids:\r\n            artifact_key = self._build_artifact_key(experiment_id, tree_id)\r\n\r\n            # Load model\r\n            model = self.artifact_store.load_tree_artifact(artifact_key)\r\n\r\n            # Predict\r\n            preds = model.predict(X)\r\n            predictions_per_tree.append(preds)\r\n\r\n        # Aggregate (majority voting or mean depending on task)\r\n        return self._aggregate(predictions_per_tree)\r\n\r\n    def _build_artifact_key(self, experiment_id: str, tree_id: str) -> str:\r\n        \"\"\"\r\n        Reconstructs the artifact key used during training.\r\n        Must match TreeArtifactWriter / paths.py logic.\r\n        \"\"\"\r\n        return f\"jobs/{experiment_id}/trees/{tree_id}.joblib\"\r\n\r\n    def _aggregate(self, predictions_per_tree: List[np.ndarray]) -> List[float]:\r\n        \"\"\"\r\n        Aggregation strategy:\r\n        - classification → majority vote\r\n        - regression → mean\r\n        \"\"\"\r\n\r\n        if not predictions_per_tree:\r\n            return []\r\n\r\n        # Stack predictions: shape (n_trees, n_samples)\r\n        stacked = np.vstack(predictions_per_tree)\r\n\r\n        # Majority vote (classification-like)\r\n        # You may adapt this depending on your task type\r\n        aggregated = []\r\n\r\n        for i in range(stacked.shape[1]):\r\n            column = stacked[:, i]\r\n            values, counts = np.unique(column, return_counts=True)\r\n            aggregated.append(values[np.argmax(counts)])\r\n\r\n        return aggregated
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/prediction/shard_predictor.py b/worker/prediction/shard_predictor.py
+--- a/worker/prediction/shard_predictor.py	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ b/worker/prediction/shard_predictor.py	(date 1775210837516)
+@@ -22,53 +22,52 @@
+ 
+     def predict(
+         self,
+-        experiment_id: str,
+-        tree_ids: List[str],
++        artifact_uris: List[str],
+         X: np.ndarray,
+-    ) -> List[float]:
++    ) -> np.ndarray:
++
++        if not artifact_uris:
++            raise ValueError("No artifact URIs provided for prediction")
+ 
+         predictions_per_tree = []
+ 
+-        for tree_id in tree_ids:
+-            artifact_key = self._build_artifact_key(experiment_id, tree_id)
++        # --------------------------------------------------
++        # Load + predict per tree
++        # --------------------------------------------------
++        for uri in artifact_uris:
+ 
+-            # Load model
+-            model = self.artifact_store.load_tree_artifact(artifact_key)
++            if not self.artifact_store.tree_artifact_exists(uri):
++                raise FileNotFoundError(f"Artifact not found: {uri}")
+ 
+-            # Predict
++            model = self.artifact_store.load_tree_artifact(uri)
++
+             preds = model.predict(X)
+             predictions_per_tree.append(preds)
+ 
+-        # Aggregate (majority voting or mean depending on task)
++        # --------------------------------------------------
++        # Aggregate predictions
++        # --------------------------------------------------
+         return self._aggregate(predictions_per_tree)
+ 
+-    def _build_artifact_key(self, experiment_id: str, tree_id: str) -> str:
+-        """
+-        Reconstructs the artifact key used during training.
+-        Must match TreeArtifactWriter / paths.py logic.
++    def _aggregate(self, predictions_per_tree: List[np.ndarray]) -> np.ndarray:
+         """
+-        return f"jobs/{experiment_id}/trees/{tree_id}.joblib"
++        Majority voting aggregation for classification.
+ 
+-    def _aggregate(self, predictions_per_tree: List[np.ndarray]) -> List[float]:
+-        """
+-        Aggregation strategy:
+-        - classification → majority vote
+-        - regression → mean
++        Shape:
++            predictions_per_tree: (n_trees, n_samples)
++        Returns:
++            (n_samples,)
+         """
+ 
+-        if not predictions_per_tree:
+-            return []
++        stacked = np.vstack(predictions_per_tree)  # (n_trees, n_samples)
+ 
+-        # Stack predictions: shape (n_trees, n_samples)
+-        stacked = np.vstack(predictions_per_tree)
++        n_samples = stacked.shape[1]
++        final_predictions = []
+ 
+-        # Majority vote (classification-like)
+-        # You may adapt this depending on your task type
+-        aggregated = []
+-
+-        for i in range(stacked.shape[1]):
++        for i in range(n_samples):
+             column = stacked[:, i]
++
+             values, counts = np.unique(column, return_counts=True)
+-            aggregated.append(values[np.argmax(counts)])
++            final_predictions.append(values[np.argmax(counts)])
+ 
+-        return aggregated
+\ No newline at end of file
++        return np.array(final_predictions)
+\ No newline at end of file
+Index: .idea/ProgSDCC&ML.iml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<module type=\"PYTHON_MODULE\" version=\"4\">\r\n  <component name=\"NewModuleRootManager\">\r\n    <content url=\"file://$MODULE_DIR$\">\r\n      <excludeFolder url=\"file://$MODULE_DIR$/.venv\" />\r\n    </content>\r\n    <orderEntry type=\"jdk\" jdkName=\"Python 3.13 (PythonProject1)\" jdkType=\"Python SDK\" />\r\n    <orderEntry type=\"sourceFolder\" forTests=\"false\" />\r\n  </component>\r\n</module>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/ProgSDCC&ML.iml b/.idea/ProgSDCC&ML.iml
+--- a/.idea/ProgSDCC&ML.iml	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ b/.idea/ProgSDCC&ML.iml	(date 1774896201753)
+@@ -4,7 +4,7 @@
+     <content url="file://$MODULE_DIR$">
+       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+     </content>
+-    <orderEntry type="jdk" jdkName="Python 3.13 (PythonProject1)" jdkType="Python SDK" />
++    <orderEntry type="jdk" jdkName="Python 3.13 (ProgettoSDCCeML)" jdkType="Python SDK" />
+     <orderEntry type="sourceFolder" forTests="false" />
+   </component>
+ </module>
+\ No newline at end of file
+Index: worker/training/shard_trainer.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nimport time\r\nfrom typing import List\r\n\r\nimport numpy as np\r\n\r\nfrom common.contracts import (\r\n    TrainingShard,\r\n    ShardTrainingResult,\r\n    TreeArtifactMetadata,\r\n)\r\n\r\nfrom worker.training.bootstrap_sampler import BootstrapSampler\r\nfrom worker.training.decision_tree_factory import DecisionTreeFactory\r\nfrom worker.training.tree_artifact_writer import TreeArtifactWriter\r\nfrom worker.progress.worker_progress_store import WorkerProgressStore\r\n\r\n\r\nclass ShardTrainer:\r\n    \"\"\"\r\n    Core del training lato worker.\r\n\r\n    Responsabilità:\r\n    - eseguire training shard\r\n    - delegare stato e idempotenza al WorkerProgressStore\r\n    \"\"\"\r\n\r\n    def __init__(\r\n        self,\r\n        bootstrap_sampler: BootstrapSampler,\r\n        tree_factory: DecisionTreeFactory,\r\n        artifact_writer: TreeArtifactWriter,\r\n        progress_store: WorkerProgressStore,\r\n    ):\r\n        self.bootstrap_sampler = bootstrap_sampler\r\n        self.tree_factory = tree_factory\r\n        self.artifact_writer = artifact_writer\r\n        self.progress_store = progress_store\r\n\r\n    def train(\r\n        self,\r\n        shard: TrainingShard,\r\n        X: np.ndarray,\r\n        y: np.ndarray,\r\n    ) -> ShardTrainingResult:\r\n\r\n        # Recupera stato dal progress store\r\n        task = self.progress_store.get_task(shard.task_id)\r\n\r\n        completed_tree_ids: List[str] = []\r\n        failed_tree_ids: List[str] = []\r\n\r\n        if task:\r\n            completed_tree_ids = list(task.get(\"completed_tree_ids\", []))\r\n            failed_tree_ids = list(task.get(\"failed_tree_ids\", []))\r\n\r\n        tree_artifacts: List[TreeArtifactMetadata] = []\r\n\r\n        for offset in range(shard.tree_count):\r\n            tree_index = shard.tree_start_index + offset\r\n            seed = shard.seed_base + tree_index\r\n\r\n            tree_id = f\"{shard.experiment_id}_tree_{tree_index}\"\r\n\r\n            # ✅ Idempotenza: skip se già completato\r\n            if tree_id in completed_tree_ids:\r\n                continue\r\n\r\n            try:\r\n                t0 = time.time()\r\n\r\n                # 1. bootstrap\r\n                indices = self.bootstrap_sampler.sample_indices(len(X), seed)\r\n                X_fit = X[indices]\r\n                y_fit = y[indices]\r\n\r\n                # 2. modello\r\n                model = self.tree_factory.create(\r\n                    max_depth=shard.forest_config.max_depth,\r\n                    min_samples_split=shard.forest_config.min_samples_split,\r\n                    min_samples_leaf=shard.forest_config.min_samples_leaf,\r\n                    max_features=shard.forest_config.max_features,\r\n                    seed=seed,\r\n                )\r\n\r\n                # 3. training\r\n                model.fit(X_fit, y_fit)\r\n\r\n                training_time = time.time() - t0\r\n\r\n                # 4. persistenza\r\n                meta = self.artifact_writer.write_tree(\r\n                    model=model,\r\n                    job_id=shard.job_id,\r\n                    experiment_id=shard.experiment_id,\r\n                    task_id=shard.task_id,\r\n                    tree_index=tree_index,\r\n                    seed=seed,\r\n                    training_time_seconds=training_time,\r\n                )\r\n\r\n                tree_artifacts.append(meta)\r\n\r\n                completed_tree_ids.append(meta.tree_id)\r\n\r\n                # \uD83D\uDC49 Aggiorna progress store (idempotenza centralizzata)\r\n                self.progress_store.update_progress(\r\n                    task_id=shard.task_id,\r\n                    shard_id=tree_index,\r\n                    progress=len(completed_tree_ids) / shard.tree_count,\r\n                )\r\n\r\n            except Exception:\r\n                failed_tree_ids.append(tree_id)\r\n\r\n                self.progress_store.fail_task(\r\n                    shard.task_id,\r\n                    error=f\"Tree {tree_id} failed\",\r\n                )\r\n\r\n        success = len(failed_tree_ids) == 0\r\n\r\n        if success:\r\n            self.progress_store.complete_task(shard.task_id)\r\n\r\n        return ShardTrainingResult(\r\n            task_id=shard.task_id,\r\n            attempt_id=shard.attempt_id,\r\n            worker_id=shard.assigned_worker_id,\r\n            success=success,\r\n            tree_artifacts=tree_artifacts,\r\n            completed_tree_ids=completed_tree_ids,\r\n            failed_tree_ids=failed_tree_ids,\r\n            completed_tree_count=len(completed_tree_ids),\r\n            failed_tree_count=len(failed_tree_ids),\r\n            error_message=None if success else \"Some trees failed\",\r\n            elapsed_time_seconds=0.0,\r\n        )
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/training/shard_trainer.py b/worker/training/shard_trainer.py
+--- a/worker/training/shard_trainer.py	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ b/worker/training/shard_trainer.py	(date 1775208006790)
+@@ -10,6 +10,7 @@
+     ShardTrainingResult,
+     TreeArtifactMetadata,
+ )
++from worker.storage.paths import tree_artifact_path
+ 
+ from worker.training.bootstrap_sampler import BootstrapSampler
+ from worker.training.decision_tree_factory import DecisionTreeFactory
+@@ -39,14 +40,20 @@
+         self.progress_store = progress_store
+ 
+     def train(
+-        self,
+-        shard: TrainingShard,
+-        X: np.ndarray,
+-        y: np.ndarray,
++            self,
++            shard: TrainingShard,
++            X: np.ndarray,
++            y: np.ndarray,
+     ) -> ShardTrainingResult:
+ 
+-        # Recupera stato dal progress store
+-        task = self.progress_store.get_task(shard.task_id)
++        job_id = shard.job_id
++        experiment_id = shard.experiment_id
++        task_id = shard.task_id
++
++        # --------------------------------------------------
++        # Stato persistente
++        # --------------------------------------------------
++        task = self.progress_store.get_task(job_id, experiment_id, task_id)
+ 
+         completed_tree_ids: List[str] = []
+         failed_tree_ids: List[str] = []
+@@ -57,16 +64,72 @@
+ 
+         tree_artifacts: List[TreeArtifactMetadata] = []
+ 
++        # --------------------------------------------------
++        # Loop alberi
++        # --------------------------------------------------
+         for offset in range(shard.tree_count):
+             tree_index = shard.tree_start_index + offset
+             seed = shard.seed_base + tree_index
+ 
+-            tree_id = f"{shard.experiment_id}_tree_{tree_index}"
++            tree_id = f"{experiment_id}_tree_{tree_index}"
+ 
+-            # ✅ Idempotenza: skip se già completato
++            artifact_key = tree_artifact_path(
++                job_id=job_id,
++                experiment_id=experiment_id,
++                tree_index=tree_index,
++            )
++
++            # --------------------------------------------------
++            # ✅ Idempotenza 1: snapshot (progress store)
++            # --------------------------------------------------
+             if tree_id in completed_tree_ids:
+                 continue
+ 
++            # --------------------------------------------------
++            # ✅ Idempotenza 2: storage (source of truth)
++            # --------------------------------------------------
++            if self.artifact_writer.store.tree_artifact_exists(artifact_key):
++                # Artifact già presente → consideriamo il tree completato
++
++                completed_tree_ids.append(tree_id)
++
++                # Aggiorna progress snapshot (recupero implicito)
++                self.progress_store.update_progress(
++                    job_id=job_id,
++                    experiment_id=experiment_id,
++                    task_id=task_id,
++                    shard_id=tree_index,
++                    progress=len(completed_tree_ids) / shard.tree_count,
++                )
++
++                continue
++
++            # --------------------------------------------------
++            # ✅ Idempotenza 3: artifact già esistente
++            # --------------------------------------------------
++            artifact_key = tree_artifact_path(
++                job_id=job_id,
++                experiment_id=experiment_id,
++                tree_index=tree_index,
++            )
++
++            if self.artifact_writer.store.exists(artifact_key):
++                completed_tree_ids.append(tree_id)
++
++                # opzionale: aggiornare progress
++                self.progress_store.update_progress(
++                    job_id=job_id,
++                    experiment_id=experiment_id,
++                    task_id=task_id,
++                    shard_id=tree_index,
++                    progress=len(completed_tree_ids) / shard.tree_count,
++                )
++
++                continue
++
++            # --------------------------------------------------
++            # TRAINING
++            # --------------------------------------------------
+             try:
+                 t0 = time.time()
+ 
+@@ -92,21 +155,24 @@
+                 # 4. persistenza
+                 meta = self.artifact_writer.write_tree(
+                     model=model,
+-                    job_id=shard.job_id,
+-                    experiment_id=shard.experiment_id,
+-                    task_id=shard.task_id,
++                    job_id=job_id,
++                    experiment_id=experiment_id,
++                    task_id=task_id,
+                     tree_index=tree_index,
+                     seed=seed,
+                     training_time_seconds=training_time,
+                 )
+ 
+                 tree_artifacts.append(meta)
+-
+                 completed_tree_ids.append(meta.tree_id)
+ 
+-                # 👉 Aggiorna progress store (idempotenza centralizzata)
++                # --------------------------------------------------
++                # Progress persistente
++                # --------------------------------------------------
+                 self.progress_store.update_progress(
+-                    task_id=shard.task_id,
++                    job_id=job_id,
++                    experiment_id=experiment_id,
++                    task_id=task_id,
+                     shard_id=tree_index,
+                     progress=len(completed_tree_ids) / shard.tree_count,
+                 )
+@@ -114,18 +180,29 @@
+             except Exception:
+                 failed_tree_ids.append(tree_id)
+ 
++                # ⚠️ NON blocchiamo tutto il task subito
++                # (puoi migliorarlo in step successivi)
+                 self.progress_store.fail_task(
+-                    shard.task_id,
++                    job_id=job_id,
++                    experiment_id=experiment_id,
++                    task_id=task_id,
+                     error=f"Tree {tree_id} failed",
+                 )
+ 
++        # --------------------------------------------------
++        # Finalizzazione
++        # --------------------------------------------------
+         success = len(failed_tree_ids) == 0
+ 
+         if success:
+-            self.progress_store.complete_task(shard.task_id)
++            self.progress_store.complete_task(
++                job_id=job_id,
++                experiment_id=experiment_id,
++                task_id=task_id,
++            )
+ 
+         return ShardTrainingResult(
+-            task_id=shard.task_id,
++            task_id=task_id,
+             attempt_id=shard.attempt_id,
+             worker_id=shard.assigned_worker_id,
+             success=success,
+Index: worker/worker_service.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import rf_v2_pb2 as rf_pb2\r\nimport rf_v2_pb2_grpc as rf_pb2_grpc\r\n\r\nfrom worker.utils.proto_utils import matrix_from_proto\r\n\r\n\r\nclass WorkerService(rf_pb2_grpc.WorkerServiceServicer):\r\n\r\n    def __init__(\r\n        self,\r\n        config,\r\n        state,\r\n        shard_trainer,\r\n        shard_predictor\r\n    ):\r\n        self.config = config\r\n        self.state = state\r\n\r\n        self.shard_trainer = shard_trainer\r\n        self.shard_predictor = shard_predictor\r\n\r\n    # --------------------------------------------------\r\n    # TRAIN\r\n    # --------------------------------------------------\r\n    def TrainShard(self, request, context):\r\n        # 1. Update worker state\r\n        self.state.on_task_start(request.task_id)\r\n\r\n        try:\r\n            # 2. Delegate completely to trainer\r\n            result = self.shard_trainer.train(request)\r\n\r\n            # 3. Update state\r\n            self.state.on_task_success(request.task_id)\r\n\r\n            return rf_pb2.TrainShardResponse(\r\n                task_id=result.task_id,\r\n                attempt_id=request.attempt_id,\r\n                worker_id=self.config.worker_id,\r\n                success=True,\r\n                error=\"\",\r\n                artifacts=result.artifacts,\r\n                completed_tree_ids=result.completed_tree_ids,\r\n                failed_tree_ids=result.failed_tree_ids,\r\n                elapsed_time_seconds=result.elapsed_time_seconds,\r\n            )\r\n\r\n        except Exception as exc:\r\n            # 4. Failure handling\r\n            self.state.on_task_failure(request.task_id, str(exc))\r\n\r\n            return rf_pb2.TrainShardResponse(\r\n                task_id=request.task_id,\r\n                attempt_id=request.attempt_id,\r\n                worker_id=self.config.worker_id,\r\n                success=False,\r\n                error=str(exc),\r\n                artifacts=[],\r\n                completed_tree_ids=[],\r\n                failed_tree_ids=[],\r\n                elapsed_time_seconds=0.0,\r\n            )\r\n\r\n        finally:\r\n            self.state.on_task_end(request.task_id)\r\n\r\n    # --------------------------------------------------\r\n    # PREDICT\r\n    # --------------------------------------------------\r\n    def PredictShard(self, request, context):\r\n        self.state.on_task_start(request.model_id)\r\n\r\n        try:\r\n            # Delegate prediction entirely\r\n            result = self.shard_predictor.predict(request)\r\n\r\n            self.state.on_task_success(request.model_id)\r\n\r\n            return rf_pb2.PredictShardResponse(\r\n                worker_id=self.config.worker_id,\r\n                success=True,\r\n                error=\"\",\r\n                values=result.values,\r\n                n_rows=result.n_rows,\r\n                n_cols=result.n_cols,\r\n            )\r\n\r\n        except Exception as exc:\r\n            self.state.on_task_failure(request.model_id, str(exc))\r\n\r\n            return rf_pb2.PredictShardResponse(\r\n                worker_id=self.config.worker_id,\r\n                success=False,\r\n                error=str(exc),\r\n                values=[],\r\n                n_rows=0,\r\n                n_cols=0,\r\n            )\r\n\r\n        finally:\r\n            self.state.on_task_end(request.model_id)\r\n\r\n    # --------------------------------------------------\r\n    # OPTIONAL: heartbeat / status\r\n    # --------------------------------------------------\r\n    def GetStatus(self, request, context):\r\n        return rf_pb2.HeartbeatResponse(ok=True)
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/worker_service.py b/worker/worker_service.py
+--- a/worker/worker_service.py	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ b/worker/worker_service.py	(date 1774954421908)
+@@ -11,27 +11,58 @@
+         config,
+         state,
+         shard_trainer,
+-        shard_predictor
++        shard_predictor,
++        progress_store,
+     ):
+         self.config = config
+         self.state = state
+ 
+         self.shard_trainer = shard_trainer
+         self.shard_predictor = shard_predictor
++        self.progress_store = progress_store
+ 
+     # --------------------------------------------------
+     # TRAIN
+     # --------------------------------------------------
+     def TrainShard(self, request, context):
+-        # 1. Update worker state
+-        self.state.on_task_start(request.task_id)
++        job_id = request.job_id
++        experiment_id = request.experiment_id
++        task_id = request.task_id
++
++        # Worker state
++        self.state.on_task_start(task_id)
+ 
+         try:
+-            # 2. Delegate completely to trainer
++            status = self.progress_store.start_task(
++                job_id,
++                experiment_id,
++                task_id,
++                metadata={
++                    "attempt_id": request.attempt_id,
++                    "worker_id": self.config.worker_id,
++                },
++            )
++
++            # 👉 Idempotenza forte: task già completato → skip totale
++            if status == "ALREADY_COMPLETED":
++                existing = self.progress_store.get_task(job_id, experiment_id, task_id)
++
++                return rf_pb2.TrainShardResponse(
++                    task_id=task_id,
++                    attempt_id=request.attempt_id,
++                    worker_id=self.config.worker_id,
++                    success=True,
++                    error="",
++                    artifacts=[],
++                    completed_tree_ids=existing.get("completed_tree_ids", []),
++                    failed_tree_ids=existing.get("failed_tree_ids", []),
++                    elapsed_time_seconds=0.0,
++                )
++
++            # Delegate training
+             result = self.shard_trainer.train(request)
+ 
+-            # 3. Update state
+-            self.state.on_task_success(request.task_id)
++            self.state.on_task_success(task_id)
+ 
+             return rf_pb2.TrainShardResponse(
+                 task_id=result.task_id,
+@@ -46,11 +77,18 @@
+             )
+ 
+         except Exception as exc:
+-            # 4. Failure handling
+-            self.state.on_task_failure(request.task_id, str(exc))
++            self.state.on_task_failure(task_id, str(exc))
++
++            # persist failure
++            self.progress_store.fail_task(
++                job_id,
++                experiment_id,
++                task_id,
++                error=str(exc),
++            )
+ 
+             return rf_pb2.TrainShardResponse(
+-                task_id=request.task_id,
++                task_id=task_id,
+                 attempt_id=request.attempt_id,
+                 worker_id=self.config.worker_id,
+                 success=False,
+@@ -62,19 +100,22 @@
+             )
+ 
+         finally:
+-            self.state.on_task_end(request.task_id)
++            self.state.on_task_end(task_id)
+ 
+     # --------------------------------------------------
+     # PREDICT
+     # --------------------------------------------------
+     def PredictShard(self, request, context):
+-        self.state.on_task_start(request.model_id)
++        model_id = request.model_id
++
++        self.state.on_task_start(model_id)
+ 
+         try:
+-            # Delegate prediction entirely
+-            result = self.shard_predictor.predict(request)
++            X = matrix_from_proto(request.features)
+ 
+-            self.state.on_task_success(request.model_id)
++            result = self.shard_predictor.predict(request, X)
++
++            self.state.on_task_success(model_id)
+ 
+             return rf_pb2.PredictShardResponse(
+                 worker_id=self.config.worker_id,
+@@ -86,7 +127,7 @@
+             )
+ 
+         except Exception as exc:
+-            self.state.on_task_failure(request.model_id, str(exc))
++            self.state.on_task_failure(model_id, str(exc))
+ 
+             return rf_pb2.PredictShardResponse(
+                 worker_id=self.config.worker_id,
+@@ -98,10 +139,10 @@
+             )
+ 
+         finally:
+-            self.state.on_task_end(request.model_id)
++            self.state.on_task_end(model_id)
+ 
+     # --------------------------------------------------
+-    # OPTIONAL: heartbeat / status
++    # STATUS
+     # --------------------------------------------------
+     def GetStatus(self, request, context):
+-        return rf_pb2.HeartbeatResponse(ok=True)
+\ No newline at end of file
++        return rf_pb2.HeartbeatResponse(ok=True)
+Index: worker/storage/paths.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>def tree_artifact_path(job_id: str, experiment_id: str, tree_index: int) -> str:\r\n    return f\"jobs/{job_id}/experiments/{experiment_id}/trees/tree_{tree_index}.joblib\"\r\n\r\n\r\ndef worker_snapshot_path(job_id: str, experiment_id: str, worker_id: str) -> str:\r\n    return f\"jobs/{job_id}/experiments/{experiment_id}/snapshots/worker_{worker_id}.json\"\r\n\r\n\r\ndef manifest_path(job_id: str, experiment_id: str) -> str:\r\n    return f\"jobs/{job_id}/experiments/{experiment_id}/manifests/manifest.json\"\r\n\r\n\r\ndef dataset_path(job_id: str, dataset_name: str) -> str:\r\n    return f\"jobs/{job_id}/datasets/{dataset_name}\"\r\n\r\ndef tree_metadata_path(job_id: str, experiment_id: str, tree_index: int) -> str:\r\n    return f\"jobs/{job_id}/experiments/{experiment_id}/trees/tree_{tree_index}.json\"\r\n\r\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/storage/paths.py b/worker/storage/paths.py
+--- a/worker/storage/paths.py	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ b/worker/storage/paths.py	(date 1774896136434)
+@@ -1,15 +1,12 @@
+ def tree_artifact_path(job_id: str, experiment_id: str, tree_index: int) -> str:
+     return f"jobs/{job_id}/experiments/{experiment_id}/trees/tree_{tree_index}.joblib"
+ 
+-
+ def worker_snapshot_path(job_id: str, experiment_id: str, worker_id: str) -> str:
+     return f"jobs/{job_id}/experiments/{experiment_id}/snapshots/worker_{worker_id}.json"
+ 
+-
+ def manifest_path(job_id: str, experiment_id: str) -> str:
+     return f"jobs/{job_id}/experiments/{experiment_id}/manifests/manifest.json"
+ 
+-
+ def dataset_path(job_id: str, dataset_name: str) -> str:
+     return f"jobs/{job_id}/datasets/{dataset_name}"
+ 
+Index: worker/progress/worker_progress_store.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from pathlib import Path\r\nfrom typing import Dict, Any, Optional\r\nfrom worker.utils.io_utils import atomic_json_write\r\nfrom worker.utils.time_utils import current_time_seconds\r\nimport json\r\n\r\n\r\nclass WorkerProgressStore:\r\n    \"\"\"\r\n    Persistent store for tracking worker progress and enabling fault tolerance.\r\n    \"\"\"\r\n\r\n    def __init__(self, storage_path: Path):\r\n        self.storage_path = Path(storage_path)\r\n        self.state: Dict[str, Any] = {\r\n            \"tasks\": {}\r\n        }\r\n\r\n        self._load()\r\n\r\n    # ------------------------\r\n    # Internal persistence\r\n    # ------------------------\r\n\r\n    def _load(self) -> None:\r\n        if self.storage_path.exists():\r\n            with open(self.storage_path, \"r\", encoding=\"utf-8\") as f:\r\n                self.state = json.load(f)\r\n\r\n    def _persist(self) -> None:\r\n        atomic_json_write(self.storage_path, self.state)\r\n\r\n    # ------------------------\r\n    # Task management\r\n    # ------------------------\r\n    def load(self) -> None:\r\n        self._load()\r\n\r\n    def save(self) -> None:\r\n        self._persist()\r\n\r\n    def start_task(self, task_id: str, metadata: Dict[str, Any]) -> None:\r\n        self.state[\"tasks\"][task_id] = {\r\n            \"status\": \"RUNNING\",\r\n            \"metadata\": metadata,\r\n            \"progress\": 0.0,\r\n            \"shards_completed\": [],\r\n            \"last_update\": current_time_seconds()\r\n        }\r\n        self._persist()\r\n\r\n    def update_progress(self, task_id: str, shard_id: int, progress: float) -> None:\r\n        task = self._get_task(task_id)\r\n\r\n        if shard_id not in task[\"shards_completed\"]:\r\n            task[\"shards_completed\"].append(shard_id)\r\n\r\n        task[\"progress\"] = progress\r\n        task[\"last_update\"] = current_time_seconds()\r\n\r\n        self._persist()\r\n\r\n    def complete_task(self, task_id: str) -> None:\r\n        task = self._get_task(task_id)\r\n        task[\"status\"] = \"COMPLETED\"\r\n        task[\"progress\"] = 1.0\r\n        task[\"last_update\"] = current_time_seconds()\r\n        self._persist()\r\n\r\n    def fail_task(self, task_id: str, error: str) -> None:\r\n        task = self._get_task(task_id)\r\n        task[\"status\"] = \"FAILED\"\r\n        task[\"error\"] = error\r\n        task[\"last_update\"] = current_time_seconds()\r\n        self._persist()\r\n\r\n    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:\r\n        return self.state[\"tasks\"].get(task_id)\r\n\r\n    def _get_task(self, task_id: str) -> Dict[str, Any]:\r\n        if task_id not in self.state[\"tasks\"]:\r\n            raise KeyError(f\"Task {task_id} not found\")\r\n        return self.state[\"tasks\"][task_id]\r\n\r\n    # ------------------------\r\n    # Recovery helpers\r\n    # ------------------------\r\n\r\n    def get_running_tasks(self):\r\n        return {\r\n            tid: t for tid, t in self.state[\"tasks\"].items()\r\n            if t[\"status\"] == \"RUNNING\"\r\n        }\r\n\r\n    def get_completed_shards(self, task_id: str):\r\n        task = self._get_task(task_id)\r\n        return set(task.get(\"shards_completed\", []))
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/progress/worker_progress_store.py b/worker/progress/worker_progress_store.py
+--- a/worker/progress/worker_progress_store.py	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ b/worker/progress/worker_progress_store.py	(date 1775134872422)
+@@ -1,55 +1,122 @@
+ from pathlib import Path
+ from typing import Dict, Any, Optional
++import json
++
+ from worker.utils.io_utils import atomic_json_write
+ from worker.utils.time_utils import current_time_seconds
+-import json
++from worker.storage.paths import worker_snapshot_path
+ 
+ 
+ class WorkerProgressStore:
+     """
+-    Persistent store for tracking worker progress and enabling fault tolerance.
++    Persistent store for tracking worker progress per job/experiment.
++
++    Now:
++    - one snapshot per (job_id, experiment_id, worker_id)
++    - idempotent start_task
+     """
+ 
+-    def __init__(self, storage_path: Path):
+-        self.storage_path = Path(storage_path)
++    def __init__(self, base_storage_dir: Path, worker_id: str):
++        self.base_storage_dir = Path(base_storage_dir)
++        self.worker_id = worker_id
++
++        # in-memory state keyed by (job_id, experiment_id)
+         self.state: Dict[str, Any] = {
+             "tasks": {}
+         }
+ 
+-        self._load()
+-
+     # ------------------------
+-    # Internal persistence
++    # Internal helpers
+     # ------------------------
+ 
+-    def _load(self) -> None:
+-        if self.storage_path.exists():
+-            with open(self.storage_path, "r", encoding="utf-8") as f:
++    def _get_snapshot_path(self, job_id: str, experiment_id: str) -> Path:
++        relative_path = worker_snapshot_path(job_id, experiment_id, self.worker_id)
++        return self.base_storage_dir / relative_path
++
++    def _load_snapshot(self, job_id: str, experiment_id: str) -> None:
++        path = self._get_snapshot_path(job_id, experiment_id)
++
++        if path.exists():
++            with open(path, "r", encoding="utf-8") as f:
+                 self.state = json.load(f)
++        else:
++            self.state = {"tasks": {}}
++
++    def _persist_snapshot(self, job_id: str, experiment_id: str) -> None:
++        path = self._get_snapshot_path(job_id, experiment_id)
++        atomic_json_write(path, self.state)
+ 
+-    def _persist(self) -> None:
+-        atomic_json_write(self.storage_path, self.state)
++    # ------------------------
++    # Lifecycle per job
++    # ------------------------
++
++    def load(self, job_id: str, experiment_id: str) -> None:
++        self._load_snapshot(job_id, experiment_id)
++
++    def save(self, job_id: str, experiment_id: str) -> None:
++        self._persist_snapshot(job_id, experiment_id)
+ 
+     # ------------------------
+-    # Task management
++    # Task management (IDEMPOTENT)
+     # ------------------------
+-    def load(self) -> None:
+-        self._load()
++
++    def start_task(
++        self,
++        job_id: str,
++        experiment_id: str,
++        task_id: str,
++        metadata: Dict[str, Any]
++    ) -> str:
++        """
++        Idempotent start.
+ 
+-    def save(self) -> None:
+-        self._persist()
++        Returns:
++            - "STARTED"
++            - "RETRY"
++            - "ALREADY_COMPLETED"
++        """
++        self._load_snapshot(job_id, experiment_id)
+ 
+-    def start_task(self, task_id: str, metadata: Dict[str, Any]) -> None:
++        existing = self.state["tasks"].get(task_id)
++        attempt_id = metadata.get("attempt_id")
++
++        if existing:
++            # 🔴 Task già completato → idempotenza forte
++            if existing.get("status") == "COMPLETED":
++                return "ALREADY_COMPLETED"
++
++            # 🔴 Stesso attempt → retry
++            if existing.get("attempt_id") == attempt_id:
++                return "RETRY"
++
++            # 🔴 Nuovo attempt → overwrite controllato
++            # (puoi in futuro loggare o gestire diversamente)
++
++        # Nuovo task
+         self.state["tasks"][task_id] = {
+             "status": "RUNNING",
++            "attempt_id": attempt_id,
+             "metadata": metadata,
+             "progress": 0.0,
+             "shards_completed": [],
++            "completed_tree_ids": [],
++            "failed_tree_ids": [],
+             "last_update": current_time_seconds()
+         }
+-        self._persist()
++
++        self._persist_snapshot(job_id, experiment_id)
++        return "STARTED"
+ 
+-    def update_progress(self, task_id: str, shard_id: int, progress: float) -> None:
++    def update_progress(
++        self,
++        job_id: str,
++        experiment_id: str,
++        task_id: str,
++        shard_id: int,
++        progress: float
++    ) -> None:
++        self._load_snapshot(job_id, experiment_id)
++
+         task = self._get_task(task_id)
+ 
+         if shard_id not in task["shards_completed"]:
+@@ -58,23 +125,34 @@
+         task["progress"] = progress
+         task["last_update"] = current_time_seconds()
+ 
+-        self._persist()
++        self._persist_snapshot(job_id, experiment_id)
+ 
+-    def complete_task(self, task_id: str) -> None:
++    def complete_task(self, job_id: str, experiment_id: str, task_id: str) -> None:
++        self._load_snapshot(job_id, experiment_id)
++
+         task = self._get_task(task_id)
+         task["status"] = "COMPLETED"
+         task["progress"] = 1.0
+         task["last_update"] = current_time_seconds()
+-        self._persist()
++
++        self._persist_snapshot(job_id, experiment_id)
+ 
+-    def fail_task(self, task_id: str, error: str) -> None:
++    def fail_task(self, job_id: str, experiment_id: str, task_id: str, error: str) -> None:
++        self._load_snapshot(job_id, experiment_id)
++
+         task = self._get_task(task_id)
+         task["status"] = "FAILED"
+         task["error"] = error
+         task["last_update"] = current_time_seconds()
+-        self._persist()
++
++        self._persist_snapshot(job_id, experiment_id)
+ 
+-    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
++    # ------------------------
++    # Queries
++    # ------------------------
++
++    def get_task(self, job_id: str, experiment_id: str, task_id: str) -> Optional[Dict[str, Any]]:
++        self._load_snapshot(job_id, experiment_id)
+         return self.state["tasks"].get(task_id)
+ 
+     def _get_task(self, task_id: str) -> Dict[str, Any]:
+@@ -82,16 +160,15 @@
+             raise KeyError(f"Task {task_id} not found")
+         return self.state["tasks"][task_id]
+ 
+-    # ------------------------
+-    # Recovery helpers
+-    # ------------------------
++    def get_running_tasks(self, job_id: str, experiment_id: str):
++        self._load_snapshot(job_id, experiment_id)
+ 
+-    def get_running_tasks(self):
+         return {
+             tid: t for tid, t in self.state["tasks"].items()
+             if t["status"] == "RUNNING"
+         }
+ 
+-    def get_completed_shards(self, task_id: str):
++    def get_completed_shards(self, job_id: str, experiment_id: str, task_id: str):
++        self._load_snapshot(job_id, experiment_id)
+         task = self._get_task(task_id)
+         return set(task.get("shards_completed", []))
+\ No newline at end of file
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"BufProjectSettings\">\r\n    <option name=\"bufCLIPath\" value=\"$ brew install bufbuild/buf/buf\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"aggiunto commento\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/common/repositories.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/common/repositories.py\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/master.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/master.py\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;jadepics&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\">{\r\n  &quot;selectedUrlAndAccountId&quot;: {\r\n    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,\r\n    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;\r\n  }\r\n}</component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 8\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\">{\r\n  &quot;keyToString&quot;: {\r\n    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,\r\n    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,\r\n    &quot;git-widget-placeholder&quot;: &quot;master&quot;,\r\n    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,\r\n    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,\r\n    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,\r\n    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,\r\n    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;\r\n  }\r\n}</component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"CopyFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\" />\r\n    </key>\r\n    <key name=\"MoveFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\worker\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"\" />\r\n      <created>1772718028304</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1772718028304</updated>\r\n      <workItem from=\"1774557139933\" duration=\"1949000\" />\r\n      <workItem from=\"1774559557015\" duration=\"480000\" />\r\n      <workItem from=\"1774600460605\" duration=\"10626000\" />\r\n      <workItem from=\"1774694994766\" duration=\"3422000\" />\r\n      <workItem from=\"1774720403281\" duration=\"207000\" />\r\n      <workItem from=\"1774730844650\" duration=\"5746000\" />\r\n    </task>\r\n    <task id=\"LOCAL-00001\" summary=\"First commit\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772718604332</created>\r\n      <option name=\"number\" value=\"00001\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772718604332</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00002\" summary=\"Introduzione artifact_store, filesystem_stoere e paths\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774605271956</created>\r\n      <option name=\"number\" value=\"00002\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00002\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774605271956</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00003\" summary=\"refactoring worker.py e paths.py\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774698083683</created>\r\n      <option name=\"number\" value=\"00003\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00003\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774698083683</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00004\" summary=\"aggiunto commento\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774875188528</created>\r\n      <option name=\"number\" value=\"00004\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00004\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774875188528</updated>\r\n    </task>\r\n    <option name=\"localTasksCounter\" value=\"5\" />\r\n    <servers />\r\n  </component>\r\n  <component name=\"TypeScriptGeneratedFilesManager\">\r\n    <option name=\"version\" value=\"3\" />\r\n  </component>\r\n  <component name=\"VcsManagerConfiguration\">\r\n    <MESSAGE value=\"First commit\" />\r\n    <MESSAGE value=\"Introduzione artifact_store, filesystem_stoere e paths\" />\r\n    <MESSAGE value=\"refactoring worker.py e paths.py\" />\r\n    <MESSAGE value=\"aggiunto commento\" />\r\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"aggiunto commento\" />\r\n  </component>\r\n  <component name=\"github-copilot-workspace\">\r\n    <instructionFileLocations>\r\n      <option value=\".github/instructions\" />\r\n    </instructionFileLocations>\r\n    <promptFileLocations>\r\n      <option value=\".github/prompts\" />\r\n    </promptFileLocations>\r\n  </component>\r\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision 94251de26078b618573cba8d65aaeaf61d0bc1fc)
++++ b/.idea/workspace.xml	(date 1775214211300)
+@@ -7,10 +7,16 @@
+     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
+   </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="aggiunto commento">
++    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="refactoring worker.py e paths.py">
++      <change beforePath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08_[Changes]/shelved.patch" beforeDir="false" />
++      <change beforePath="$PROJECT_DIR$/.idea/shelf/Uncommitted_changes_before_Update_at_26_03_2026_19_08__Changes_.xml" beforeDir="false" />
+       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/common/repositories.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/repositories.py" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/prediction/shard_predictor.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/prediction/shard_predictor.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/progress/worker_progress_store.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/progress/worker_progress_store.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/storage/paths.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/storage/paths.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/training/shard_trainer.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/training/shard_trainer.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/worker_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/worker_service.py" afterDir="false" />
+     </list>
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+@@ -35,8 +41,8 @@
+ }</component>
+   <component name="GithubPullRequestsUISettings">{
+   &quot;selectedUrlAndAccountId&quot;: {
+-    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,
+-    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
++    &quot;url&quot;: &quot;https://github.com/jadepics/ProgettoSDCCeML.git&quot;,
++    &quot;accountId&quot;: &quot;64b32a3e-6402-44ac-8316-64089203d618&quot;
+   }
+ }</component>
+   <component name="ProjectColorInfo">{
+@@ -58,6 +64,7 @@
+     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+     &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+     &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
++    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+     &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+     &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+     &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,
+@@ -81,7 +88,8 @@
+   <component name="SharedIndexes">
+     <attachedChunks>
+       <set>
+-        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
++        <option value="bundled-js-predefined-d6986cc7102b-3bd3a6803838-JavaScript-PY-261.22158.340" />
++        <option value="bundled-python-sdk-b63d5a1f7c97-b61e75351b1f-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.22158.340" />
+       </set>
+     </attachedChunks>
+   </component>
+@@ -98,6 +106,12 @@
+       <workItem from="1774694994766" duration="3422000" />
+       <workItem from="1774720403281" duration="207000" />
+       <workItem from="1774730844650" duration="5746000" />
++      <workItem from="1774949962573" duration="4902000" />
++      <workItem from="1774960556016" duration="472000" />
++      <workItem from="1774961811572" duration="1186000" />
++      <workItem from="1775125599288" duration="11000" />
++      <workItem from="1775127139039" duration="6722000" />
++      <workItem from="1775202485646" duration="6903000" />
+     </task>
+     <task id="LOCAL-00001" summary="First commit">
+       <option name="closed" value="true" />
+@@ -123,15 +137,7 @@
+       <option name="project" value="LOCAL" />
+       <updated>1774698083683</updated>
+     </task>
+-    <task id="LOCAL-00004" summary="aggiunto commento">
+-      <option name="closed" value="true" />
+-      <created>1774875188528</created>
+-      <option name="number" value="00004" />
+-      <option name="presentableId" value="LOCAL-00004" />
+-      <option name="project" value="LOCAL" />
+-      <updated>1774875188528</updated>
+-    </task>
+-    <option name="localTasksCounter" value="5" />
++    <option name="localTasksCounter" value="4" />
+     <servers />
+   </component>
+   <component name="TypeScriptGeneratedFilesManager">
+@@ -141,8 +147,7 @@
+     <MESSAGE value="First commit" />
+     <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
+     <MESSAGE value="refactoring worker.py e paths.py" />
+-    <MESSAGE value="aggiunto commento" />
+-    <option name="LAST_COMMIT_MESSAGE" value="aggiunto commento" />
++    <option name="LAST_COMMIT_MESSAGE" value="refactoring worker.py e paths.py" />
+   </component>
+   <component name="github-copilot-workspace">
+     <instructionFileLocations>

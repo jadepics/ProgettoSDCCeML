@@ -11,27 +11,58 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
         config,
         state,
         shard_trainer,
-        shard_predictor
+        shard_predictor,
+        progress_store,
     ):
         self.config = config
         self.state = state
 
         self.shard_trainer = shard_trainer
         self.shard_predictor = shard_predictor
+        self.progress_store = progress_store
 
     # --------------------------------------------------
     # TRAIN
     # --------------------------------------------------
     def TrainShard(self, request, context):
-        # 1. Update worker state
-        self.state.on_task_start(request.task_id)
+        job_id = request.job_id
+        experiment_id = request.experiment_id
+        task_id = request.task_id
+
+        # Worker state
+        self.state.on_task_start(task_id)
 
         try:
-            # 2. Delegate completely to trainer
+            status = self.progress_store.start_task(
+                job_id,
+                experiment_id,
+                task_id,
+                metadata={
+                    "attempt_id": request.attempt_id,
+                    "worker_id": self.config.worker_id,
+                },
+            )
+
+            # 👉 Idempotenza forte: task già completato → skip totale
+            if status == "ALREADY_COMPLETED":
+                existing = self.progress_store.get_task(job_id, experiment_id, task_id)
+
+                return rf_pb2.TrainShardResponse(
+                    task_id=task_id,
+                    attempt_id=request.attempt_id,
+                    worker_id=self.config.worker_id,
+                    success=True,
+                    error="",
+                    artifacts=[],
+                    completed_tree_ids=existing.get("completed_tree_ids", []),
+                    failed_tree_ids=existing.get("failed_tree_ids", []),
+                    elapsed_time_seconds=0.0,
+                )
+
+            # Delegate training
             result = self.shard_trainer.train(request)
 
-            # 3. Update state
-            self.state.on_task_success(request.task_id)
+            self.state.on_task_success(task_id)
 
             return rf_pb2.TrainShardResponse(
                 task_id=result.task_id,
@@ -46,11 +77,18 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             )
 
         except Exception as exc:
-            # 4. Failure handling
-            self.state.on_task_failure(request.task_id, str(exc))
+            self.state.on_task_failure(task_id, str(exc))
+
+            # persist failure
+            self.progress_store.fail_task(
+                job_id,
+                experiment_id,
+                task_id,
+                error=str(exc),
+            )
 
             return rf_pb2.TrainShardResponse(
-                task_id=request.task_id,
+                task_id=task_id,
                 attempt_id=request.attempt_id,
                 worker_id=self.config.worker_id,
                 success=False,
@@ -62,19 +100,22 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             )
 
         finally:
-            self.state.on_task_end(request.task_id)
+            self.state.on_task_end(task_id)
 
     # --------------------------------------------------
     # PREDICT
     # --------------------------------------------------
     def PredictShard(self, request, context):
-        self.state.on_task_start(request.model_id)
+        model_id = request.model_id
+
+        self.state.on_task_start(model_id)
 
         try:
-            # Delegate prediction entirely
-            result = self.shard_predictor.predict(request)
+            X = matrix_from_proto(request.features)
 
-            self.state.on_task_success(request.model_id)
+            result = self.shard_predictor.predict(request, X)
+
+            self.state.on_task_success(model_id)
 
             return rf_pb2.PredictShardResponse(
                 worker_id=self.config.worker_id,
@@ -86,7 +127,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             )
 
         except Exception as exc:
-            self.state.on_task_failure(request.model_id, str(exc))
+            self.state.on_task_failure(model_id, str(exc))
 
             return rf_pb2.PredictShardResponse(
                 worker_id=self.config.worker_id,
@@ -98,10 +139,10 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             )
 
         finally:
-            self.state.on_task_end(request.model_id)
+            self.state.on_task_end(model_id)
 
     # --------------------------------------------------
-    # OPTIONAL: heartbeat / status
+    # STATUS
     # --------------------------------------------------
     def GetStatus(self, request, context):
         return rf_pb2.HeartbeatResponse(ok=True)

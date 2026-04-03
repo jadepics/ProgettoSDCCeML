@@ -1,0 +1,198 @@
+Index: worker/storage/paths.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>def tree_artifact_path(job_id: str, experiment_id: str, tree_index: int) -> str:\r\n    return f\"jobs/{job_id}/experiments/{experiment_id}/trees/tree_{tree_index}.joblib\"\r\n\r\n\r\ndef worker_snapshot_path(job_id: str, experiment_id: str, worker_id: str) -> str:\r\n    return f\"jobs/{job_id}/experiments/{experiment_id}/snapshots/worker_{worker_id}.json\"\r\n\r\n\r\ndef manifest_path(job_id: str, experiment_id: str) -> str:\r\n    return f\"jobs/{job_id}/experiments/{experiment_id}/manifests/manifest.json\"\r\n\r\n\r\ndef dataset_path(job_id: str, dataset_name: str) -> str:\r\n    return f\"jobs/{job_id}/datasets/{dataset_name}\"\r\n\r\ndef tree_metadata_path(job_id: str, experiment_id: str, tree_index: int) -> str:\r\n    return f\"jobs/{job_id}/experiments/{experiment_id}/trees/tree_{tree_index}.json\"\r\n\r\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/storage/paths.py b/worker/storage/paths.py
+--- a/worker/storage/paths.py	(revision 81b05a57bb1e93d48dc548c3ab86c868eabd5278)
++++ b/worker/storage/paths.py	(date 1774879396092)
+@@ -1,15 +1,12 @@
+ def tree_artifact_path(job_id: str, experiment_id: str, tree_index: int) -> str:
+     return f"jobs/{job_id}/experiments/{experiment_id}/trees/tree_{tree_index}.joblib"
+ 
+-
+ def worker_snapshot_path(job_id: str, experiment_id: str, worker_id: str) -> str:
+     return f"jobs/{job_id}/experiments/{experiment_id}/snapshots/worker_{worker_id}.json"
+ 
+-
+ def manifest_path(job_id: str, experiment_id: str) -> str:
+     return f"jobs/{job_id}/experiments/{experiment_id}/manifests/manifest.json"
+ 
+-
+ def dataset_path(job_id: str, dataset_name: str) -> str:
+     return f"jobs/{job_id}/datasets/{dataset_name}"
+ 
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"BufProjectSettings\">\r\n    <option name=\"bufCLIPath\" value=\"$ brew install bufbuild/buf/buf\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"refactoring worker.py e paths.py\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/misc.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/misc.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/common/storage_layout.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/common/storage_layout.py\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/docker-compose.yml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/docker-compose.yml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/master.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/master.py\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/master/fault_tolerance.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/masterPackage/fault_tolerance.py\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/proto/rf_v2.proto\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/proto/rf_v2.proto\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/requirements.txt\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/requirements.txt\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/rf.proto\" beforeDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/worker.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/worker.py\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;jadepics&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\"><![CDATA[{\r\n  \"selectedUrlAndAccountId\": {\r\n    \"url\": \"git@github.com:jadepics/ProgettoSDCCeML.git\",\r\n    \"accountId\": \"4de1de33-8135-4705-97f1-e05732611c9e\"\r\n  }\r\n}]]></component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 8\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\">{\r\n  &quot;keyToString&quot;: {\r\n    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,\r\n    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,\r\n    &quot;git-widget-placeholder&quot;: &quot;master&quot;,\r\n    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,\r\n    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,\r\n    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,\r\n    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,\r\n    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;\r\n  }\r\n}</component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"CopyFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\" />\r\n    </key>\r\n    <key name=\"MoveFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\worker\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"\" />\r\n      <created>1772718028304</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1772718028304</updated>\r\n      <workItem from=\"1774557139933\" duration=\"1949000\" />\r\n      <workItem from=\"1774559557015\" duration=\"480000\" />\r\n      <workItem from=\"1774600460605\" duration=\"10626000\" />\r\n      <workItem from=\"1774694994766\" duration=\"3422000\" />\r\n      <workItem from=\"1774720403281\" duration=\"207000\" />\r\n      <workItem from=\"1774730844650\" duration=\"5746000\" />\r\n    </task>\r\n    <task id=\"LOCAL-00001\" summary=\"First commit\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772718604332</created>\r\n      <option name=\"number\" value=\"00001\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772718604332</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00002\" summary=\"Introduzione artifact_store, filesystem_stoere e paths\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774605271956</created>\r\n      <option name=\"number\" value=\"00002\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00002\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774605271956</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00003\" summary=\"refactoring worker.py e paths.py\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774698083683</created>\r\n      <option name=\"number\" value=\"00003\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00003\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774698083683</updated>\r\n    </task>\r\n    <option name=\"localTasksCounter\" value=\"4\" />\r\n    <servers />\r\n  </component>\r\n  <component name=\"TypeScriptGeneratedFilesManager\">\r\n    <option name=\"version\" value=\"3\" />\r\n  </component>\r\n  <component name=\"VcsManagerConfiguration\">\r\n    <MESSAGE value=\"First commit\" />\r\n    <MESSAGE value=\"Introduzione artifact_store, filesystem_stoere e paths\" />\r\n    <MESSAGE value=\"refactoring worker.py e paths.py\" />\r\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"refactoring worker.py e paths.py\" />\r\n  </component>\r\n  <component name=\"github-copilot-workspace\">\r\n    <instructionFileLocations>\r\n      <option value=\".github/instructions\" />\r\n    </instructionFileLocations>\r\n    <promptFileLocations>\r\n      <option value=\".github/prompts\" />\r\n    </promptFileLocations>\r\n  </component>\r\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision 81b05a57bb1e93d48dc548c3ab86c868eabd5278)
++++ b/.idea/workspace.xml	(date 1774881298188)
+@@ -3,22 +3,12 @@
+   <component name="AutoImportSettings">
+     <option name="autoReloadType" value="SELECTIVE" />
+   </component>
+-  <component name="BufProjectSettings">
+-    <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
+-  </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="refactoring worker.py e paths.py">
++    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="Classe worker.py eliminata e divisione delle sue responsabilità nei files dell'architettura worker">
+       <change beforePath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/common/storage_layout.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/storage_layout.py" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/docker-compose.yml" beforeDir="false" afterPath="$PROJECT_DIR$/docker-compose.yml" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/master/fault_tolerance.py" beforeDir="false" afterPath="$PROJECT_DIR$/masterPackage/fault_tolerance.py" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/proto/rf_v2.proto" beforeDir="false" afterPath="$PROJECT_DIR$/proto/rf_v2.proto" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/rf.proto" beforeDir="false" />
+-      <change beforePath="$PROJECT_DIR$/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/progress/worker_progress_store.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/progress/worker_progress_store.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/storage/paths.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/storage/paths.py" afterDir="false" />
+     </list>
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+@@ -41,12 +31,12 @@
+     &quot;assignee&quot;: &quot;jadepics&quot;
+   }
+ }</component>
+-  <component name="GithubPullRequestsUISettings"><![CDATA[{
+-  "selectedUrlAndAccountId": {
+-    "url": "git@github.com:jadepics/ProgettoSDCCeML.git",
+-    "accountId": "4de1de33-8135-4705-97f1-e05732611c9e"
++  <component name="GithubPullRequestsUISettings">{
++  &quot;selectedUrlAndAccountId&quot;: {
++    &quot;url&quot;: &quot;https://github.com/jadepics/ProgettoSDCCeML.git&quot;,
++    &quot;accountId&quot;: &quot;64b32a3e-6402-44ac-8316-64089203d618&quot;
+   }
+-}]]></component>
++}</component>
+   <component name="ProjectColorInfo">{
+   &quot;associatedIndex&quot;: 8
+ }</component>
+@@ -74,7 +64,7 @@
+     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+     &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+-    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,
++    &quot;settings.editor.selected.configurable&quot;: &quot;com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable&quot;,
+     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+   }
+ }</component>
+@@ -83,13 +73,15 @@
+       <recent name="C:\Users\micci\PycharmProjects\PythonProject1\Dataset" />
+     </key>
+     <key name="MoveFile.RECENT_KEYS">
++      <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\worker\utils" />
+       <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\worker" />
+     </key>
+   </component>
+   <component name="SharedIndexes">
+     <attachedChunks>
+       <set>
+-        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
++        <option value="bundled-js-predefined-d6986cc7102b-9b0f141eb926-JavaScript-PY-253.32098.74" />
++        <option value="bundled-python-sdk-1cd77e80b48f-6d6dccd035ac-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.32098.74" />
+       </set>
+     </attachedChunks>
+   </component>
+@@ -105,7 +97,8 @@
+       <workItem from="1774600460605" duration="10626000" />
+       <workItem from="1774694994766" duration="3422000" />
+       <workItem from="1774720403281" duration="207000" />
+-      <workItem from="1774730844650" duration="5746000" />
++      <workItem from="1774730844650" duration="22025000" />
++      <workItem from="1774857471613" duration="19742000" />
+     </task>
+     <task id="LOCAL-00001" summary="First commit">
+       <option name="closed" value="true" />
+@@ -131,7 +124,31 @@
+       <option name="project" value="LOCAL" />
+       <updated>1774698083683</updated>
+     </task>
+-    <option name="localTasksCounter" value="4" />
++    <task id="LOCAL-00004" summary="refactoring worker.py e creazione di shard_predictor.py, shard_trainder.py, tree_artifact_writer, worker_progress_store.py">
++      <option name="closed" value="true" />
++      <created>1774736813997</created>
++      <option name="number" value="00004" />
++      <option name="presentableId" value="LOCAL-00004" />
++      <option name="project" value="LOCAL" />
++      <updated>1774736813997</updated>
++    </task>
++    <task id="LOCAL-00005" summary="Inizio fase di refactoring di worker.py. Creazione di dataset_utils.py, io_utils.py, time_utils.py, worker_config.py, worker_state.py">
++      <option name="closed" value="true" />
++      <created>1774812450179</created>
++      <option name="number" value="00005" />
++      <option name="presentableId" value="LOCAL-00005" />
++      <option name="project" value="LOCAL" />
++      <updated>1774812450179</updated>
++    </task>
++    <task id="LOCAL-00006" summary="Classe worker.py eliminata e divisione delle sue responsabilità nei files dell'architettura worker">
++      <option name="closed" value="true" />
++      <created>1774878476321</created>
++      <option name="number" value="00006" />
++      <option name="presentableId" value="LOCAL-00006" />
++      <option name="project" value="LOCAL" />
++      <updated>1774878476321</updated>
++    </task>
++    <option name="localTasksCounter" value="7" />
+     <servers />
+   </component>
+   <component name="TypeScriptGeneratedFilesManager">
+@@ -141,7 +158,10 @@
+     <MESSAGE value="First commit" />
+     <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
+     <MESSAGE value="refactoring worker.py e paths.py" />
+-    <option name="LAST_COMMIT_MESSAGE" value="refactoring worker.py e paths.py" />
++    <MESSAGE value="refactoring worker.py e creazione di shard_predictor.py, shard_trainder.py, tree_artifact_writer, worker_progress_store.py" />
++    <MESSAGE value="Inizio fase di refactoring di worker.py. Creazione di dataset_utils.py, io_utils.py, time_utils.py, worker_config.py, worker_state.py" />
++    <MESSAGE value="Classe worker.py eliminata e divisione delle sue responsabilità nei files dell'architettura worker" />
++    <option name="LAST_COMMIT_MESSAGE" value="Classe worker.py eliminata e divisione delle sue responsabilità nei files dell'architettura worker" />
+   </component>
+   <component name="github-copilot-workspace">
+     <instructionFileLocations>
+Index: .idea/ProgSDCC&ML.iml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<module type=\"PYTHON_MODULE\" version=\"4\">\r\n  <component name=\"NewModuleRootManager\">\r\n    <content url=\"file://$MODULE_DIR$\">\r\n      <excludeFolder url=\"file://$MODULE_DIR$/.venv\" />\r\n    </content>\r\n    <orderEntry type=\"jdk\" jdkName=\"Python 3.13 (PythonProject1)\" jdkType=\"Python SDK\" />\r\n    <orderEntry type=\"sourceFolder\" forTests=\"false\" />\r\n  </component>\r\n</module>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/ProgSDCC&ML.iml b/.idea/ProgSDCC&ML.iml
+--- a/.idea/ProgSDCC&ML.iml	(revision 81b05a57bb1e93d48dc548c3ab86c868eabd5278)
++++ b/.idea/ProgSDCC&ML.iml	(date 1774875518803)
+@@ -4,7 +4,7 @@
+     <content url="file://$MODULE_DIR$">
+       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+     </content>
+-    <orderEntry type="jdk" jdkName="Python 3.13 (PythonProject1)" jdkType="Python SDK" />
++    <orderEntry type="jdk" jdkName="Python 3.13 (ProgettoSDCCeML)" jdkType="Python SDK" />
+     <orderEntry type="sourceFolder" forTests="false" />
+   </component>
+ </module>
+\ No newline at end of file
+Index: worker/progress/worker_progress_store.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from pathlib import Path\r\nfrom typing import Dict, Any, Optional\r\nfrom worker.utils.io_utils import atomic_json_write\r\nfrom worker.utils.time_utils import current_time_seconds\r\nimport json\r\n\r\n\r\nclass WorkerProgressStore:\r\n    \"\"\"\r\n    Persistent store for tracking worker progress and enabling fault tolerance.\r\n    \"\"\"\r\n\r\n    def __init__(self, storage_path: Path):\r\n        self.storage_path = Path(storage_path)\r\n        self.state: Dict[str, Any] = {\r\n            \"tasks\": {}\r\n        }\r\n\r\n        self._load()\r\n\r\n    # ------------------------\r\n    # Internal persistence\r\n    # ------------------------\r\n\r\n    def _load(self) -> None:\r\n        if self.storage_path.exists():\r\n            with open(self.storage_path, \"r\", encoding=\"utf-8\") as f:\r\n                self.state = json.load(f)\r\n\r\n    def _persist(self) -> None:\r\n        atomic_json_write(self.storage_path, self.state)\r\n\r\n    # ------------------------\r\n    # Task management\r\n    # ------------------------\r\n    def load(self) -> None:\r\n        self._load()\r\n\r\n    def save(self) -> None:\r\n        self._persist()\r\n\r\n    def start_task(self, task_id: str, metadata: Dict[str, Any]) -> None:\r\n        self.state[\"tasks\"][task_id] = {\r\n            \"status\": \"RUNNING\",\r\n            \"metadata\": metadata,\r\n            \"progress\": 0.0,\r\n            \"shards_completed\": [],\r\n            \"last_update\": current_time_seconds()\r\n        }\r\n        self._persist()\r\n\r\n    def update_progress(self, task_id: str, shard_id: int, progress: float) -> None:\r\n        task = self._get_task(task_id)\r\n\r\n        if shard_id not in task[\"shards_completed\"]:\r\n            task[\"shards_completed\"].append(shard_id)\r\n\r\n        task[\"progress\"] = progress\r\n        task[\"last_update\"] = current_time_seconds()\r\n\r\n        self._persist()\r\n\r\n    def complete_task(self, task_id: str) -> None:\r\n        task = self._get_task(task_id)\r\n        task[\"status\"] = \"COMPLETED\"\r\n        task[\"progress\"] = 1.0\r\n        task[\"last_update\"] = current_time_seconds()\r\n        self._persist()\r\n\r\n    def fail_task(self, task_id: str, error: str) -> None:\r\n        task = self._get_task(task_id)\r\n        task[\"status\"] = \"FAILED\"\r\n        task[\"error\"] = error\r\n        task[\"last_update\"] = current_time_seconds()\r\n        self._persist()\r\n\r\n    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:\r\n        return self.state[\"tasks\"].get(task_id)\r\n\r\n    def _get_task(self, task_id: str) -> Dict[str, Any]:\r\n        if task_id not in self.state[\"tasks\"]:\r\n            raise KeyError(f\"Task {task_id} not found\")\r\n        return self.state[\"tasks\"][task_id]\r\n\r\n    # ------------------------\r\n    # Recovery helpers\r\n    # ------------------------\r\n\r\n    def get_running_tasks(self):\r\n        return {\r\n            tid: t for tid, t in self.state[\"tasks\"].items()\r\n            if t[\"status\"] == \"RUNNING\"\r\n        }\r\n\r\n    def get_completed_shards(self, task_id: str):\r\n        task = self._get_task(task_id)\r\n        return set(task.get(\"shards_completed\", []))
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/progress/worker_progress_store.py b/worker/progress/worker_progress_store.py
+--- a/worker/progress/worker_progress_store.py	(revision 81b05a57bb1e93d48dc548c3ab86c868eabd5278)
++++ b/worker/progress/worker_progress_store.py	(date 1774879492879)
+@@ -94,4 +94,4 @@
+ 
+     def get_completed_shards(self, task_id: str):
+         task = self._get_task(task_id)
+-        return set(task.get("shards_completed", []))
+\ No newline at end of file
++        return set(task.get("shards_completed", []))
