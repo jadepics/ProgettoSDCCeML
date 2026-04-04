@@ -108,15 +108,47 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
     def PredictShard(self, request, context):
         model_id = request.model_id
 
+        # ⚠️ Assunzione temporanea
+        job_id = model_id
+        experiment_id = model_id
+
         self.state.on_task_start(model_id)
 
         try:
+            # --------------------------------------------------
+            # 1. Input
+            # --------------------------------------------------
             X = matrix_from_proto(request.features)
 
-            result = self.shard_predictor.predict(request, X)
+            # --------------------------------------------------
+            # 2. Load manifest
+            # --------------------------------------------------
+            from worker.storage.paths import manifest_path
+
+            manifest_key = manifest_path(job_id, experiment_id)
+
+            manifest = self.shard_predictor.artifact_store.load_json(manifest_key)
+
+            # Estrarre artifact URIs
+            trees_dict = manifest.get("trees", {})
+            artifact_uris = list(trees_dict.values())
+
+            if not artifact_uris:
+                raise ValueError("No tree artifacts found in manifest")
+
+            # --------------------------------------------------
+            # 3. Delegate prediction
+            # --------------------------------------------------
+            result = self.shard_predictor.predict(
+                artifact_uris,
+                X,
+            )
 
             self.state.on_task_success(model_id)
 
+            # --------------------------------------------------
+            # 4. Build response
+            # --------------------------------------------------
             return rf_pb2.PredictShardResponse(
                 worker_id=self.config.worker_id,
                 success=True,
@@ -141,6 +173,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
         finally:
             self.state.on_task_end(model_id)
 
+            
     # --------------------------------------------------
     # STATUS
     # --------------------------------------------------

@@ -45,6 +45,7 @@ class ShardTrainer:
             X: np.ndarray,
             y: np.ndarray,
     ) -> ShardTrainingResult:
+        
 
         job_id = shard.job_id
         experiment_id = shard.experiment_id

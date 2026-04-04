@@ -10,6 +10,15 @@ class ArtifactStore(ABC):
         pass
 
     @abstractmethod
+    def save_tree_artifact_if_not_exists(self, path: str, model: Any) -> bool:
+        """
+        Returns:
+            True -> artifact was created
+            False -> artifact already existed
+        """
+        pass
+
+    @abstractmethod
     def load_tree_artifact(self, path: str) -> Any:
         pass
 

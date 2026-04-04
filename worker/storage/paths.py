@@ -12,4 +12,3 @@ def dataset_path(job_id: str, dataset_name: str) -> str:
 
 def tree_metadata_path(job_id: str, experiment_id: str, tree_index: int) -> str:
     return f"jobs/{job_id}/experiments/{experiment_id}/trees/tree_{tree_index}.json"
-

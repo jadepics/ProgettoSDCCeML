@@ -20,6 +20,32 @@ class FilesystemArtifactStore(ArtifactStore):
         joblib.dump(model, full_path)
         return full_path
 
+    def save_tree_artifact_if_not_exists(self, path: str, model: Any) -> bool:
+        full_path = self._full_path(path)
+
+        # 1. Early check (fast path)
+        if os.path.exists(full_path):
+            return False
+
+        # 2. Prepare directories
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+        # 3. Temp file path
+        tmp_path = full_path + ".tmp"
+
+        # 4. Write to temp file
+        joblib.dump(model, tmp_path)
+
+        # 5. Atomic rename
+        # os.replace is atomic on same filesystem
+        if os.path.exists(full_path):
+            # Race condition case: another process created it
+            os.remove(tmp_path)
+            return False
+
+        os.replace(tmp_path, full_path)
+        return True
+
     def load_tree_artifact(self, path: str) -> Any:
         full_path = self._full_path(path)
         return joblib.load(full_path)

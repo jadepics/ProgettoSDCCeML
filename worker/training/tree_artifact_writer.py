@@ -25,18 +25,29 @@ class TreeArtifactWriter:
         self.worker_id = worker_id
 
     def write_tree(
-        self,
-        model,
-        job_id: str,
-        experiment_id: str,
-        task_id: str,
-        tree_index: int,
-        seed: int,
-        training_time_seconds: float,
+            self,
+            model,
+            job_id: str,
+            experiment_id: str,
+            task_id: str,
+            tree_index: int,
+            seed: int,
+            training_time_seconds: float,
     ) -> TreeArtifactMetadata:
-
+        """
+        Restituisce i metadati dell'albero al completamento dell'operazione.
+        Se esisteva già l'alberi, recupera i dati in memoria
+        :param model:
+        :param job_id:
+        :param experiment_id:
+        :param task_id:
+        :param tree_index:
+        :param seed:
+        :param training_time_seconds:
+        :return:
+        """
         # --------------------------------------------------
-        # 1. Chiave logica artifact
+        # 1. Path logici
         # --------------------------------------------------
         artifact_key = tree_artifact_path(
             job_id=job_id,
@@ -44,13 +55,52 @@ class TreeArtifactWriter:
             tree_index=tree_index,
         )
 
-        # --------------------------------------------------
-        # 2. Salvataggio modello (delegato allo store)
-        # --------------------------------------------------
-        self.store.save_tree_artifact(artifact_key, model)
+        metadata_key = tree_metadata_path(
+            job_id=job_id,
+            experiment_id=experiment_id,
+            tree_index=tree_index,
+        )
 
         # --------------------------------------------------
-        # 3. Costruzione metadata
+        # 2. Prova scrittura idempotente
+        # --------------------------------------------------
+        created = self.store.save_tree_artifact_if_not_exists(
+            artifact_key,
+            model
+        )
+
+        # --------------------------------------------------
+        # 3. Caso: artifact GIÀ esistente
+        # --------------------------------------------------
+        if not created:
+            # 👉 Qui è la parte che mancava
+            if self.store.exists(metadata_key):
+                data = self.store.load_json(metadata_key)
+                return TreeArtifactMetadata(**data)
+
+            # ⚠️ Caso raro ma possibile:
+            # artifact esiste ma metadata no (crash intermedio)
+            # → ricostruiamo metadata
+            tree_id = f"{experiment_id}_tree_{tree_index}"
+
+            metadata = TreeArtifactMetadata(
+                tree_id=tree_id,
+                job_id=job_id,
+                experiment_id=experiment_id,
+                task_id=task_id,
+                tree_index=tree_index,
+                worker_id=self.worker_id,
+                seed=seed,
+                artifact_uri=artifact_key,
+                status="COMPLETED",
+                training_time_seconds=training_time_seconds,
+            )
+
+            self.store.save_json(metadata_key, asdict(metadata))
+            return metadata
+
+        # --------------------------------------------------
+        # 4. Caso: NUOVO artifact
         # --------------------------------------------------
         tree_id = f"{experiment_id}_tree_{tree_index}"
 
@@ -62,26 +112,11 @@ class TreeArtifactWriter:
             tree_index=tree_index,
             worker_id=self.worker_id,
             seed=seed,
-            artifact_uri=artifact_key,  # 👈 chiave logica, NON path fisico
+            artifact_uri=artifact_key,
             status="COMPLETED",
             training_time_seconds=training_time_seconds,
         )
 
-        # --------------------------------------------------
-        # 4. Chiave logica metadata
-        # --------------------------------------------------
-        metadata_key = tree_metadata_path(
-            job_id=job_id,
-            experiment_id=experiment_id,
-            tree_index=tree_index,
-        )
-
-        # --------------------------------------------------
-        # 5. Salvataggio metadata (via store)
-        # --------------------------------------------------
         self.store.save_json(metadata_key, asdict(metadata))
 
-        # --------------------------------------------------
-        # 6. Return
-        # --------------------------------------------------
         return metadata
