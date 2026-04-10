@@ -118,11 +118,22 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     """
     Facciata RPC del master.
 
+    Stato coerente col proto rf_v2.proto:
+    - RegisterWorker
+    - Heartbeat
+    - SubmitTraining
+
     Responsabilità:
-    - ricevere RPC
-    - validare input minimi
-    - applicare leader-only execution
+    - ricevere le RPC esposte dal CoordinatorService
+    - validare input minimi a livello RPC
+    - applicare leader-only execution dove richiesto
+    - tradurre protobuf -> contratti di dominio
     - delegare ai servizi applicativi del control plane
+
+    Non deve:
+    - orchestrare direttamente training o validation
+    - contenere logica di inferenza distribuita
+    - sostituire TrainingJobService / TrainingOrchestrator
     """
 
     def __init__(self, artifact_root: str = "/shared/artifacts") -> None:
@@ -151,7 +162,6 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         self.experiment_planner = ExperimentPlanner()
         self.model_selector = ModelSelector(selection_metric="accuracy")
         self.model_manifest_builder = ModelManifestBuilder()
-
         self.shard_planner = ShardPlanner(self.layout)
 
         self.worker_client = WorkerClient(
@@ -174,13 +184,6 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             worker_client=self.worker_client,
         )
 
-        self.inference_coordinator = InferenceCoordinator(
-            leadership_guard=self.leadership_guard,
-            worker_registry=self.registry,
-            worker_client=self.worker_client,
-            model_repository=self.model_repository,
-        )
-
         self.training_job_service = TrainingJobService(
             leadership_guard=self.leadership_guard,
             job_repository=self.job_repository,
@@ -193,13 +196,29 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             model_manifest_builder=self.model_manifest_builder,
         )
 
-        self._lock = threading.Lock()
-
     # --------------------------------------------------------
     # RPC: worker lifecycle
     # --------------------------------------------------------
 
     def RegisterWorker(self, request, context):
+        if not request.worker_id.strip():
+            return rf_pb2.RegisterWorkerResponse(
+                accepted=False,
+                message="worker_id must be non-empty",
+            )
+
+        if not request.host.strip():
+            return rf_pb2.RegisterWorkerResponse(
+                accepted=False,
+                message="host must be non-empty",
+            )
+
+        if request.port <= 0:
+            return rf_pb2.RegisterWorkerResponse(
+                accepted=False,
+                message="port must be > 0",
+            )
+
         self.registry.register(
             worker_id=request.worker_id,
             host=request.host,
@@ -214,6 +233,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         ok = self.registry.heartbeat(
             worker_id=request.worker_id,
             running_tasks=request.running_tasks,
+            active_task_ids=list(request.active_task_ids),
         )
         return rf_pb2.HeartbeatResponse(ok=ok)
 
@@ -225,63 +245,64 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         try:
             self.leadership_guard.require_leader()
         except Exception as exc:
-            return rf_pb2.SubmitTrainingResponse(
-                job_id="",
-                status=rf_pb2.FAILED,
-                message=f"Not leader: {exc}",
-            )
+            return self._failed_submit_training_response(f"Not leader: {exc}")
 
-        task_type = request.task_type.strip().lower()
-        if task_type not in {"classification", "regression"}:
-            return rf_pb2.SubmitTrainingResponse(
-                job_id="",
-                status=rf_pb2.FAILED,
-                message="task_type must be 'classification' or 'regression'",
-            )
-
-        if request.n_estimators_total <= 0:
-            return rf_pb2.SubmitTrainingResponse(
-                job_id="",
-                status=rf_pb2.FAILED,
-                message="n_estimators_total must be > 0",
-            )
-
-        if not request.dataset_url.strip():
-            return rf_pb2.SubmitTrainingResponse(
-                job_id="",
-                status=rf_pb2.FAILED,
-                message="dataset_url must be non-empty",
-            )
-
-        if not request.target_column.strip():
-            return rf_pb2.SubmitTrainingResponse(
-                job_id="",
-                status=rf_pb2.FAILED,
-                message="target_column must be non-empty",
-            )
-
-        if request.validation_ratio < 0.0 or request.test_ratio < 0.0:
-            return rf_pb2.SubmitTrainingResponse(
-                job_id="",
-                status=rf_pb2.FAILED,
-                message="validation_ratio and test_ratio must be >= 0",
-            )
-
-        if request.validation_ratio + request.test_ratio >= 1.0:
-            return rf_pb2.SubmitTrainingResponse(
-                job_id="",
-                status=rf_pb2.FAILED,
-                message="validation_ratio + test_ratio must be < 1.0",
-            )
+        validation_error = self._validate_submit_training_request(request)
+        if validation_error is not None:
+            return self._failed_submit_training_response(validation_error)
 
         alive_workers = self.registry.alive_workers()
         if not alive_workers:
-            return rf_pb2.SubmitTrainingResponse(
-                job_id="",
-                status=rf_pb2.FAILED,
-                message="No alive workers available",
-            )
+            return self._failed_submit_training_response("No alive workers available")
 
+        training_request = self._build_training_request(request)
+
+        try:
+            created_job_id = self.training_job_service.start_training_job(training_request)
+        except Exception as exc:
+            return self._failed_submit_training_response(str(exc))
+
+        return rf_pb2.SubmitTrainingResponse(
+            job_id=created_job_id,
+            status=rf_pb2.PENDING,
+            message="Training started",
+        )
+
+    # --------------------------------------------------------
+    # Helpers
+    # --------------------------------------------------------
+
+    def _failed_submit_training_response(self, message: str) -> rf_pb2.SubmitTrainingResponse:
+        return rf_pb2.SubmitTrainingResponse(
+            job_id="",
+            status=rf_pb2.FAILED,
+            message=message,
+        )
+
+    def _validate_submit_training_request(self, request) -> Optional[str]:
+        task_type = request.task_type.strip().lower()
+        if task_type not in {"classification", "regression"}:
+            return "task_type must be 'classification' or 'regression'"
+
+        if request.n_estimators_total <= 0:
+            return "n_estimators_total must be > 0"
+
+        if not request.dataset_url.strip():
+            return "dataset_url must be non-empty"
+
+        if not request.target_column.strip():
+            return "target_column must be non-empty"
+
+        if request.validation_ratio < 0.0 or request.test_ratio < 0.0:
+            return "validation_ratio and test_ratio must be >= 0"
+
+        if request.validation_ratio + request.test_ratio >= 1.0:
+            return "validation_ratio + test_ratio must be < 1.0"
+
+        return None
+
+    def _build_training_request(self, request) -> TrainingRequest:
+        task_type = request.task_type.strip().lower()
         job_id = self._generate_job_id()
 
         max_depth_candidates = [
@@ -291,9 +312,12 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         if not max_depth_candidates:
             max_depth_candidates = [None]
 
-        max_features_candidates = list(request.max_features_candidates)
+        max_features_candidates = [
+            self._parse_max_features_candidate(value)
+            for value in request.max_features_candidates
+        ]
         if not max_features_candidates:
-            max_features_candidates = ["sqrt" if task_type == "classification" else "1.0"]
+            max_features_candidates = ["sqrt" if task_type == "classification" else 1.0]
 
         min_samples_split_candidates = list(request.min_samples_split_candidates)
         if not min_samples_split_candidates:
@@ -305,11 +329,9 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 
         criterion_candidates = list(request.criterion_candidates)
         if not criterion_candidates:
-            criterion_candidates = (
-                ["gini"] if task_type == "classification" else ["squared_error"]
-            )
+            criterion_candidates = ["gini"] if task_type == "classification" else ["squared_error"]
 
-        training_request = TrainingRequest(
+        return TrainingRequest(
             job_id=job_id,
             dataset_uri=request.dataset_url,
             target_column=request.target_column,
@@ -331,90 +353,19 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             bootstrap=request.bootstrap,
         )
 
+    def _parse_max_features_candidate(self, raw_value: str):
+        value = raw_value.strip()
+        if not value:
+            return None
+
+        lowered = value.lower()
+        if lowered in {"none", "null"}:
+            return None
+
         try:
-            created_job_id = self.training_job_service.start_training_job(training_request)
-        except Exception as exc:
-            return rf_pb2.SubmitTrainingResponse(
-                job_id="",
-                status=rf_pb2.FAILED,
-                message=str(exc),
-            )
-
-        return rf_pb2.SubmitTrainingResponse(
-            job_id=created_job_id,
-            status=rf_pb2.PENDING,
-            message="Training started",
-        )
-
-    # --------------------------------------------------------
-    # RPC: training status
-    # --------------------------------------------------------
-
-    def GetTrainingStatus(self, request, context):
-        record = self.job_repository.load(request.job_id)
-        if record is None:
-            context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details("Job not found")
-            return rf_pb2.GetTrainingStatusResponse()
-
-        completed_trees = self.task_ledger.count_completed_trees(request.job_id)
-        total_trees = record.training_request.n_estimators_total
-
-        return rf_pb2.GetTrainingStatusResponse(
-            job_id=record.job_id,
-            model_id=record.model_id or "",
-            status=self._job_status_to_proto(record.status),
-            total_trees=total_trees,
-            completed_trees=completed_trees,
-            message=record.message,
-            workers=[worker.worker_id for worker in self.registry.alive_workers()],
-        )
-
-    # --------------------------------------------------------
-    # RPC: inference
-    # --------------------------------------------------------
-
-    def SubmitInference(self, request, context):
-        try:
-            X = matrix_from_proto(request.features)
-
-            result = self.inference_coordinator.run_inference(
-                model_id=request.model_id,
-                features=X,
-            )
-
-            if result.task_type == "classification":
-                return rf_pb2.SubmitInferenceResponse(
-                    status=rf_pb2.COMPLETED,
-                    predicted_labels=result.predicted_labels or [],
-                    message="Inference completed",
-                )
-
-            return rf_pb2.SubmitInferenceResponse(
-                status=rf_pb2.COMPLETED,
-                predicted_values=result.predicted_values or [],
-                message="Inference completed",
-            )
-
-        except Exception as exc:
-            return rf_pb2.SubmitInferenceResponse(
-                status=rf_pb2.FAILED,
-                message=str(exc),
-            )
-
-    # --------------------------------------------------------
-    # Helpers
-    # --------------------------------------------------------
-
-    def _job_status_to_proto(self, status) -> int:
-        status_str = getattr(status, "value", status)
-        mapping = {
-            "PENDING": rf_pb2.PENDING,
-            "RUNNING": rf_pb2.RUNNING,
-            "COMPLETED": rf_pb2.COMPLETED,
-            "FAILED": rf_pb2.FAILED,
-        }
-        return mapping.get(status_str, rf_pb2.FAILED)
+            return float(value)
+        except ValueError:
+            return value
 
     def _generate_job_id(self) -> str:
         from common.ids import generate_job_id
