@@ -636,27 +636,39 @@ class TaskLedger:
         raw_payload = self.artifact_store.read_json(path)
         return self._normalize_payload(raw_payload)
 
-    def mark_completed(
-            self,
-            task_id: str,
-            completed_tree_ids: list[str],
-            attempt_id: Optional[int] = None,
-            job_id: Optional[str] = None,
-    ) -> None:
-        def _updater(raw: dict[str, Any]) -> None:
-            existing = raw.get("completed_tree_ids", [])
-            merged = list(dict.fromkeys(existing + list(completed_tree_ids or [])))
-            raw["completed_tree_ids"] = merged
-            raw["failed_tree_ids"] = []
-            raw["status"] = TaskStatus.COMPLETED.value
-            raw["error_message"] = None
 
-        self._update_attempt_raw(
-            task_id=task_id,
-            updater=_updater,
-            attempt_id=attempt_id,
-            job_id=job_id,
-        )
+
+        def mark_partial_failure(
+                self,
+                task_id: str,
+                completed_tree_ids: list[str],
+                failed_tree_ids: list[str],
+                error_message: str,
+                attempt_id: Optional[int] = None,
+                job_id: Optional[str] = None,
+        ) -> None:
+            def _updater(raw: dict[str, Any]) -> None:
+                existing_completed = raw.get("completed_tree_ids", [])
+                existing_failed = raw.get("failed_tree_ids", [])
+
+                merged_completed = list(
+                    dict.fromkeys(existing_completed + list(completed_tree_ids or []))
+                )
+                merged_failed = list(
+                    dict.fromkeys(existing_failed + list(failed_tree_ids or []))
+                )
+
+                raw["completed_tree_ids"] = merged_completed
+                raw["failed_tree_ids"] = merged_failed
+                raw["status"] = TaskStatus.FAILED.value
+                raw["error_message"] = error_message
+
+            self._update_attempt_raw(
+                task_id=task_id,
+                updater=_updater,
+                attempt_id=attempt_id,
+                job_id=job_id,
+            )
 
     def _write_all(self, job_id: str, payload: dict[str, Any]) -> None:
         path = self.artifact_store.layout.task_ledger_path(job_id)
@@ -1007,11 +1019,15 @@ class TaskLedger:
     # public state transitions
     # --------------------------------------------------------
 
+    # --------------------------------------------------------
+    # public state transitions
+    # --------------------------------------------------------
+
     def mark_running(
-        self,
-        task_id: str,
-        attempt_id: Optional[int] = None,
-        job_id: Optional[str] = None,
+            self,
+            task_id: str,
+            attempt_id: Optional[int] = None,
+            job_id: Optional[str] = None,
     ) -> None:
         def _updater(raw: dict[str, Any]) -> None:
             raw["status"] = TaskStatus.RUNNING.value
@@ -1025,16 +1041,17 @@ class TaskLedger:
         )
 
     def mark_completed(
-        self,
-        task_id: str,
-        completed_tree_ids: list[str],
-        attempt_id: Optional[int] = None,
-        job_id: Optional[str] = None,
+            self,
+            task_id: str,
+            completed_tree_ids: list[str],
+            attempt_id: Optional[int] = None,
+            job_id: Optional[str] = None,
     ) -> None:
         def _updater(raw: dict[str, Any]) -> None:
             existing = raw.get("completed_tree_ids", [])
-            merged = list(dict.fromkeys(existing + completed_tree_ids))
+            merged = list(dict.fromkeys(existing + list(completed_tree_ids or [])))
             raw["completed_tree_ids"] = merged
+            raw["failed_tree_ids"] = []
             raw["status"] = TaskStatus.COMPLETED.value
             raw["error_message"] = None
 
@@ -1045,12 +1062,44 @@ class TaskLedger:
             job_id=job_id,
         )
 
+    def mark_partial_failure(
+            self,
+            task_id: str,
+            completed_tree_ids: list[str],
+            failed_tree_ids: list[str],
+            error_message: str,
+            attempt_id: Optional[int] = None,
+            job_id: Optional[str] = None,
+    ) -> None:
+        def _updater(raw: dict[str, Any]) -> None:
+            existing_completed = raw.get("completed_tree_ids", [])
+            existing_failed = raw.get("failed_tree_ids", [])
+
+            merged_completed = list(
+                dict.fromkeys(existing_completed + list(completed_tree_ids or []))
+            )
+            merged_failed = list(
+                dict.fromkeys(existing_failed + list(failed_tree_ids or []))
+            )
+
+            raw["completed_tree_ids"] = merged_completed
+            raw["failed_tree_ids"] = merged_failed
+            raw["status"] = TaskStatus.FAILED.value
+            raw["error_message"] = error_message
+
+        self._update_attempt_raw(
+            task_id=task_id,
+            updater=_updater,
+            attempt_id=attempt_id,
+            job_id=job_id,
+        )
+
     def mark_failed(
-        self,
-        task_id: str,
-        error_message: str,
-        attempt_id: Optional[int] = None,
-        job_id: Optional[str] = None,
+            self,
+            task_id: str,
+            error_message: str,
+            attempt_id: Optional[int] = None,
+            job_id: Optional[str] = None,
     ) -> None:
         def _updater(raw: dict[str, Any]) -> None:
             raw["status"] = TaskStatus.FAILED.value
