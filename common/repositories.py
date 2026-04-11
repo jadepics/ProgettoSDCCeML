@@ -1015,9 +1015,65 @@ class TaskLedger:
             if record.experiment_id == experiment_id
         ]
 
-    # --------------------------------------------------------
-    # public state transitions
-    # --------------------------------------------------------
+    def update_lease(
+            self,
+            task_id: str,
+            lease_expires_at_ts: float,
+            attempt_id: Optional[int] = None,
+            job_id: Optional[str] = None,
+    ) -> None:
+        def _updater(raw: dict[str, Any]) -> None:
+            raw["lease_expires_at_ts"] = lease_expires_at_ts
+
+        self._update_attempt_raw(
+            task_id=task_id,
+            updater=_updater,
+            attempt_id=attempt_id,
+            job_id=job_id,
+        )
+
+        def clear_lease(
+                self,
+                task_id: str,
+                attempt_id: Optional[int] = None,
+                job_id: Optional[str] = None,
+        ) -> None:
+            def _updater(raw: dict[str, Any]) -> None:
+                raw["lease_expires_at_ts"] = None
+
+            self._update_attempt_raw(
+                task_id=task_id,
+                updater=_updater,
+                attempt_id=attempt_id,
+                job_id=job_id,
+            )
+
+            def list_expired_running_tasks(
+                    self,
+                    job_id: str,
+                    experiment_id: Optional[str] = None,
+                    now_ts: Optional[float] = None,
+            ) -> list[TaskRecord]:
+                effective_now = time.time() if now_ts is None else now_ts
+
+                records = self.list_all_attempts(job_id)
+                expired: list[TaskRecord] = []
+
+                for record in records:
+                    if experiment_id is not None and record.experiment_id != experiment_id:
+                        continue
+
+                    if record.status != TaskStatus.RUNNING:
+                        continue
+
+                    if record.lease_expires_at_ts is None:
+                        continue
+
+                    if record.lease_expires_at_ts <= effective_now:
+                        expired.append(record)
+
+                expired.sort(key=lambda item: (item.lease_expires_at_ts or 0.0, item.updated_at))
+                return expired
 
     # --------------------------------------------------------
     # public state transitions
