@@ -25,11 +25,15 @@ from masterPackage.fault_tolerance import (
 from masterPackage.inference_coordinator import InferenceCoordinator
 from masterPackage.model_manifest_builder import ModelManifestBuilder
 from masterPackage.model_selector import ModelSelector
+from masterPackage.retry_policy import RetryPolicy
 from masterPackage.shard_planner import ShardPlanner
+from masterPackage.task_lease_manager import TaskLeaseManager
 from masterPackage.training_job_service import TrainingJobService
 from masterPackage.training_orchestrator import TrainingOrchestrator
 from masterPackage.validation_coordinator import ValidationCoordinator
 from masterPackage.worker_client import WorkerClient
+from masterPackage.worker_heartbeat_monitor import WorkerHeartbeatMonitor
+from masterPackage.recovery_planner import RecoveryPlanner
 
 from common.contracts import HyperparameterSpace, TrainingRequest
 from common.repositories import (
@@ -81,6 +85,7 @@ class WorkerRegistry:
         self._workers: dict[str, WorkerInfo] = {}
         self._lock = threading.Lock()
 
+
     def register(self, worker_id: str, host: str, port: int) -> None:
         with self._lock:
             self._workers[worker_id] = WorkerInfo(worker_id, host, port)
@@ -109,6 +114,9 @@ class WorkerRegistry:
             return None
         return sorted(candidates, key=lambda worker: worker.running_tasks)[0]
 
+def list_workers(self) -> list[WorkerInfo]:
+    with self._lock:
+        return list(self._workers.values())     #con lock è thread safe
 
 # ============================================================
 # Master coordinator
@@ -176,6 +184,18 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             job_repository=self.job_repository,
             shard_planner=self.shard_planner,
             worker_client=self.worker_client,
+            retry_policy=RetryPolicy(
+                max_attempts_per_task=2,
+                base_backoff_seconds=0.5,
+                retry_on_timeout=True,
+                retry_on_worker_failure=True,
+                retry_on_unknown_error=False,
+            ),
+            task_lease_manager=TaskLeaseManager(
+                task_ledger=self.task_ledger,
+                lease_timeout_seconds=600.0,
+            ),
+            worker_heartbeat_monitor=self.worker_heartbeat_monitor,
         )
 
         self.validation_coordinator = ValidationCoordinator(
@@ -194,6 +214,16 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             validation_coordinator=self.validation_coordinator,
             model_selector=self.model_selector,
             model_manifest_builder=self.model_manifest_builder,
+        )
+        self.recovery_planner = RecoveryPlanner(
+            task_ledger=self.task_ledger,
+            shard_planner=self.shard_planner,
+            worker_heartbeat_monitor=self.worker_heartbeat_monitor,
+        )
+        self.registry = WorkerRegistry() #forse va tolto
+        self.worker_heartbeat_monitor = WorkerHeartbeatMonitor(
+            worker_registry=self.registry,
+            heartbeat_timeout_seconds=HEARTBEAT_TIMEOUT_SECONDS,
         )
 
     # --------------------------------------------------------

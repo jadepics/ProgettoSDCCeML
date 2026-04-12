@@ -34,17 +34,19 @@ class WorkerRegistryLike(Protocol):
 
 class TrainingOrchestrator:
     def __init__(
-        self,
-        leadership_guard,
-        worker_registry: WorkerRegistryLike,
-        task_ledger,
-        job_repository,
-        shard_planner,
-        worker_client,
-        lease_timeout_seconds: float = 600.0,
-        max_parallel_shards: int | None = None,
-        retry_policy: RetryPolicy | None = None,
-        task_lease_manager: TaskLeaseManager | None = None,
+            self,
+            leadership_guard,
+            worker_registry: WorkerRegistryLike,
+            task_ledger,
+            job_repository,
+            shard_planner,
+            worker_client,
+            lease_timeout_seconds: float = 600.0,
+            max_parallel_shards: int | None = None,
+            retry_policy: RetryPolicy | None = None,
+            task_lease_manager: TaskLeaseManager | None = None,
+            worker_heartbeat_monitor=None,
+            recovery_planner=None,
     ) -> None:
         self.leadership_guard = leadership_guard
         self.worker_registry = worker_registry
@@ -59,6 +61,8 @@ class TrainingOrchestrator:
             task_ledger=task_ledger,
             lease_timeout_seconds=lease_timeout_seconds,
         )
+        self.worker_heartbeat_monitor = worker_heartbeat_monitor
+        self.recovery_planner = recovery_planner
 
     def run_experiment(
         self,
@@ -119,18 +123,37 @@ class TrainingOrchestrator:
             self.job_repository.save_experiment(job_id, experiment)
             return final_artifacts
 
-        alive_workers = self.worker_registry.alive_workers()
+        alive_workers = self._alive_workers_for_scheduling()
         if not alive_workers:
+            stale_ids = self._stale_worker_ids()
+            if stale_ids:
+                raise RuntimeError(
+                    f"No alive workers available during scheduling. "
+                    f"Stale workers detected: {stale_ids}"
+                )
             raise RuntimeError("No alive workers available during scheduling")
-
-        shards = self._plan_missing_shards(
-            job_id=job_id,
-            experiment_id=experiment_id,
-            forest_config=forest_config,
-            prepared_dataset=prepared_dataset,
-            workers=alive_workers,
-            missing_tree_ids=missing_tree_ids,
-        )
+        if self.recovery_planner is not None:
+            recovery_plan = self.recovery_planner.build_plan(
+                job_id=job_id,
+                experiment_id=experiment_id,
+                forest_config=forest_config,
+                prepared_dataset=prepared_dataset,
+                workers=alive_workers,
+            )
+            missing_tree_ids = recovery_plan.missing_tree_ids
+            shards = [
+                self._with_next_attempt_id(job_id, shard)
+                for shard in recovery_plan.recovery_shards
+            ]
+        else:
+            shards = self._plan_missing_shards(
+                job_id=job_id,
+                experiment_id=experiment_id,
+                forest_config=forest_config,
+                prepared_dataset=prepared_dataset,
+                workers=alive_workers,
+                missing_tree_ids=missing_tree_ids,
+            )
         if not shards:
             raise RuntimeError(
                 "Some trees are still missing, but no shards could be planned "
@@ -350,3 +373,27 @@ class TrainingOrchestrator:
             result=result,
         )
         return leased_shard, normalized
+
+    def _alive_workers_for_scheduling(self) -> list[WorkerLike]:
+        if self.worker_heartbeat_monitor is None:
+            return self.worker_registry.alive_workers()
+
+        snapshots = self.worker_heartbeat_monitor.alive_workers()
+        worker_by_id = {
+            worker.worker_id: worker
+            for worker in self.worker_registry.list_workers()
+        }
+
+        result: list[WorkerLike] = []
+        for snapshot in snapshots:
+            worker = worker_by_id.get(snapshot.worker_id)
+            if worker is not None:
+                result.append(worker)
+
+        return result
+
+    def _stale_worker_ids(self) -> list[str]:
+        if self.worker_heartbeat_monitor is None:
+            return []
+
+        return self.worker_heartbeat_monitor.stale_worker_ids()
