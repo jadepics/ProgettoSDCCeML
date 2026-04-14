@@ -1,8 +1,6 @@
-from pathlib import Path
 from typing import Dict, Any, Optional
-import json
 
-from worker.utils.io_utils import atomic_json_write
+from worker.storage.artifact_store import ArtifactStore
 from worker.utils.time_utils import current_time_seconds
 from worker.storage.paths import worker_snapshot_path
 
@@ -16,8 +14,8 @@ class WorkerProgressStore:
     - idempotent start_task
     """
 
-    def __init__(self, base_storage_dir: Path, worker_id: str):
-        self.base_storage_dir = Path(base_storage_dir)
+    def __init__(self, artifact_store: ArtifactStore, worker_id: str):
+        self.store = artifact_store
         self.worker_id = worker_id
 
         # in-memory state keyed by (job_id, experiment_id)
@@ -29,22 +27,25 @@ class WorkerProgressStore:
     # Internal helpers
     # ------------------------
 
-    def _get_snapshot_path(self, job_id: str, experiment_id: str) -> Path:
-        relative_path = worker_snapshot_path(job_id, experiment_id, self.worker_id)
-        return self.base_storage_dir / relative_path
+    def _get_snapshot_key(self, job_id: str, experiment_id: str) -> str:
+        return worker_snapshot_path(job_id, experiment_id, self.worker_id)
+
+
 
     def _load_snapshot(self, job_id: str, experiment_id: str) -> None:
-        path = self._get_snapshot_path(job_id, experiment_id)
+        key = self._get_snapshot_key(job_id, experiment_id)
 
-        if path.exists():
-            with open(path, "r", encoding="utf-8") as f:
-                self.state = json.load(f)
+        if self.store.exists(key):
+            self.state = self.store.load_json(key)
         else:
             self.state = {"tasks": {}}
 
+
+
     def _persist_snapshot(self, job_id: str, experiment_id: str) -> None:
-        path = self._get_snapshot_path(job_id, experiment_id)
-        atomic_json_write(path, self.state)
+        key = self._get_snapshot_key(job_id, experiment_id)
+        self.store.save_json(key, self.state)
+
 
     # ------------------------
     # Lifecycle per job

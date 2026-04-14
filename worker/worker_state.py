@@ -17,3 +17,6 @@ class WorkerState:
     def get(self) -> int:
         with self._lock:
             return self.running_tasks
+
+
+MODIFICARE I METODI ESPOSTI DALLA SEGUENTE CLASSE

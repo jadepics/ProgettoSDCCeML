@@ -29,3 +29,18 @@ def atomic_json_write(path: Path, payload: dict) -> None:
 
     # Atomic replace
     temp_path.replace(path)
+
+import numpy as np
+
+
+class DataLoader:
+    def __init__(self, artifact_store):
+        self.store = artifact_store
+
+    def load_numpy(self, uri: str) -> np.ndarray:
+        # per ora assumiamo CSV
+        raw = self.store.load_bytes(uri)
+
+        # decode bytes → string → numpy
+        from io import BytesIO
+        return np.loadtxt(BytesIO(raw), delimiter=",")

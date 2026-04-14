@@ -1,5 +1,7 @@
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
+from common.contracts import TrainingShard, ForestConfiguration, TreeArtifactMetadata
+from worker.utils.dataset_utils import split_features_labels
 
 from worker.utils.proto_utils import matrix_from_proto
 
@@ -13,23 +15,25 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
         shard_trainer,
         shard_predictor,
         progress_store,
+        artifact_store,
+        data_loader
     ):
         self.config = config
         self.state = state
-
         self.shard_trainer = shard_trainer
         self.shard_predictor = shard_predictor
         self.progress_store = progress_store
+        self.artifact_store = artifact_store
+        self.data_loader = data_loader
 
-    # --------------------------------------------------
-    # TRAIN
-    # --------------------------------------------------
     def TrainShard(self, request, context):
         job_id = request.job_id
         experiment_id = request.experiment_id
         task_id = request.task_id
 
+        # ----------------------------------------
         # Worker state
+        # ----------------------------------------
         self.state.on_task_start(task_id)
 
         try:
@@ -43,7 +47,9 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 },
             )
 
-            # 👉 Idempotenza forte: task già completato → skip totale
+            # ----------------------------------------
+            # Idempotenza task-level
+            # ----------------------------------------
             if status == "ALREADY_COMPLETED":
                 existing = self.progress_store.get_task(job_id, experiment_id, task_id)
 
@@ -59,18 +65,60 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                     elapsed_time_seconds=0.0,
                 )
 
-            # Delegate training
-            result = self.shard_trainer.train(request)
+            # ----------------------------------------
+            # 1. Convert proto → TrainingShard
+            # ----------------------------------------
+            shard = TrainingShard(
+                task_id=request.task_id,
+                attempt_id=request.attempt_id,
+                job_id=request.job_id,
+                experiment_id=request.experiment_id,
+                assigned_worker_id=request.assigned_worker_id,
+                tree_start_index=request.tree_start_index,
+                tree_count=request.tree_count,
+                forest_config=ForestConfiguration(
+                    experiment_id=request.experiment_id,
+                    task_type=request.task_type,
+                    n_estimators=request.n_estimators,
+                    max_depth=request.max_depth if request.max_depth > 0 else None,
+                    max_features=request.max_features,
+                    min_samples_split=request.min_samples_split,
+                    min_samples_leaf=request.min_samples_leaf,
+                    criterion=request.criterion,
+                    bootstrap=request.bootstrap,
+                    global_random_seed=request.global_random_seed,
+                ),
+                train_features_uri=request.train_features_uri,
+                train_labels_uri=request.train_labels_uri,
+                artifact_output_dir=request.artifact_output_dir,
+                seed_base=request.seed_base,
+                lease_expires_at_ts=request.lease_expires_at_unix_ms / 1000.0            )
+
+            # ----------------------------------------
+            # 2. Load dataset (URI → numpy)
+            # ----------------------------------------
+            X = self.data_loader.load_numpy(request.train_features_uri)
+            y = self.data_loader.load_numpy(request.train_labels_uri)
+            
+            X, y = split_features_labels(X, y)
+
+            # ----------------------------------------
+            # 3. Call trainer (PURE ML)
+            # ----------------------------------------
+            result = self.shard_trainer.train(shard, X, y)
 
             self.state.on_task_success(task_id)
 
+            # ----------------------------------------
+            # 4. Convert result → proto
+            # ----------------------------------------
             return rf_pb2.TrainShardResponse(
                 task_id=result.task_id,
-                attempt_id=request.attempt_id,
-                worker_id=self.config.worker_id,
-                success=True,
-                error="",
-                artifacts=result.artifacts,
+                attempt_id=result.attempt_id,
+                worker_id=result.worker_id,
+                success=result.success,
+                error=result.error_message or "",
+                artifacts=[self._to_proto_artifact(a) for a in result.tree_artifacts],
                 completed_tree_ids=result.completed_tree_ids,
                 failed_tree_ids=result.failed_tree_ids,
                 elapsed_time_seconds=result.elapsed_time_seconds,
@@ -79,7 +127,6 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
         except Exception as exc:
             self.state.on_task_failure(task_id, str(exc))
 
-            # persist failure
             self.progress_store.fail_task(
                 job_id,
                 experiment_id,
@@ -101,6 +148,16 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 
         finally:
             self.state.on_task_end(task_id)
+
+    def _to_proto_artifact(self, a: TreeArtifactMetadata):
+        return rf_pb2.TrainedTreeArtifact(
+            tree_id=a.tree_id,
+            experiment_id=a.experiment_id,
+            tree_index=a.tree_index,
+            artifact_uri=a.artifact_uri,
+            worker_id=a.worker_id,
+            seed=a.seed,
+        )
 
     # --------------------------------------------------
     # PREDICT
@@ -172,10 +229,3 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 
         finally:
             self.state.on_task_end(model_id)
-
-            
-    # --------------------------------------------------
-    # STATUS
-    # --------------------------------------------------
-    def GetStatus(self, request, context):
-        return rf_pb2.HeartbeatResponse(ok=True)

@@ -5,6 +5,11 @@ from concurrent import futures
 import time
 
 import rf_v2_pb2_grpc as rf_pb2_grpc
+from worker.training.bootstrap_sampler import BootstrapSampler
+from worker.training.decision_tree_factory import DecisionTreeFactory
+from worker.training.tree_artifact_writer import TreeArtifactWriter
+from worker.utils.io_utils import DataLoader
+from worker.progress.worker_progress_store import WorkerProgressStore
 
 from worker.worker_service import WorkerService
 from worker.worker_config import WorkerConfig
@@ -30,7 +35,7 @@ class WorkerNode:
         self.config = config
 
         # --------------------------------------------------
-        # Infrastructure
+        # gRPC Server
         # --------------------------------------------------
         self.server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=config.max_workers)
@@ -39,46 +44,78 @@ class WorkerNode:
         # --------------------------------------------------
         # State
         # --------------------------------------------------
-        self.state = WorkerState(worker_id=config.worker_id)
+        self.state = WorkerState()
 
         # --------------------------------------------------
         # Storage
         # --------------------------------------------------
         self.artifact_store = FilesystemArtifactStore(
-            base_dir=config.artifact_base_dir
+            root_dir=config.artifact_root
         )
 
         # --------------------------------------------------
-        # Training / Prediction components
+        # Progress Store (MISSING PRIMA)
         # --------------------------------------------------
+        self.progress_store = WorkerProgressStore(
+            artifact_store=self.artifact_store,
+            worker_id=config.worker_id
+        )
+
+        # --------------------------------------------------
+        # Training components (MISSING PRIMA)
+        # --------------------------------------------------
+        self.bootstrap_sampler = BootstrapSampler()
+        
+        self.tree_factory = DecisionTreeFactory()
+
+        self.artifact_writer = TreeArtifactWriter(
+            artifact_store=self.artifact_store,
+            worker_id=config.worker_id
+        )
+
         self.shard_trainer = ShardTrainer(
-            config=config,
-            artifact_store=self.artifact_store
+            bootstrap_sampler=self.bootstrap_sampler,
+            tree_factory=self.tree_factory,
+            artifact_writer=self.artifact_writer,
+            progress_store=self.progress_store,
         )
 
+        # --------------------------------------------------
+        # Prediction
+        # --------------------------------------------------
         self.shard_predictor = ShardPredictor(
-            config=config,
             artifact_store=self.artifact_store
         )
 
         # --------------------------------------------------
-        # Service (RPC layer)
+        # Data Loader (NUOVO)
+        # --------------------------------------------------
+        self.data_loader = DataLoader(
+            artifact_store=self.artifact_store
+        )
+
+        # --------------------------------------------------
+        # Service
         # --------------------------------------------------
         self.service = WorkerService(
             config=config,
             state=self.state,
             shard_trainer=self.shard_trainer,
-            shard_predictor=self.shard_predictor
+            shard_predictor=self.shard_predictor,
+            progress_store=self.progress_store,
+            artifact_store=self.artifact_store,
+            data_loader=self.data_loader,
         )
 
-        # Register gRPC service
+        # --------------------------------------------------
+        # gRPC registration
+        # --------------------------------------------------
         rf_pb2_grpc.add_WorkerServiceServicer_to_server(
             self.service,
             self.server
         )
 
         self.server.add_insecure_port(f"[::]:{config.port}")
-
     # --------------------------------------------------
     # Lifecycle
     # --------------------------------------------------
