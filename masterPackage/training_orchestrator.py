@@ -140,7 +140,14 @@ class TrainingOrchestrator:
                 prepared_dataset=prepared_dataset,
                 workers=alive_workers,
             )
-            missing_tree_ids = recovery_plan.missing_tree_ids
+
+            if recovery_plan.deferred_tree_ids and not recovery_plan.recover_now_tree_ids:
+                raise RuntimeError(
+                    "Recovery deferred: some trees are still associated with RUNNING tasks "
+                    "that look alive or are within grace period"
+                )
+
+            missing_tree_ids = recovery_plan.recover_now_tree_ids
             shards = [
                 self._with_next_attempt_id(job_id, shard)
                 for shard in recovery_plan.recovery_shards
