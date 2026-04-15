@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List
 
 import numpy as np
@@ -7,67 +8,49 @@ import numpy as np
 from worker.storage.artifact_store import ArtifactStore
 
 
-class ShardPredictor:
-    """
-    Handles prediction for a shard of trees.
+@dataclass
+class ShardPredictionResult:
+    values: np.ndarray
+    n_rows: int
+    n_cols: int
 
-    Responsibilities:
-    - Load trained trees from artifact store
-    - Run predictions
-    - Aggregate results
-    """
+
+class ShardPredictor:
 
     def __init__(self, artifact_store: ArtifactStore):
         self.artifact_store = artifact_store
 
-    def predict(
-        self,
-        artifact_uris: List[str],
-        X: np.ndarray,
-    ) -> np.ndarray:
+    def predict(self, artifact_uris: List[str], X: np.ndarray) -> ShardPredictionResult:
 
         if not artifact_uris:
-            raise ValueError("No artifact URIs provided for prediction")
+            raise ValueError("No artifact URIs provided")
 
-        predictions_per_tree = []
+        predictions = []
 
-        # --------------------------------------------------
-        # Load + predict per tree
-        # --------------------------------------------------
         for uri in artifact_uris:
-
             if not self.artifact_store.tree_artifact_exists(uri):
-                raise FileNotFoundError(f"Artifact not found: {uri}")
+                raise FileNotFoundError(uri)
 
             model = self.artifact_store.load_tree_artifact(uri)
+            predictions.append(model.predict(X))
 
-            preds = model.predict(X)
-            predictions_per_tree.append(preds)
+        final = self._aggregate(predictions)
 
-        # --------------------------------------------------
-        # Aggregate predictions
-        # --------------------------------------------------
-        return self._aggregate(predictions_per_tree)
+        return ShardPredictionResult(
+            values=final,
+            n_rows=final.shape[0],
+            n_cols=1
+        )
 
-    def _aggregate(self, predictions_per_tree: List[np.ndarray]) -> np.ndarray:
-        """
-        Majority voting aggregation for classification.
-
-        Shape:
-            predictions_per_tree: (n_trees, n_samples)
-        Returns:
-            (n_samples,)
-        """
-
-        stacked = np.vstack(predictions_per_tree)  # (n_trees, n_samples)
+    def _aggregate(self, preds: List[np.ndarray]) -> np.ndarray:
+        stacked = np.vstack(preds)
 
         n_samples = stacked.shape[1]
-        final_predictions = []
+        out = np.empty(n_samples)
 
         for i in range(n_samples):
-            column = stacked[:, i]
+            col = stacked[:, i]
+            values, counts = np.unique(col, return_counts=True)
+            out[i] = values[np.argmax(counts)]
 
-            values, counts = np.unique(column, return_counts=True)
-            final_predictions.append(values[np.argmax(counts)])
-
-        return np.array(final_predictions)
+        return out

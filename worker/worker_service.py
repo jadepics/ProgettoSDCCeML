@@ -1,6 +1,7 @@
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
 from common.contracts import TrainingShard, ForestConfiguration, TreeArtifactMetadata
+from worker.mappers.tree_artifact_mapper import to_proto_tree_artifact
 from worker.utils.dataset_utils import split_features_labels
 
 from worker.utils.proto_utils import matrix_from_proto
@@ -107,7 +108,10 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             # ----------------------------------------
             result = self.shard_trainer.train(shard, X, y)
 
-            self.state.on_task_success(task_id)
+            if result.success:
+                self.state.on_task_success(task_id)
+            else:
+                self.state.on_task_failure(task_id, result.error_message or "")
 
             # ----------------------------------------
             # 4. Convert result → proto
@@ -118,7 +122,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 worker_id=result.worker_id,
                 success=result.success,
                 error=result.error_message or "",
-                artifacts=[self._to_proto_artifact(a) for a in result.tree_artifacts],
+                artifacts=[to_proto_tree_artifact(a) for a in result.tree_artifacts],
                 completed_tree_ids=result.completed_tree_ids,
                 failed_tree_ids=result.failed_tree_ids,
                 elapsed_time_seconds=result.elapsed_time_seconds,
@@ -163,60 +167,39 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
     # PREDICT
     # --------------------------------------------------
     def PredictShard(self, request, context):
-        model_id = request.model_id
-
-        # ⚠️ Assunzione temporanea
-        job_id = model_id
-        experiment_id = model_id
-
-        self.state.on_task_start(model_id)
+        self.state.on_task_start(request.model_id)
 
         try:
-            # --------------------------------------------------
-            # 1. Input
-            # --------------------------------------------------
+            # 1. input
             X = matrix_from_proto(request.features)
 
-            # --------------------------------------------------
-            # 2. Load manifest
-            # --------------------------------------------------
-            from worker.storage.paths import manifest_path
-
-            manifest_key = manifest_path(job_id, experiment_id)
-
-            manifest = self.shard_predictor.artifact_store.load_json(manifest_key)
-
-            # Estrarre artifact URIs
-            trees_dict = manifest.get("trees", {})
-            artifact_uris = list(trees_dict.values())
+            # 2. usare URIs dal master
+            artifact_uris = list(request.tree_artifact_uris)
 
             if not artifact_uris:
-                raise ValueError("No tree artifacts found in manifest")
+                raise ValueError("No tree artifacts provided")
 
-            # --------------------------------------------------
-            # 3. Delegate prediction
-            # --------------------------------------------------
+            # 3. prediction (NO aggregation finale)
             result = self.shard_predictor.predict(
                 artifact_uris,
-                X,
+                X
             )
 
-            self.state.on_task_success(model_id)
+            self.state.on_task_success(request.model_id)
 
-            # --------------------------------------------------
-            # 4. Build response
-            # --------------------------------------------------
             return rf_pb2.PredictShardResponse(
                 worker_id=self.config.worker_id,
                 success=True,
                 error="",
-                values=result.values,
+                #precedentemente questa riga era
+                #values=result.values,
+                values=result.values.tolist(),
                 n_rows=result.n_rows,
                 n_cols=result.n_cols,
             )
 
         except Exception as exc:
-            self.state.on_task_failure(model_id, str(exc))
+            self.state.on_task_failure(request.model_id, str(exc))
 
             return rf_pb2.PredictShardResponse(
                 worker_id=self.config.worker_id,
@@ -228,4 +211,4 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             )
 
         finally:
-            self.state.on_task_end(model_id)
+            self.state.on_task_end(request.model_id)
