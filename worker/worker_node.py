@@ -17,6 +17,9 @@ from worker.worker_state import WorkerState
 from worker.training.shard_trainer import ShardTrainer
 from worker.prediction.shard_predictor import ShardPredictor
 
+from worker.master_client.master_client import MasterClient
+from worker.runtime.heartbeat_loop import HeartbeatLoop
+
 from worker.storage.filesystem_store import FilesystemArtifactStore
 
 
@@ -111,12 +114,47 @@ class WorkerNode:
             self.server
         )
 
+        # --------------------------------------------------
+        # Master client
+        # --------------------------------------------------
+        self.master_client = MasterClient(
+            host=config.master_host,
+            port=config.master_port
+        )
+
+        # --------------------------------------------------
+        # Heartbeat loop
+        # --------------------------------------------------
+        self.heartbeat_loop = HeartbeatLoop(
+            master_client=self.master_client,
+            worker_state=self.state,
+            worker_id=config.worker_id,
+            interval_sec=5
+        )
+
         self.server.add_insecure_port(f"[::]:{config.port}")
     # --------------------------------------------------
     # Lifecycle
     # --------------------------------------------------
 
     def start(self):
+        # ----------------------------------------
+        # 1. REGISTER (BLOCKING + RETRY)
+        # ----------------------------------------
+        self.master_client.register_worker(
+            worker_id=self.config.worker_id,
+            host="localhost",  # o config.host
+            port=self.config.port
+        )
+
+        # ----------------------------------------
+        # 2. START HEARTBEAT
+        # ----------------------------------------
+        self.heartbeat_loop.start()
+
+        # ----------------------------------------
+        # 3. START gRPC SERVER
+        # ----------------------------------------
         self.server.start()
         print(f"[WorkerNode] Started on port {self.config.port}")
 
@@ -128,4 +166,5 @@ class WorkerNode:
 
     def stop(self):
         print("[WorkerNode] Shutting down...")
+        self.heartbeat_loop.stop()
         self.server.stop(0)

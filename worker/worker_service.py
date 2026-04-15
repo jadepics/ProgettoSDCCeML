@@ -153,15 +153,6 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
         finally:
             self.state.on_task_end(task_id)
 
-    def _to_proto_artifact(self, a: TreeArtifactMetadata):
-        return rf_pb2.TrainedTreeArtifact(
-            tree_id=a.tree_id,
-            experiment_id=a.experiment_id,
-            tree_index=a.tree_index,
-            artifact_uri=a.artifact_uri,
-            worker_id=a.worker_id,
-            seed=a.seed,
-        )
 
     # --------------------------------------------------
     # PREDICT
