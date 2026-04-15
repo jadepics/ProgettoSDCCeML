@@ -6,7 +6,6 @@ import time
 
 import rf_v2_pb2_grpc as rf_pb2_grpc
 from worker.training.bootstrap_sampler import BootstrapSampler
-from worker.training.decision_tree_factory import DecisionTreeFactory
 from worker.training.tree_artifact_writer import TreeArtifactWriter
 from worker.utils.io_utils import DataLoader
 from worker.progress.worker_progress_store import WorkerProgressStore
@@ -65,8 +64,6 @@ class WorkerNode:
         # Training components (MISSING PRIMA)
         # --------------------------------------------------
         self.bootstrap_sampler = BootstrapSampler()
-        
-        self.tree_factory = DecisionTreeFactory()
 
         self.artifact_writer = TreeArtifactWriter(
             artifact_store=self.artifact_store,
@@ -75,7 +72,6 @@ class WorkerNode:
 
         self.shard_trainer = ShardTrainer(
             bootstrap_sampler=self.bootstrap_sampler,
-            tree_factory=self.tree_factory,
             artifact_writer=self.artifact_writer,
             progress_store=self.progress_store,
         )

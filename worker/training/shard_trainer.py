@@ -30,12 +30,10 @@ class ShardTrainer:
     def __init__(
         self,
         bootstrap_sampler: BootstrapSampler,
-        tree_factory: DecisionTreeFactory,
         artifact_writer: TreeArtifactWriter,
         progress_store: WorkerProgressStore,
     ):
         self.bootstrap_sampler = bootstrap_sampler
-        self.tree_factory = tree_factory
         self.artifact_writer = artifact_writer
         self.progress_store = progress_store
 
@@ -45,7 +43,8 @@ class ShardTrainer:
             X: np.ndarray,
             y: np.ndarray,
     ) -> ShardTrainingResult:
-        
+
+        tree_factory = DecisionTreeFactory(shard.forest_config)
 
         job_id = shard.job_id
         experiment_id = shard.experiment_id
@@ -105,28 +104,6 @@ class ShardTrainer:
 
                 continue
 
-            # --------------------------------------------------
-            # ✅ Idempotenza 3: artifact già esistente
-            # --------------------------------------------------
-            artifact_key = tree_artifact_path(
-                job_id=job_id,
-                experiment_id=experiment_id,
-                tree_index=tree_index,
-            )
-
-            if self.artifact_writer.store.exists(artifact_key):
-                completed_tree_ids.append(tree_id)
-
-                # opzionale: aggiornare progress
-                self.progress_store.update_progress(
-                    job_id=job_id,
-                    experiment_id=experiment_id,
-                    task_id=task_id,
-                    shard_id=tree_index,
-                    progress=len(completed_tree_ids) / shard.tree_count,
-                )
-
-                continue
 
             # --------------------------------------------------
             # TRAINING
@@ -135,12 +112,12 @@ class ShardTrainer:
                 t0 = time.time()
 
                 # 1. bootstrap
-                indices = self.bootstrap_sampler.sample_indices(len(X), seed)
+                indices = self.bootstrap_sampler.sample_indices(len(X), seed, shard.forest_config.bootstrap)
                 X_fit = X[indices]
                 y_fit = y[indices]
 
                 # 2. modello
-                model = self.tree_factory.create(
+                model = tree_factory.create(
                     max_depth=shard.forest_config.max_depth,
                     min_samples_split=shard.forest_config.min_samples_split,
                     min_samples_leaf=shard.forest_config.min_samples_leaf,
