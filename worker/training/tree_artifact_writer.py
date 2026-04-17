@@ -117,6 +117,6 @@ class TreeArtifactWriter:
             training_time_seconds=training_time_seconds,
         )
 
-        self.store.save_json(metadata_key, asdict(metadata))
+        self.store.save_json_atomic(metadata_key, asdict(metadata))
 
         return metadata

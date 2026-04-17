@@ -10,64 +10,25 @@ from worker.utils.proto_utils import matrix_from_proto
 class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 
     def __init__(
-        self,
-        config,
-        state,
-        shard_trainer,
-        shard_predictor,
-        progress_store,
-        artifact_store,
-        data_loader
+            self,
+            config,
+            state,
+            shard_trainer,
+            shard_predictor,
     ):
         self.config = config
         self.state = state
         self.shard_trainer = shard_trainer
         self.shard_predictor = shard_predictor
-        self.progress_store = progress_store
-        self.artifact_store = artifact_store
-        self.data_loader = data_loader
 
     def TrainShard(self, request, context):
-        job_id = request.job_id
-        experiment_id = request.experiment_id
         task_id = request.task_id
 
-        # ----------------------------------------
-        # Worker state
-        # ----------------------------------------
         self.state.on_task_start(task_id)
 
         try:
-            status = self.progress_store.start_task(
-                job_id,
-                experiment_id,
-                task_id,
-                metadata={
-                    "attempt_id": request.attempt_id,
-                    "worker_id": self.config.worker_id,
-                },
-            )
-
             # ----------------------------------------
-            # Idempotenza task-level
-            # ----------------------------------------
-            if status == "ALREADY_COMPLETED":
-                existing = self.progress_store.get_task(job_id, experiment_id, task_id)
-
-                return rf_pb2.TrainShardResponse(
-                    task_id=task_id,
-                    attempt_id=request.attempt_id,
-                    worker_id=self.config.worker_id,
-                    success=True,
-                    error="",
-                    artifacts=[],
-                    completed_tree_ids=existing.get("completed_tree_ids", []),
-                    failed_tree_ids=existing.get("failed_tree_ids", []),
-                    elapsed_time_seconds=0.0,
-                )
-
-            # ----------------------------------------
-            # 1. Convert proto → TrainingShard
+            # 1. Mapping proto → domain
             # ----------------------------------------
             shard = TrainingShard(
                 task_id=request.task_id,
@@ -93,28 +54,24 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 train_labels_uri=request.train_labels_uri,
                 artifact_output_dir=request.artifact_output_dir,
                 seed_base=request.seed_base,
-                lease_expires_at_ts=request.lease_expires_at_unix_ms / 1000.0            )
+                lease_expires_at_ts=request.lease_expires_at_unix_ms / 1000.0,
+            )
 
             # ----------------------------------------
-            # 2. Load dataset (URI → numpy)
+            # 2. Delega totale al trainer
             # ----------------------------------------
-            X = self.data_loader.load_numpy(request.train_features_uri)
-            y = self.data_loader.load_numpy(request.train_labels_uri)
-            
-            X, y = split_features_labels(X, y)
+            result = self.shard_trainer.train(shard)
 
             # ----------------------------------------
-            # 3. Call trainer (PURE ML)
+            # 3. Stato worker
             # ----------------------------------------
-            result = self.shard_trainer.train(shard, X, y)
-
             if result.success:
                 self.state.on_task_success(task_id)
             else:
                 self.state.on_task_failure(task_id, result.error_message or "")
 
             # ----------------------------------------
-            # 4. Convert result → proto
+            # 4. Mapping result → proto
             # ----------------------------------------
             return rf_pb2.TrainShardResponse(
                 task_id=result.task_id,
@@ -131,13 +88,6 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
         except Exception as exc:
             self.state.on_task_failure(task_id, str(exc))
 
-            self.progress_store.fail_task(
-                job_id,
-                experiment_id,
-                task_id,
-                error=str(exc),
-            )
-
             return rf_pb2.TrainShardResponse(
                 task_id=task_id,
                 attempt_id=request.attempt_id,
@@ -152,7 +102,6 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 
         finally:
             self.state.on_task_end(task_id)
-
 
     # --------------------------------------------------
     # PREDICT

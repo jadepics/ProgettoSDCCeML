@@ -173,3 +173,25 @@ class WorkerProgressStore:
         self._load_snapshot(job_id, experiment_id)
         task = self._get_task(task_id)
         return set(task.get("shards_completed", []))
+
+    def update_task(
+            self,
+            job_id: str,
+            experiment_id: str,
+            task_id: str,
+            completed_tree_ids: list[str],
+            failed_tree_ids: list[str],
+    ) -> None:
+        """
+        Aggiornamento consistente dello stato task.
+        """
+
+        self._load_snapshot(job_id, experiment_id)
+
+        task = self._get_task(task_id)
+
+        task["completed_tree_ids"] = completed_tree_ids
+        task["failed_tree_ids"] = failed_tree_ids
+        task["last_update"] = current_time_seconds()
+
+        self._persist_snapshot(job_id, experiment_id)

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Dict
 
 
 class ArtifactStore(ABC):
@@ -16,6 +16,19 @@ class ArtifactStore(ABC):
             True -> artifact was created
             False -> artifact already existed
         """
+        pass
+
+    @abstractmethod
+    def save_json_atomic(self, key: str, data: Dict[str, Any]) -> None:
+        """
+        Salva JSON in modo atomico:
+        - scrive su file temporaneo
+        - rename atomico su key finale
+        """
+        pass
+
+    @abstractmethod
+    def rename(self, src: str, dst: str) -> None:
         pass
 
     @abstractmethod

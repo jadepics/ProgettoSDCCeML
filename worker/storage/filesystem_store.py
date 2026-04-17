@@ -1,7 +1,7 @@
 import json
 import os
 import joblib
-from typing import Any
+from typing import Any, Dict
 
 from artifact_store import ArtifactStore
 
@@ -19,6 +19,19 @@ class FilesystemArtifactStore(ArtifactStore):
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         joblib.dump(model, full_path)
         return full_path
+
+    def rename(self, src: str, dst: str) -> None:
+        os.replace(self._full_path(src), self._full_path(dst))  # atomico POSIX
+
+    # 🔴 IMPLEMENTAZIONE ATOMICA
+    def save_json_atomic(self, key: str, data: Dict[str, Any]) -> None:
+        tmp_key = key + ".tmp"
+
+        # scrittura temporanea
+        self.save_json(tmp_key, data)
+
+        # rename atomico
+        self.rename(tmp_key, key)
 
     def save_tree_artifact_if_not_exists(self, path: str, model: Any) -> bool:
         full_path = self._full_path(path)
