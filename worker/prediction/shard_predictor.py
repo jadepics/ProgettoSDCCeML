@@ -1,56 +1,80 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import List
-
 import numpy as np
 
 from worker.storage.artifact_store import ArtifactStore
 
 
-@dataclass
 class ShardPredictionResult:
-    values: np.ndarray
-    n_rows: int
-    n_cols: int
+    def __init__(self, values: np.ndarray):
+        """
+        values: np.ndarray shape (n_samples, n_trees)
+        """
+        self.values = values
+        self.n_rows = values.shape[0]
+        self.n_cols = values.shape[1]
 
 
 class ShardPredictor:
+    """
+    Prediction per shard (insieme di alberi).
+    NON aggrega: restituisce predizioni per albero.
+    """
 
     def __init__(self, artifact_store: ArtifactStore):
         self.artifact_store = artifact_store
 
-    def predict(self, artifact_uris: List[str], X: np.ndarray) -> ShardPredictionResult:
+    def predict(
+        self,
+        tree_artifact_uris: List[str],
+        X: np.ndarray,
+    ) -> ShardPredictionResult:
+        """
+        tree_artifact_uris: List[str]  # URIs forniti dal master
+        X: np.ndarray                  # shape (n_samples, n_features)
 
-        if not artifact_uris:
-            raise ValueError("No artifact URIs provided")
+        return: ShardPredictionResult
+        """
 
-        predictions = []
+        if not tree_artifact_uris:
+            raise ValueError("No tree artifacts provided")
 
-        for uri in artifact_uris:
+        n_samples: int = X.shape[0]
+        n_trees: int = len(tree_artifact_uris)
+
+        # matrice output: (samples x trees)
+        predictions = np.zeros((n_samples, n_trees))
+
+        # ----------------------------------------
+        # Loop sugli alberi assegnati
+        # ----------------------------------------
+        for j, uri in enumerate(tree_artifact_uris):
+            """
+            uri: str
+            """
+
             if not self.artifact_store.tree_artifact_exists(uri):
                 raise FileNotFoundError(uri)
 
-            model = self.artifact_store.load_tree_artifact(uri)
-            predictions.append(model.predict(X))
+            # ----------------------------------------
+            # LOAD MODEL (NO ASSUNZIONI)
+            # ----------------------------------------
+            tree = self.artifact_store.load_tree_artifact(uri)
 
-        final = self._aggregate(predictions)
+            # ----------------------------------------
+            # PREDICT
+            # ----------------------------------------
+            pred = tree.predict(X)
 
-        return ShardPredictionResult(
-            values=final,
-            n_rows=final.shape[0],
-            n_cols=1
-        )
+            # sicurezza shape
+            pred = np.asarray(pred).reshape(-1)
 
-    def _aggregate(self, preds: List[np.ndarray]) -> np.ndarray:
-        stacked = np.vstack(preds)
+            if pred.shape[0] != n_samples:
+                raise ValueError(
+                    f"Tree prediction size mismatch: expected {n_samples}, got {pred.shape[0]}"
+                )
 
-        n_samples = stacked.shape[1]
-        out = np.empty(n_samples)
+            predictions[:, j] = pred
 
-        for i in range(n_samples):
-            col = stacked[:, i]
-            values, counts = np.unique(col, return_counts=True)
-            out[i] = values[np.argmax(counts)]
-
-        return out
+        return ShardPredictionResult(predictions)

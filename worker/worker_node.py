@@ -100,10 +100,7 @@ class WorkerNode:
             config=config,
             state=self.state,
             shard_trainer=self.shard_trainer,
-            shard_predictor=self.shard_predictor,
-            progress_store=self.progress_store,
-            artifact_store=self.artifact_store,
-            data_loader=self.data_loader,
+            shard_predictor=self.shard_predictor
         )
 
         # --------------------------------------------------
