@@ -121,21 +121,23 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 
             # 3. prediction (NO aggregation finale)
             result = self.shard_predictor.predict(
-                artifact_uris,
-                X
+                tree_artifact_uris=artifact_uris,
+                X=X,
+                task_type=request.task_type,
+                class_labels=list(request.class_labels),
             )
 
             self.state.on_task_success(request.model_id)
+
+            n_rows, n_cols = result.shape
 
             return rf_pb2.PredictShardResponse(
                 worker_id=self.config.worker_id,
                 success=True,
                 error="",
-                #precedentemente questa riga era
-                #values=result.values,
-                values=result.values.tolist(),
-                n_rows=result.n_rows,
-                n_cols=result.n_cols,
+                values=result.flatten().tolist(),  # 🔥 fondamentale
+                n_rows=n_rows,
+                n_cols=n_cols,
             )
 
         except Exception as exc:

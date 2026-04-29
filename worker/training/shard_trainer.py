@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import time
-from typing import List
-
 import numpy as np
 
 from common.contracts import (
@@ -79,11 +76,19 @@ class ShardTrainer:
         # Caso: già completato (idempotenza forte, ovvero idempotenza per task)
         # ----------------------------------------
         if status == "ALREADY_COMPLETED":
+
             existing = self.progress_store.get_task(
                 job_id=shard.job_id,
                 experiment_id=shard.experiment_id,
                 task_id=shard.task_id,
             )
+
+            if existing is None:
+                completed_tree_ids = set()
+                failed_tree_ids = set()
+            else:
+                completed_tree_ids = set(existing.completed_tree_ids)
+                failed_tree_ids = set(existing.failed_tree_ids)
 
             return ShardTrainingResult(
                 task_id=shard.task_id,
@@ -91,10 +96,10 @@ class ShardTrainer:
                 worker_id=shard.assigned_worker_id,
                 success=True,
                 tree_artifacts=[],
-                completed_tree_ids=existing.completed_tree_ids,
-                failed_tree_ids=existing.failed_tree_ids,
-                completed_tree_count=len(existing.completed_tree_ids),
-                failed_tree_count=len(existing.failed_tree_ids),
+                completed_tree_ids=list(completed_tree_ids),
+                failed_tree_ids=list(failed_tree_ids),
+                completed_tree_count=len(completed_tree_ids),
+                failed_tree_count=len(failed_tree_ids),
                 error_message=None,
                 elapsed_time_seconds=0.0,
             )
@@ -109,8 +114,8 @@ class ShardTrainer:
         )
 
         if existing is not None:
-            completed_tree_ids = set(existing.get("completed_tree_ids", []))
-            failed_tree_ids = set(existing.get("failed_tree_ids", []))
+            completed_tree_ids = set(existing.completed_tree_ids)
+            failed_tree_ids = set(existing.failed_tree_ids)
 
         # ----------------------------------------
         # Load dataset (URI → numpy)
@@ -134,13 +139,28 @@ class ShardTrainer:
             tree_index: int = shard.tree_start_index + i
 
             # id logico dell'albero (deterministico)
-            tree_id: str = f"{shard.task_id}_tree_{tree_index}"
+            tree_id: str = f"{shard.experiment_id}_tree_{tree_index}"
 
             # ----------------------------------------
             # IDPOTENZA (CRITICO)
             # ----------------------------------------
-            if self.artifact_writer.exists(tree_id):
-                completed_tree_ids.append(tree_id)
+            artifact_key = tree_artifact_path(
+                job_id=shard.job_id,
+                experiment_id=shard.experiment_id,
+                tree_index=tree_index,
+            )
+
+            if self.artifact_writer.store.exists(artifact_key):
+                completed_tree_ids.add(tree_id)
+
+                self.progress_store.update_progress(
+                    job_id=shard.job_id,
+                    experiment_id=shard.experiment_id,
+                    task_id=shard.task_id,
+                    shard_id=tree_index,
+                    progress=len(completed_tree_ids) / shard.tree_count,
+                )
+
                 continue
 
             # ----------------------------------------

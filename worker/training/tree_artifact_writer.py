@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from common.contracts import TreeArtifactMetadata
+from common.enums import TreeStatus
 from worker.storage.artifact_store import ArtifactStore
 from worker.storage.paths import (
     tree_artifact_path,
@@ -98,7 +99,7 @@ class TreeArtifactWriter:
             worker_id=self.worker_id,
             seed=seed,
             artifact_uri=artifact_key,
-            status="COMPLETED",
+            status=TreeStatus.COMPLETED,
             training_time_seconds=training_time_seconds,
         )
 

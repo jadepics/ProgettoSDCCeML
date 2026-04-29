@@ -140,7 +140,7 @@ class WorkerNode:
         # ----------------------------------------
         self.master_client.register_worker(
             worker_id=self.config.worker_id,
-            host="localhost",  # o config.host
+            host = self._resolve_advertise_host(),
             port=self.config.port
         )
 
@@ -160,6 +160,13 @@ class WorkerNode:
                 time.sleep(86400)
         except KeyboardInterrupt:
             self.stop()
+
+    def _resolve_advertise_host(self) -> str:
+        if self.config.advertise_host:
+            return self.config.advertise_host
+
+        # fallback intelligente per sviluppo locale
+        return "localhost"
 
     def stop(self):
         print("[WorkerNode] Shutting down...")

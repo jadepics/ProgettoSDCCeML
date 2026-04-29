@@ -3,8 +3,7 @@ import os
 import joblib
 from typing import Any, Dict
 
-from artifact_store import ArtifactStore
-
+from worker.storage.artifact_store import ArtifactStore
 
 class FilesystemArtifactStore(ArtifactStore):
 
