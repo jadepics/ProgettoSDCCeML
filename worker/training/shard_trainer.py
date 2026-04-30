@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from common.ids import generate_tree_id
 
 from common.contracts import (
     TrainingShard,
@@ -139,7 +140,7 @@ class ShardTrainer:
             tree_index: int = shard.tree_start_index + i
 
             # id logico dell'albero (deterministico)
-            tree_id: str = f"{shard.experiment_id}_tree_{tree_index}"
+            tree_id: str = generate_tree_id(shard.experiment_id, tree_index)
 
             # ----------------------------------------
             # IDPOTENZA (CRITICO)
@@ -149,19 +150,6 @@ class ShardTrainer:
                 experiment_id=shard.experiment_id,
                 tree_index=tree_index,
             )
-
-            if self.artifact_writer.store.exists(artifact_key):
-                completed_tree_ids.add(tree_id)
-
-                self.progress_store.update_progress(
-                    job_id=shard.job_id,
-                    experiment_id=shard.experiment_id,
-                    task_id=shard.task_id,
-                    shard_id=tree_index,
-                    progress=len(completed_tree_ids) / shard.tree_count,
-                )
-
-                continue
 
             # ----------------------------------------
             # SKIP se già completato (retry-safe)
@@ -192,6 +180,7 @@ class ShardTrainer:
             # create(max_depth, min_samples_split, min_samples_leaf, max_features, seed)
             # ----------------------------------------
             fc = shard.forest_config  # alias per leggibilità
+            task_type = fc.task_type.lower().strip()
 
             tree = self.tree_factory.create(
                 max_depth=fc.max_depth,
@@ -199,6 +188,7 @@ class ShardTrainer:
                 min_samples_leaf=fc.min_samples_leaf,
                 max_features=fc.max_features,
                 seed=seed,
+                task_type=task_type
             )
 
             # ----------------------------------------
@@ -264,6 +254,9 @@ class ShardTrainer:
                     completed_tree_ids=list(completed_tree_ids),
                     failed_tree_ids=list(failed_tree_ids),
                 )
+
+                print(f"[ShardTrainer] Tree {tree_id} failed: {exc}")
+
         # ----------------------------------------
         # FINALIZZAZIONE
         # ----------------------------------------

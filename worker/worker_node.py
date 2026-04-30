@@ -15,6 +15,7 @@ from worker.worker_config import WorkerConfig
 from worker.worker_state import WorkerState
 
 from worker.training.shard_trainer import ShardTrainer
+from worker.training.decision_tree_factory import DecisionTreeFactory
 from worker.prediction.shard_predictor import ShardPredictor
 
 from worker.master_client.master_client import MasterClient
@@ -73,12 +74,6 @@ class WorkerNode:
             worker_id=config.worker_id
         )
 
-        self.shard_trainer = ShardTrainer(
-            bootstrap_sampler=self.bootstrap_sampler,
-            artifact_writer=self.artifact_writer,
-            progress_store=self.progress_store,
-        )
-
         # --------------------------------------------------
         # Prediction
         # --------------------------------------------------
@@ -91,6 +86,16 @@ class WorkerNode:
         # --------------------------------------------------
         self.data_loader = DataLoader(
             artifact_store=self.artifact_store
+        )
+
+        self.tree_factory=DecisionTreeFactory()
+
+        self.shard_trainer = ShardTrainer(
+            bootstrap_sampler=self.bootstrap_sampler,
+            tree_factory=self.tree_factory,
+            artifact_writer = self.artifact_writer,
+            progress_store = self.progress_store,
+            data_loader = self.data_loader
         )
 
         # --------------------------------------------------
@@ -136,30 +141,38 @@ class WorkerNode:
 
     def start(self):
         # ----------------------------------------
-        # 1. REGISTER (BLOCKING + RETRY)
+        # 1. START gRPC SERVER (PRIMA!)
         # ----------------------------------------
+        self.server.start()
+        print(f"[WorkerNode] gRPC server started on port {self.config.port}")
+
+        # ----------------------------------------
+        # 2. REGISTER (ora il worker è raggiungibile)
+        # ----------------------------------------
+        advertise_host=self._resolve_advertise_host()
+
         self.master_client.register_worker(
             worker_id=self.config.worker_id,
-            host = self._resolve_advertise_host(),
+            host=advertise_host,
             port=self.config.port
         )
 
+        print(f"[WorkerNode] Registered as {advertise_host}:{self.config.port}")
+
         # ----------------------------------------
-        # 2. START HEARTBEAT
+        # 3. START HEARTBEAT
         # ----------------------------------------
         self.heartbeat_loop.start()
 
         # ----------------------------------------
-        # 3. START gRPC SERVER
+        # 4. LOOP
         # ----------------------------------------
-        self.server.start()
-        print(f"[WorkerNode] Started on port {self.config.port}")
-
         try:
             while True:
                 time.sleep(86400)
         except KeyboardInterrupt:
             self.stop()
+
 
     def _resolve_advertise_host(self) -> str:
         if self.config.advertise_host:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+from common.ids import generate_tree_id
 from common.contracts import TreeArtifactMetadata
 from common.enums import TreeStatus
 from worker.storage.artifact_store import ArtifactStore
@@ -67,9 +68,7 @@ class TreeArtifactWriter:
             tree_index=tree_index,
         )
 
-        # ⚠️ FIX IMPORTANTE:
-        # usare task_id, NON experiment_id
-        tree_id: str = f"{task_id}_tree_{tree_index}"
+        tree_id = generate_tree_id(experiment_id, tree_index)
 
         # --------------------------------------------------
         # 2. FAST PATH → metadata già esiste

@@ -15,6 +15,9 @@ class DecisionTreeFactory:
     - parsing dei parametri
     """
 
+    def __init__(self):
+        self.task_type = None
+
     def _parse_max_features(self, value):
         if value is None:
             return None
@@ -35,14 +38,6 @@ class DecisionTreeFactory:
         except ValueError:
             raise ValueError(f"Invalid max_features value: {value}")
 
-    def __init__(self, config: ForestConfiguration):
-        task_type = config.task_type.lower().strip()
-
-        if task_type not in {"classification", "regression"}:
-            raise ValueError("task_type must be 'classification' or 'regression'")
-
-        self.task_type = task_type
-
     def create(
         self,
         max_depth: Optional[int],
@@ -50,10 +45,15 @@ class DecisionTreeFactory:
         min_samples_leaf: int,
         max_features: Union[str, float, None],
         seed: int,
+        task_type: str
     ):
         """
         Costruisce un DecisionTree pronto per il fit.
         """
+        if task_type not in {"classification", "regression"}:
+            raise ValueError("task_type must be 'classification' or 'regression'")
+
+        self.task_type = task_type
         parsed_max_features = self._parse_max_features(max_features)
 
         if self.task_type == "classification":
