@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Any
 
 from worker.storage.artifact_store import ArtifactStore
 from worker.utils.time_utils import current_time_seconds
 from worker.storage.paths import worker_snapshot_path
+
+from common.contracts import WorkerProgressSnapshot
 
 
 # ======================================================
@@ -71,10 +73,24 @@ class WorkerProgressStore:
         self.worker_id: str = worker_id
         self.state: Optional[WorkerProgressSnapshot] = None
 
-
     # ------------------------
     # Internal helpers
     # ------------------------
+    def _to_worker_snapshot(
+            self,
+            job_id: str,
+            experiment_id: str,
+            task_id: str,
+            task: TaskProgressSnapshot
+    ) -> WorkerProgressSnapshot:
+        return WorkerProgressSnapshot(
+            worker_id=self.worker_id,
+            task_id=task_id,
+            experiment_id=experiment_id,
+            completed_tree_ids=list(task.completed_tree_ids),
+            running_tree_ids=[],  # opzionale (puoi estenderlo dopo)
+            failed_tree_ids=list(task.failed_tree_ids),
+        )
 
     def _get_snapshot_key(self, job_id: str, experiment_id: str) -> str:
         return worker_snapshot_path(job_id, experiment_id, self.worker_id)
@@ -158,21 +174,25 @@ class WorkerProgressStore:
             last_update=current_time_seconds(),
         )
 
-
     def _persist_snapshot(self, job_id: str, experiment_id: str) -> None:
         key = self._get_snapshot_key(job_id, experiment_id)
 
-        if self.state is None:
-            self.state = WorkerProgressSnapshot(
-                worker_id=self.worker_id,
-                job_id=job_id,
-                experiment_id=experiment_id,
-                tasks={},
-                last_update=current_time_seconds(),
-            )
+        snapshots = []
 
-        self.state.last_update = current_time_seconds()
-        self.store.save_json_atomic(key, asdict(self.state))
+        for task_id, task in self.state["tasks"].items():
+            snapshot = self._to_worker_snapshot(
+                job_id,
+                experiment_id,
+                task_id,
+                task,
+            )
+            snapshots.append(snapshot.to_dict())
+
+        self.store.save_json_atomic(key, {
+            "worker_id": self.worker_id,
+            "experiment_id": experiment_id,
+            "tasks": snapshots,
+        })
 
     # ------------------------
     # Task management (IDEMPOTENT)

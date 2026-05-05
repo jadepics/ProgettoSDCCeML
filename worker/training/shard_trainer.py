@@ -50,7 +50,6 @@ class ShardTrainer:
         """
 
         import time
-
         start_time: float = time.time()
 
         # ----------------------------------------
@@ -73,241 +72,313 @@ class ShardTrainer:
             },
         )
 
-        # ----------------------------------------
-        # Caso: già completato (idempotenza forte, ovvero idempotenza per task)
-        # ----------------------------------------
-        if status == "ALREADY_COMPLETED":
+        #4️⃣ Eccezione globale fuori dal loop
+        #Esempio: errore in data loading errore in config
 
+        try:
+            # ----------------------------------------
+            # Caso: già completato (idempotenza forte, ovvero idempotenza per task)
+            # ----------------------------------------
+            if status == "ALREADY_COMPLETED":
+
+                existing = self.progress_store.get_task(
+                    job_id=shard.job_id,
+                    experiment_id=shard.experiment_id,
+                    task_id=shard.task_id,
+                )
+
+                if existing is None:
+                    completed_tree_ids = set()
+                    failed_tree_ids = set()
+                else:
+                    completed_tree_ids = set(existing.completed_tree_ids)
+                    failed_tree_ids = set(existing.failed_tree_ids)
+
+                return ShardTrainingResult(
+                    task_id=shard.task_id,
+                    attempt_id=shard.attempt_id,
+                    worker_id=shard.assigned_worker_id,
+                    success=True,
+                    tree_artifacts=[],
+                    completed_tree_ids=list(completed_tree_ids),
+                    failed_tree_ids=list(failed_tree_ids),
+                    completed_tree_count=len(completed_tree_ids),
+                    failed_tree_count=len(failed_tree_ids),
+                    error_message=None,
+                    elapsed_time_seconds=0.0,
+                )
+
+            # ----------------------------------------
+            # Carico snapshot esistente (retry-safe)
+            # ----------------------------------------
             existing = self.progress_store.get_task(
                 job_id=shard.job_id,
                 experiment_id=shard.experiment_id,
                 task_id=shard.task_id,
             )
 
-            if existing is None:
-                completed_tree_ids = set()
-                failed_tree_ids = set()
-            else:
+            if existing is not None:
                 completed_tree_ids = set(existing.completed_tree_ids)
                 failed_tree_ids = set(existing.failed_tree_ids)
+
+            # ----------------------------------------
+            # Load dataset (URI → numpy)
+            # ----------------------------------------
+            X: "np.ndarray" = self.data_loader.load_numpy(shard.train_features_uri)
+            y: "np.ndarray" = self.data_loader.load_numpy(shard.train_labels_uri)
+
+            # ----------------------------------------
+            # VALIDAZIONE DATASET
+            # 1️⃣ Dataset inconsistente o vuoto
+            # Problemi: X o y vuoti shape mismatch
+            # ----------------------------------------
+            if X is None or y is None:
+                raise ValueError("Dataset loading failed")
+
+            if len(X) == 0 or len(y) == 0:
+                raise ValueError("Empty dataset")
+
+            if len(X) != len(y):
+                raise ValueError("Feature/label size mismatch")
+
+            #2️⃣tree_count = 0
+            #Caso reale (bug upstream o shard mal formato
+            if shard.tree_count == 0:
+                self.progress_store.complete_task(
+                    job_id=shard.job_id,
+                    experiment_id=shard.experiment_id,
+                    task_id=shard.task_id,
+                )
+
+                return ShardTrainingResult(
+                    task_id=shard.task_id,
+                    attempt_id=shard.attempt_id,
+                    worker_id=shard.assigned_worker_id,
+                    success=True,
+                    tree_artifacts=[],
+                    completed_tree_ids=[],
+                    failed_tree_ids=[],
+                    completed_tree_count=0,
+                    failed_tree_count=0,
+                    error_message=None,
+                    elapsed_time_seconds=0.0,
+                )
+
+
+            # ----------------------------------------
+            # Da qui partirà:
+            # try:
+            #     for each tree ...
+            # ----------------------------------------
+            # LOOP sugli alberi (setup + skip)
+            # ----------------------------------------
+            for i in range(shard.tree_count):
+                """
+                i: int
+                """
+
+                # indice globale dell'albero nella foresta
+                tree_index: int = shard.tree_start_index + i
+
+                # id logico dell'albero (deterministico)
+                tree_id: str = generate_tree_id(shard.experiment_id, tree_index)
+
+                # ----------------------------------------
+                # IDPOTENZA (CRITICO)
+                # ----------------------------------------
+                artifact_key = tree_artifact_path(
+                    job_id=shard.job_id,
+                    experiment_id=shard.experiment_id,
+                    tree_index=tree_index,
+                )
+
+                # ----------------------------------------
+                # CONSISTENCY CHECK (artifact vs snapshot)
+                # ----------------------------------------
+                artifact_exists = self.artifact_writer.store.exists(artifact_key)
+
+                if tree_id in completed_tree_ids and not artifact_exists:
+                    # inconsistenza → correggiamo
+                    completed_tree_ids.remove(tree_id)
+
+                # ----------------------------------------
+                # SKIP se già completato (retry-safe)
+                # ----------------------------------------
+                if tree_id in completed_tree_ids:
+                    continue
+
+                # ----------------------------------------
+                # SEED deterministico per l'albero
+                # ----------------------------------------
+                seed: int = shard.seed_base + tree_index
+
+                # ----------------------------------------
+                # BOOTSTRAP (firma corretta)
+                # sample_indices(n_samples: int, seed: int, bootstrap: bool)
+                # ----------------------------------------
+                indices = self.bootstrap_sampler.sample_indices(
+                    n_samples=len(X),
+                    seed=seed,
+                    bootstrap=shard.forest_config.bootstrap,
+                )
+
+                X_sample = X[indices]
+                y_sample = y[indices]
+
+                # ----------------------------------------
+                # CREAZIONE MODELLO (firma corretta)
+                # create(max_depth, min_samples_split, min_samples_leaf, max_features, seed)
+                # ----------------------------------------
+                fc = shard.forest_config  # alias per leggibilità
+                task_type = fc.task_type.lower().strip()
+
+                tree = self.tree_factory.create(
+                    max_depth=fc.max_depth,
+                    min_samples_split=fc.min_samples_split,
+                    min_samples_leaf=fc.min_samples_leaf,
+                    max_features=fc.max_features,
+                    seed=seed,
+                    task_type=task_type
+                )
+
+                # ----------------------------------------
+                # Da qui partirà:
+                # try:
+                #     tree.fit(...)
+                # ----------------------------------------
+                try:
+                    """
+                    Training + persistenza atomica albero
+                    """
+
+                    # ----------------------------------------
+                    # TRAIN
+                    # ----------------------------------------
+                    t0: float = time.time()
+
+                    tree.fit(X_sample, y_sample)
+
+                    training_time: float = time.time() - t0
+
+                    # ----------------------------------------
+                    # WRITE ARTIFACT (idempotente lato storage)
+                    # ----------------------------------------
+                    metadata: TreeArtifactMetadata = self.artifact_writer.write_tree(
+                        model=tree,
+                        job_id=shard.job_id,
+                        experiment_id=shard.experiment_id,
+                        task_id=shard.task_id,
+                        tree_index=tree_index,
+                        seed=seed,
+                        training_time_seconds=training_time,
+                    )
+
+                    # ----------------------------------------
+                    # UPDATE SUCCESS
+                    # ----------------------------------------
+                    tree_artifacts.append(metadata)
+                    completed_tree_ids.add(tree_id)
+
+                    # aggiornamento snapshot consistente
+                    self.progress_store.update_task(
+                        job_id=shard.job_id,
+                        experiment_id=shard.experiment_id,
+                        task_id=shard.task_id,
+                        completed_tree_ids=list(completed_tree_ids),
+                        failed_tree_ids=list(failed_tree_ids),
+                    )
+
+
+                except Exception as exc:
+                    """
+                    Gestione errore per singolo albero
+                    """
+
+                    failed_tree_ids.add(tree_id)
+
+                    # aggiorniamo comunque lo snapshot
+                    self.progress_store.update_task(
+                        job_id=shard.job_id,
+                        experiment_id=shard.experiment_id,
+                        task_id=shard.task_id,
+                        completed_tree_ids=list(completed_tree_ids),
+                        failed_tree_ids=list(failed_tree_ids),
+                    )
+
+                    print(f"[ShardTrainer] Tree {tree_id} failed: {exc}")
+
+            # ----------------------------------------
+            # FINALIZZAZIONE
+            # ----------------------------------------
+            # ----------------------------------------
+            # FINALIZZAZIONE TASK
+            # ----------------------------------------
+
+            # successo globale
+            success: bool = len(failed_tree_ids) == 0
+
+            # ----------------------------------------
+            # Aggiornamento finale snapshot
+            # ----------------------------------------
+            self.progress_store.update_task(
+                job_id=shard.job_id,
+                experiment_id=shard.experiment_id,
+                task_id=shard.task_id,
+                completed_tree_ids=list(completed_tree_ids),
+                failed_tree_ids=list(failed_tree_ids),
+            )
+
+            # ----------------------------------------
+            # Stato finale
+            # ----------------------------------------
+            if success:
+                self.progress_store.complete_task(
+                    job_id=shard.job_id,
+                    experiment_id=shard.experiment_id,
+                    task_id=shard.task_id,
+                )
+            else:
+                self.progress_store.fail_task(
+                    job_id=shard.job_id,
+                    experiment_id=shard.experiment_id,
+                    task_id=shard.task_id,
+                    error="Some trees failed",
+                )
+
+            # ----------------------------------------
+            # RETURN coerente
+            # ----------------------------------------
+            return ShardTrainingResult(
+                task_id=shard.task_id,
+                attempt_id=shard.attempt_id,
+                worker_id=shard.assigned_worker_id,
+                success=success,
+                tree_artifacts=tree_artifacts,
+                completed_tree_ids=list(completed_tree_ids),
+                failed_tree_ids=list(failed_tree_ids),
+                completed_tree_count=len(completed_tree_ids),
+                failed_tree_count=len(failed_tree_ids),
+                error_message=None if success else "Some trees failed",
+                elapsed_time_seconds=time.time() - start_time,
+            )
+        except Exception as exc:
+            self.progress_store.fail_task(
+                job_id=shard.job_id,
+                experiment_id=shard.experiment_id,
+                task_id=shard.task_id,
+                error=str(exc),
+            )
 
             return ShardTrainingResult(
                 task_id=shard.task_id,
                 attempt_id=shard.attempt_id,
                 worker_id=shard.assigned_worker_id,
-                success=True,
+                success=False,
                 tree_artifacts=[],
                 completed_tree_ids=list(completed_tree_ids),
                 failed_tree_ids=list(failed_tree_ids),
                 completed_tree_count=len(completed_tree_ids),
                 failed_tree_count=len(failed_tree_ids),
-                error_message=None,
-                elapsed_time_seconds=0.0,
+                error_message=str(exc),
+                elapsed_time_seconds=time.time() - start_time,
             )
-
-        # ----------------------------------------
-        # Carico snapshot esistente (retry-safe)
-        # ----------------------------------------
-        existing = self.progress_store.get_task(
-            job_id=shard.job_id,
-            experiment_id=shard.experiment_id,
-            task_id=shard.task_id,
-        )
-
-        if existing is not None:
-            completed_tree_ids = set(existing.completed_tree_ids)
-            failed_tree_ids = set(existing.failed_tree_ids)
-
-        # ----------------------------------------
-        # Load dataset (URI → numpy)
-        # ----------------------------------------
-        X: "np.ndarray" = self.data_loader.load_numpy(shard.train_features_uri)
-        y: "np.ndarray" = self.data_loader.load_numpy(shard.train_labels_uri)
-
-        # ----------------------------------------
-        # Da qui partirà:
-        # try:
-        #     for each tree ...
-        # ----------------------------------------
-        # LOOP sugli alberi (setup + skip)
-        # ----------------------------------------
-        for i in range(shard.tree_count):
-            """
-            i: int
-            """
-
-            # indice globale dell'albero nella foresta
-            tree_index: int = shard.tree_start_index + i
-
-            # id logico dell'albero (deterministico)
-            tree_id: str = generate_tree_id(shard.experiment_id, tree_index)
-
-            # ----------------------------------------
-            # IDPOTENZA (CRITICO)
-            # ----------------------------------------
-            artifact_key = tree_artifact_path(
-                job_id=shard.job_id,
-                experiment_id=shard.experiment_id,
-                tree_index=tree_index,
-            )
-
-            # ----------------------------------------
-            # SKIP se già completato (retry-safe)
-            # ----------------------------------------
-            if tree_id in completed_tree_ids:
-                continue
-
-            # ----------------------------------------
-            # SEED deterministico per l'albero
-            # ----------------------------------------
-            seed: int = shard.seed_base + tree_index
-
-            # ----------------------------------------
-            # BOOTSTRAP (firma corretta)
-            # sample_indices(n_samples: int, seed: int, bootstrap: bool)
-            # ----------------------------------------
-            indices = self.bootstrap_sampler.sample_indices(
-                n_samples=len(X),
-                seed=seed,
-                bootstrap=shard.forest_config.bootstrap,
-            )
-
-            X_sample = X[indices]
-            y_sample = y[indices]
-
-            # ----------------------------------------
-            # CREAZIONE MODELLO (firma corretta)
-            # create(max_depth, min_samples_split, min_samples_leaf, max_features, seed)
-            # ----------------------------------------
-            fc = shard.forest_config  # alias per leggibilità
-            task_type = fc.task_type.lower().strip()
-
-            tree = self.tree_factory.create(
-                max_depth=fc.max_depth,
-                min_samples_split=fc.min_samples_split,
-                min_samples_leaf=fc.min_samples_leaf,
-                max_features=fc.max_features,
-                seed=seed,
-                task_type=task_type
-            )
-
-            # ----------------------------------------
-            # Da qui partirà:
-            # try:
-            #     tree.fit(...)
-            # ----------------------------------------
-            try:
-                """
-                Training + persistenza atomica albero
-                """
-
-                # ----------------------------------------
-                # TRAIN
-                # ----------------------------------------
-                t0: float = time.time()
-
-                tree.fit(X_sample, y_sample)
-
-                training_time: float = time.time() - t0
-
-                # ----------------------------------------
-                # WRITE ARTIFACT (idempotente lato storage)
-                # ----------------------------------------
-                metadata: TreeArtifactMetadata = self.artifact_writer.write_tree(
-                    model=tree,
-                    job_id=shard.job_id,
-                    experiment_id=shard.experiment_id,
-                    task_id=shard.task_id,
-                    tree_index=tree_index,
-                    seed=seed,
-                    training_time_seconds=training_time,
-                )
-
-                # ----------------------------------------
-                # UPDATE SUCCESS
-                # ----------------------------------------
-                tree_artifacts.append(metadata)
-                completed_tree_ids.add(tree_id)
-
-                # aggiornamento snapshot consistente
-                self.progress_store.update_task(
-                    job_id=shard.job_id,
-                    experiment_id=shard.experiment_id,
-                    task_id=shard.task_id,
-                    completed_tree_ids=list(completed_tree_ids),
-                    failed_tree_ids=list(failed_tree_ids),
-                )
-
-
-            except Exception as exc:
-                """
-                Gestione errore per singolo albero
-                """
-
-                failed_tree_ids.add(tree_id)
-
-                # aggiorniamo comunque lo snapshot
-                self.progress_store.update_task(
-                    job_id=shard.job_id,
-                    experiment_id=shard.experiment_id,
-                    task_id=shard.task_id,
-                    completed_tree_ids=list(completed_tree_ids),
-                    failed_tree_ids=list(failed_tree_ids),
-                )
-
-                print(f"[ShardTrainer] Tree {tree_id} failed: {exc}")
-
-        # ----------------------------------------
-        # FINALIZZAZIONE
-        # ----------------------------------------
-        # ----------------------------------------
-        # FINALIZZAZIONE TASK
-        # ----------------------------------------
-
-        # successo globale
-        success: bool = len(failed_tree_ids) == 0
-
-        # ----------------------------------------
-        # Aggiornamento finale snapshot
-        # ----------------------------------------
-        self.progress_store.update_task(
-            job_id=shard.job_id,
-            experiment_id=shard.experiment_id,
-            task_id=shard.task_id,
-            completed_tree_ids=list(completed_tree_ids),
-            failed_tree_ids=list(failed_tree_ids),
-        )
-
-        # ----------------------------------------
-        # Stato finale
-        # ----------------------------------------
-        if success:
-            self.progress_store.complete_task(
-                job_id=shard.job_id,
-                experiment_id=shard.experiment_id,
-                task_id=shard.task_id,
-            )
-        else:
-            self.progress_store.fail_task(
-                job_id=shard.job_id,
-                experiment_id=shard.experiment_id,
-                task_id=shard.task_id,
-                error="Some trees failed",
-            )
-
-        # ----------------------------------------
-        # RETURN coerente
-        # ----------------------------------------
-        return ShardTrainingResult(
-            task_id=shard.task_id,
-            attempt_id=shard.attempt_id,
-            worker_id=shard.assigned_worker_id,
-            success=success,
-            tree_artifacts=tree_artifacts,
-            completed_tree_ids=list(completed_tree_ids),
-            failed_tree_ids=list(failed_tree_ids),
-            completed_tree_count=len(completed_tree_ids),
-            failed_tree_count=len(failed_tree_ids),
-            error_message=None if success else "Some trees failed",
-            elapsed_time_seconds=time.time() - start_time,
-        )
