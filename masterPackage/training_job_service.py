@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Optional
+from typing import Optional
 
 from common.contracts import (
     ExperimentRecord,
@@ -23,13 +23,6 @@ class TrainingJobService:
       model selection e manifest build
     - NON fare lavoro RPC diretto
     - NON sostituire TrainingOrchestrator / ValidationCoordinator
-
-    Nota:
-    questa versione è scritta per:
-    - usare i nuovi helper di JobRepository
-    - supportare già più esperimenti, anche se oggi il planner può
-      restituirne uno solo
-    - limitare le mutazioni dirette sparse dei record
     """
 
     def __init__(
@@ -91,6 +84,8 @@ class TrainingJobService:
     # --------------------------------------------------------
 
     def _run_training_job(self, job_id: str) -> None:
+        current_experiment_id: str | None = None
+
         try:
             self.leadership_guard.require_leader()
 
@@ -98,7 +93,7 @@ class TrainingJobService:
             training_request = job_record.training_request
 
             self.job_repository.mark_running(
-                job_id,
+                job_id=job_id,
                 message="Preparing dataset",
             )
 
@@ -115,13 +110,15 @@ class TrainingJobService:
                 self.job_repository.save_experiment(job_id, experiment)
 
             for experiment in experiments:
+                current_experiment_id = experiment.experiment_id
+
                 self.job_repository.update_experiment_status(
                     job_id=job_id,
                     experiment_id=experiment.experiment_id,
                     status=ExperimentStatus.RUNNING,
                 )
                 self.job_repository.mark_running(
-                    job_id,
+                    job_id=job_id,
                     message=f"Training experiment {experiment.experiment_id}",
                 )
 
@@ -194,7 +191,11 @@ class TrainingJobService:
             )
 
         except Exception as exc:
-            self._mark_job_and_latest_experiment_failed(job_id, str(exc))
+            self._mark_job_failed(
+                job_id=job_id,
+                error_message=str(exc),
+                experiment_id=current_experiment_id,
+            )
 
     # --------------------------------------------------------
     # planning helpers
@@ -272,10 +273,10 @@ class TrainingJobService:
     # --------------------------------------------------------
 
     def _validate_experiment(
-            self,
-            job_id: str,
-            experiment: ExperimentRecord,
-            tree_artifacts: list[TreeArtifactMetadata],
+        self,
+        job_id: str,
+        experiment: ExperimentRecord,
+        tree_artifacts: list[TreeArtifactMetadata],
     ):
         job_record = self._load_job_or_raise(job_id)
         prepared_dataset = job_record.prepared_dataset
@@ -291,15 +292,21 @@ class TrainingJobService:
             class_labels=prepared_dataset.class_labels,
         )
 
+    def _select_best_experiment(
+        self,
+        experiments: list[ExperimentRecord],
+    ) -> Optional[ExperimentRecord]:
+        return self.model_selector.select_best(experiments)
+
     # --------------------------------------------------------
     # manifest helper
     # --------------------------------------------------------
 
     def _build_model_manifest(
-            self,
-            job_record: TrainingJobRecord,
-            experiment_record: ExperimentRecord,
-            tree_artifacts: list[TreeArtifactMetadata],
+        self,
+        job_record: TrainingJobRecord,
+        experiment_record: ExperimentRecord,
+        tree_artifacts: list[TreeArtifactMetadata],
     ):
         from common.enums import ModelStatus
         from common.ids import generate_model_id
@@ -332,18 +339,17 @@ class TrainingJobService:
     # failure handling
     # --------------------------------------------------------
 
-    def _mark_job_and_latest_experiment_failed(
+    def _mark_job_failed(
         self,
         job_id: str,
         error_message: str,
-    ) -> None:          #remember TODO in multi experiment vero latest potrebbe non coincidere con quello che è appena fallito
+        experiment_id: str | None = None,
+    ) -> None:
         try:
-            experiments = self.job_repository.list_experiments(job_id)
-            if experiments:
-                latest_experiment = experiments[-1]
+            if experiment_id is not None:
                 self.job_repository.update_experiment_status(
                     job_id=job_id,
-                    experiment_id=latest_experiment.experiment_id,
+                    experiment_id=experiment_id,
                     status=ExperimentStatus.FAILED,
                 )
         finally:
@@ -360,9 +366,3 @@ class TrainingJobService:
         if record is None:
             raise ValueError(f"Job '{job_id}' not found")
         return record
-
-    def _select_best_experiment(
-            self,
-            experiments: list[ExperimentRecord],
-    ) -> Optional[ExperimentRecord]:
-        return self.model_selector.select_best(experiments)

@@ -1,66 +1,96 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional
 
 from common.contracts import ExperimentRecord
-from common.enums import ExperimentStatus
 
 
 class ModelSelector:
     """
     Responsabilità:
-    - scegliere l'esperimento migliore tra quelli validati
-    - applicare una metrica di selezione consistente
-    - restituire l'ExperimentRecord vincente
+    - scegliere il miglior esperimento tra quelli completati
+    - supportare sia classification che regression
 
-    Nota:
-    in classificazione la metrica di default è accuracy.
-    In regressione, in questa prima versione, usa r2 se disponibile
-    dentro validation_metrics.classification_report["r2"].
+    selection_metric:
+    - "auto"     -> accuracy per classification, r2 per regression
+    - "accuracy" -> forza accuracy
+    - "r2"       -> forza r2
     """
 
-    def __init__(self, selection_metric: str = "accuracy") -> None:
+    def __init__(self, selection_metric: str = "auto") -> None:
+        allowed = {"auto", "accuracy", "r2"}
+        if selection_metric not in allowed:
+            raise ValueError(
+                f"Unsupported selection_metric '{selection_metric}'. "
+                f"Allowed values: {sorted(allowed)}"
+            )
         self.selection_metric = selection_metric
 
-    def select_best(self, experiments: Sequence[ExperimentRecord]) -> ExperimentRecord:
-        if not experiments:
-            raise ValueError("No experiments available for selection")
-
-        eligible = [
+    def select_best(
+        self,
+        experiments: list[ExperimentRecord],
+    ) -> ExperimentRecord:
+        candidates = [
             experiment
             for experiment in experiments
-            if experiment.status == ExperimentStatus.COMPLETED
-            and experiment.validation_metrics is not None
+            if experiment.validation_metrics is not None
         ]
 
-        if not eligible:
-            raise ValueError("No completed experiments with validation metrics available")
+        if not candidates:
+            raise ValueError("No experiments with validation metrics available")
 
-        ranked = sorted(
-            eligible,
-            key=self._score_experiment,
-            reverse=True,
-        )
-        return ranked[0]
+        best_experiment: Optional[ExperimentRecord] = None
+        best_score: Optional[float] = None
 
-    def select_best_for_job(self, job_repository, job_id: str) -> ExperimentRecord:
-        experiments = job_repository.list_experiments(job_id)
-        return self.select_best(experiments)
+        for experiment in candidates:
+            score = self._extract_score(experiment)
 
-    def _score_experiment(self, experiment: ExperimentRecord) -> float:
+            if best_score is None or score > best_score:
+                best_score = score
+                best_experiment = experiment
+
+        if best_experiment is None:
+            raise ValueError("Unable to select best experiment")
+
+        return best_experiment
+
+    def _extract_score(self, experiment: ExperimentRecord) -> float:
         metrics = experiment.validation_metrics
         if metrics is None:
             raise ValueError(
                 f"Experiment '{experiment.experiment_id}' has no validation metrics"
             )
 
-        metric_name = self.selection_metric.strip().lower()
+        metric_name = self._resolve_metric_name(experiment)
 
         if metric_name == "accuracy":
-            return float(metrics.accuracy)
+            score = float(metrics.accuracy)
+            return score
 
         if metric_name == "r2":
             report = metrics.classification_report or {}
-            return float(report.get("r2", float("-inf")))
+            if "r2" not in report:
+                raise ValueError(
+                    f"Experiment '{experiment.experiment_id}' has no 'r2' "
+                    "inside validation_metrics.classification_report"
+                )
+            return float(report["r2"])
 
-        raise ValueError(f"Unsupported selection metric '{self.selection_metric}'")
+        raise ValueError(f"Unsupported resolved metric '{metric_name}'")
+
+    def _resolve_metric_name(self, experiment: ExperimentRecord) -> str:
+        if self.selection_metric != "auto":
+            return self.selection_metric
+
+        task_type = experiment.forest_config.task_type
+
+        if task_type == "classification":
+            return "accuracy"
+
+        if task_type == "regression":
+            return "r2"
+
+        raise ValueError(
+            f"Unsupported task_type '{task_type}' for experiment "
+            f"'{experiment.experiment_id}'"
+        )

@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 
 from common.contracts import TaskRecord, TrainingShard
-from common.enums import TaskStatus
 
 
 class TaskLeaseManager:
@@ -16,10 +15,11 @@ class TaskLeaseManager:
     - rilasciare la lease quando il task non è più RUNNING
     - individuare attempt RUNNING con lease scaduta
 
-    Nota:
-    questa prima versione è master-only e non rinnova automaticamente
-    le lease durante il training. Il renew verrà utile più avanti con
-    progress snapshot / heartbeat / recovery planner.
+    Nota importante:
+    - acquire(...) NON persiste direttamente nel TaskLedger
+    - acquire(...) restituisce uno shard con lease_expires_at_ts valorizzato
+    - spetta al chiamante persistire subito il relativo TaskRecord
+      prima del dispatch al worker
     """
 
     def __init__(
@@ -37,7 +37,12 @@ class TaskLeaseManager:
         self,
         shard: TrainingShard,
     ) -> TrainingShard:
+        """
+        Returns a copy of the shard with a fresh lease expiration timestamp.
+        Persistence in TaskLedger is intentionally left to the caller.
+        """
         expires_at = self._expires_at()
+
         return TrainingShard(
             task_id=shard.task_id,
             attempt_id=shard.attempt_id,
@@ -61,12 +66,14 @@ class TaskLeaseManager:
         attempt_id: int,
     ) -> float:
         expires_at = self._expires_at()
+
         self.task_ledger.update_lease(
             task_id=task_id,
             attempt_id=attempt_id,
             job_id=job_id,
             lease_expires_at_ts=expires_at,
         )
+
         return expires_at
 
     def release(

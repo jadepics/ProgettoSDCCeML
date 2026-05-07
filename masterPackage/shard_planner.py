@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import time
 from typing import Protocol, Sequence
 
 from common.contracts import ForestConfiguration, PreparedDataset, TrainingShard
-from common.ids import generate_task_id
+from common.ids import generate_task_id, generate_tree_id
 from common.storage_layout import StorageLayout
 
 
@@ -28,17 +27,25 @@ class ShardPlanner:
     - gli shard sono deterministici
     - i task_id restano deterministici perché dipendono da experiment_id,
       tree_start_index e tree_count
+    - lo ShardPlanner NON assegna lease: la lease è responsabilità
+      del TaskLeaseManager
     """
 
     def __init__(
         self,
         storage_layout: StorageLayout,
-        lease_timeout_seconds: float = 600.0,
+        lease_timeout_seconds: float | None = None,
         initial_attempt_id: int = 1,
     ) -> None:
+        if initial_attempt_id <= 0:
+            raise ValueError("initial_attempt_id must be > 0")
+
         self.storage_layout = storage_layout
-        self.lease_timeout_seconds = lease_timeout_seconds
         self.initial_attempt_id = initial_attempt_id
+
+        # Tenuto solo per retrocompatibilità con eventuali vecchie chiamate.
+        # La lease non viene più calcolata qui.
+        self.lease_timeout_seconds = lease_timeout_seconds
 
     def plan(
         self,
@@ -65,7 +72,11 @@ class ShardPlanner:
         if not ordered_workers:
             raise ValueError("At least one worker is required to plan training shards")
 
-        effective_attempt_id = self.initial_attempt_id if attempt_id is None else attempt_id
+        effective_attempt_id = (
+            self.initial_attempt_id
+            if attempt_id is None
+            else attempt_id
+        )
         if effective_attempt_id <= 0:
             raise ValueError("attempt_id must be > 0")
 
@@ -106,7 +117,7 @@ class ShardPlanner:
         attempt_id: int,
     ) -> list[TrainingShard]:
         """
-        Wrapper semantico comodo per il recovery/restart-safe path.
+        Wrapper semantico per il recovery/restart-safe path.
         """
         return self.plan(
             job_id=job_id,
@@ -129,8 +140,8 @@ class ShardPlanner:
         attempt_id: int,
     ) -> list[TrainingShard]:
         """
-        Manteniamo anche questa versione, utile se in futuro il RecoveryPlanner
-        produce già direttamente range (tree_start_index, tree_count).
+        Versione utile se in futuro il RecoveryPlanner produce già direttamente
+        range del tipo (tree_start_index, tree_count).
         """
         ordered_workers = self._normalize_workers(workers)
         if not ordered_workers:
@@ -146,6 +157,11 @@ class ShardPlanner:
         ]
         if not normalized_ranges:
             return []
+
+        self._validate_ranges(
+            ranges=normalized_ranges,
+            n_estimators=forest_config.n_estimators,
+        )
 
         return self._build_shards(
             job_id=job_id,
@@ -171,7 +187,6 @@ class ShardPlanner:
             self.storage_layout.experiment_dir(job_id, experiment_id)
         )
 
-        lease_expires_at_ts = time.time() + self.lease_timeout_seconds
         shards: list[TrainingShard] = []
 
         for index, (tree_start_index, tree_count) in enumerate(shard_specs):
@@ -199,7 +214,7 @@ class ShardPlanner:
                 train_labels_uri=prepared_dataset.train_labels_uri,
                 artifact_output_dir=artifact_output_dir,
                 seed_base=forest_config.global_random_seed,
-                lease_expires_at_ts=lease_expires_at_ts,
+                lease_expires_at_ts=None,
             )
             shards.append(shard)
 
@@ -207,11 +222,24 @@ class ShardPlanner:
 
     def _normalize_workers(self, workers: Sequence[WorkerLike]) -> list[WorkerLike]:
         unique_by_id: dict[str, WorkerLike] = {}
-        for worker in workers:
-            unique_by_id[worker.worker_id] = worker
-        return [unique_by_id[worker_id] for worker_id in sorted(unique_by_id.keys())]
 
-    def _split_trees(self, n_trees: int, n_workers: int) -> list[tuple[int, int]]:
+        for worker in workers:
+            worker_id = getattr(worker, "worker_id", None)
+            if not worker_id:
+                raise ValueError("Worker must expose a non-empty worker_id")
+
+            unique_by_id[worker_id] = worker
+
+        return [
+            unique_by_id[worker_id]
+            for worker_id in sorted(unique_by_id.keys())
+        ]
+
+    def _split_trees(
+        self,
+        n_trees: int,
+        n_workers: int,
+    ) -> list[tuple[int, int]]:
         if n_trees <= 0:
             raise ValueError("n_trees must be > 0")
         if n_workers <= 0:
@@ -254,6 +282,13 @@ class ShardPlanner:
                     f"{n_estimators} estimators"
                 )
 
+            expected_tree_id = generate_tree_id(experiment_id, tree_index)
+            if tree_id != expected_tree_id:
+                raise ValueError(
+                    f"Tree id '{tree_id}' is not canonical. "
+                    f"Expected '{expected_tree_id}'"
+                )
+
             normalized_indices.add(tree_index)
 
         return sorted(normalized_indices)
@@ -269,7 +304,7 @@ class ShardPlanner:
         if not tree_indices:
             return []
 
-        ordered = sorted(tree_indices)
+        ordered = sorted(set(tree_indices))
         ranges: list[tuple[int, int]] = []
 
         range_start = ordered[0]
@@ -293,10 +328,38 @@ class ShardPlanner:
         tree_id: str,
     ) -> int:
         prefix = f"{experiment_id}_tree_"
+
         if not tree_id.startswith(prefix):
             raise ValueError(
                 f"Tree id '{tree_id}' does not match experiment '{experiment_id}'"
             )
 
         raw_index = tree_id[len(prefix):]
-        return int(raw_index)
+
+        try:
+            return int(raw_index)
+        except ValueError as exc:
+            raise ValueError(
+                f"Tree id '{tree_id}' does not contain a valid integer index"
+            ) from exc
+
+    def _validate_ranges(
+        self,
+        ranges: Sequence[tuple[int, int]],
+        n_estimators: int,
+    ) -> None:
+        if n_estimators <= 0:
+            raise ValueError("n_estimators must be > 0")
+
+        for tree_start_index, tree_count in ranges:
+            if tree_start_index < 0:
+                raise ValueError("tree_start_index must be >= 0")
+            if tree_count <= 0:
+                raise ValueError("tree_count must be > 0")
+
+            last_index = tree_start_index + tree_count - 1
+            if last_index >= n_estimators:
+                raise ValueError(
+                    f"Range ({tree_start_index}, {tree_count}) exceeds "
+                    f"n_estimators={n_estimators}"
+                )
