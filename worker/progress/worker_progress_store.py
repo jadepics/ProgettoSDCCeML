@@ -40,7 +40,7 @@ class TaskProgressSnapshot:
 
 
 @dataclass(slots=True)
-class WorkerProgressSnapshot:
+class WorkerProgressState:
     worker_id: str
     job_id: str
     experiment_id: str
@@ -48,12 +48,12 @@ class WorkerProgressSnapshot:
     last_update: float = 0.0
 
     @staticmethod
-    def from_dict(data: dict) -> "WorkerProgressSnapshot":
+    def from_dict(data: dict) -> "WorkerProgressState":
         tasks = {
             tid: TaskProgressSnapshot.from_dict(tdata)
             for tid, tdata in data.get("tasks", {}).items()
         }
-        return WorkerProgressSnapshot(
+        return WorkerProgressState(
             worker_id=data["worker_id"],
             job_id=data["job_id"],
             experiment_id=data["experiment_id"],
@@ -71,7 +71,7 @@ class WorkerProgressStore:
     def __init__(self, artifact_store: ArtifactStore, worker_id: str):
         self.store: ArtifactStore = artifact_store
         self.worker_id: str = worker_id
-        self.state: Optional[WorkerProgressSnapshot] = None
+        self.state: Optional[WorkerProgressState] = None
 
     # ------------------------
     # Internal helpers
@@ -163,10 +163,10 @@ class WorkerProgressStore:
 
         if self.store.exists(key):
             data = self.store.load_json(key)
-            self.state = WorkerProgressSnapshot.from_dict(data)
+            self.state = WorkerProgressState.from_dict(data)
             return
 
-        self.state = WorkerProgressSnapshot(
+        self.state = WorkerProgressState(
             worker_id=self.worker_id,
             job_id=job_id,
             experiment_id=experiment_id,
@@ -177,22 +177,29 @@ class WorkerProgressStore:
     def _persist_snapshot(self, job_id: str, experiment_id: str) -> None:
         key = self._get_snapshot_key(job_id, experiment_id)
 
-        snapshots = []
+        assert self.state is not None
 
-        for task_id, task in self.state["tasks"].items():
-            snapshot = self._to_worker_snapshot(
-                job_id,
-                experiment_id,
-                task_id,
-                task,
-            )
-            snapshots.append(snapshot.to_dict())
+        payload = {
+            "worker_id": self.state.worker_id,
+            "job_id": self.state.job_id,
+            "experiment_id": self.state.experiment_id,
+            "tasks": {
+                task_id: {
+                    "task_id": task.task_id,
+                    "attempt_id": task.attempt_id,
+                    "status": task.status,
+                    "progress": task.progress,
+                    "completed_tree_ids": list(task.completed_tree_ids),
+                    "failed_tree_ids": list(task.failed_tree_ids),
+                    "error_message": task.error_message,
+                    "last_update": task.last_update,
+                }
+                for task_id, task in self.state.tasks.items()
+            },
+            "last_update": current_time_seconds(),
+        }
 
-        self.store.save_json_atomic(key, {
-            "worker_id": self.worker_id,
-            "experiment_id": experiment_id,
-            "tasks": snapshots,
-        })
+        self.store.save_json_atomic(key, payload)
 
     # ------------------------
     # Task management (IDEMPOTENT)

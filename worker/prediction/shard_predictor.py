@@ -1,10 +1,12 @@
 import numpy as np
 from typing import List
 
+from worker.storage.artifact_store import ArtifactStore
+
 
 class ShardPredictor:
 
-    def __init__(self, artifact_store):
+    def __init__(self, artifact_store : ArtifactStore):
         self.artifact_store = artifact_store
 
     def predict(
@@ -19,7 +21,7 @@ class ShardPredictor:
             raise ValueError("No tree artifacts provided")
 
         trees = [
-            self.artifact_store.load_tree(uri)
+            self.artifact_store.load_tree_artifact(uri)
             for uri in tree_artifact_uris
         ]
 
