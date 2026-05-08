@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 
 from common.ids import generate_tree_id
 from common.contracts import TreeArtifactMetadata
@@ -76,7 +75,7 @@ class TreeArtifactWriter:
         # --------------------------------------------------
         if self.store.exists(metadata_key):
             data = self.store.load_json(metadata_key)
-            return TreeArtifactMetadata(**data)
+            return TreeArtifactMetadata.from_dict(data)
 
         # --------------------------------------------------
         # 3. Scrittura artifact (idempotente)
@@ -110,7 +109,7 @@ class TreeArtifactWriter:
         # ora sempre atomico
         self.store.save_json_atomic(
             metadata_key,
-            asdict(metadata)
+            metadata.to_dict()
         )
 
         return metadata

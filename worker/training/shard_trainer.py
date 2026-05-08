@@ -127,6 +127,9 @@ class ShardTrainer:
             X: "np.ndarray" = self.data_loader.load_numpy(shard.train_features_uri)
             y: "np.ndarray" = self.data_loader.load_numpy(shard.train_labels_uri)
 
+            #linea aggiunta per adattare la dimensione di y da parquet a sklearn
+            y = y.ravel()
+            
             # ----------------------------------------
             # VALIDAZIONE DATASET
             # 1️⃣ Dataset inconsistente o vuoto

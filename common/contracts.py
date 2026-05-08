@@ -139,6 +139,20 @@ class TreeArtifactMetadata:
         payload["status"] = self.status.value
         return payload
 
+    @staticmethod
+    def from_dict(data: dict) -> "TreeArtifactMetadata":
+        return TreeArtifactMetadata(
+            tree_id=data["tree_id"],
+            job_id=data["job_id"],
+            experiment_id=data["experiment_id"],
+            task_id=data["task_id"],
+            tree_index=data["tree_index"],
+            worker_id=data["worker_id"],
+            seed=data["seed"],
+            artifact_uri=data["artifact_uri"],
+            status=TreeStatus(data["status"]),
+            training_time_seconds=data["training_time_seconds"],
+        )
 
 @dataclass(slots=True)
 class ShardTrainingResult:

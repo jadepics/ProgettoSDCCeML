@@ -3,6 +3,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pandas as pd
+
 
 def atomic_json_write(path: Path, payload: dict) -> None:
     """
@@ -31,16 +33,25 @@ def atomic_json_write(path: Path, payload: dict) -> None:
     temp_path.replace(path)
 
 import numpy as np
-
+from urllib.parse import urlparse
 
 class DataLoader:
     def __init__(self, artifact_store):
         self.store = artifact_store
 
     def load_numpy(self, uri: str) -> np.ndarray:
-        # per ora assumiamo CSV
-        raw = self.store.load_bytes(uri)
+        path = self._resolve_uri(uri)
 
-        # decode bytes → string → numpy
-        from io import BytesIO
-        return np.loadtxt(BytesIO(raw), delimiter=",")
+        df = pd.read_parquet(path)
+
+        return df.to_numpy()
+
+
+    def _resolve_uri(self, uri) -> str:
+        parsed = urlparse(uri)
+        if parsed.scheme == "file":
+            path = parsed.path
+            return path
+        else:
+            print("Errore nel parsing del url %s" % uri)
+            return ""
