@@ -66,7 +66,6 @@ def now_ts() -> float:
 # ============================================================
 # Worker registry
 # ============================================================
-
 class WorkerInfo:
     def __init__(self, worker_id: str, host: str, port: int) -> None:
         self.worker_id = worker_id
@@ -74,6 +73,7 @@ class WorkerInfo:
         self.port = port
         self.last_heartbeat = now_ts()
         self.running_tasks = 0
+        self.active_task_ids: list[str] = []
 
     @property
     def address(self) -> str:
@@ -85,26 +85,39 @@ class WorkerRegistry:
         self._workers: dict[str, WorkerInfo] = {}
         self._lock = threading.Lock()
 
-
     def register(self, worker_id: str, host: str, port: int) -> None:
         with self._lock:
             self._workers[worker_id] = WorkerInfo(worker_id, host, port)
 
-    def heartbeat(self, worker_id: str, running_tasks: int) -> bool:
+    def heartbeat(
+        self,
+        worker_id: str,
+        running_tasks: int,
+        active_task_ids: Optional[list[str]] = None,
+    ) -> bool:
         with self._lock:
             worker = self._workers.get(worker_id)
             if worker is None:
                 return False
+
             worker.last_heartbeat = now_ts()
             worker.running_tasks = running_tasks
+            worker.active_task_ids = list(active_task_ids or [])
             return True
 
     def alive_workers(self) -> list[WorkerInfo]:
         cutoff = now_ts() - HEARTBEAT_TIMEOUT_SECONDS
         with self._lock:
-            return [worker for worker in self._workers.values() if worker.last_heartbeat >= cutoff]
+            return [
+                worker
+                for worker in self._workers.values()
+                if worker.last_heartbeat >= cutoff
+            ]
 
-    def get_retry_candidate(self, exclude_worker_id: str | None = None) -> Optional[WorkerInfo]:
+    def get_retry_candidate(
+        self,
+        exclude_worker_id: str | None = None,
+    ) -> Optional[WorkerInfo]:
         candidates = [
             worker
             for worker in self.alive_workers()
@@ -114,9 +127,9 @@ class WorkerRegistry:
             return None
         return sorted(candidates, key=lambda worker: worker.running_tasks)[0]
 
-def list_workers(self) -> list[WorkerInfo]:
-    with self._lock:
-        return list(self._workers.values())     #con lock è thread safe
+    def list_workers(self) -> list[WorkerInfo]:
+        with self._lock:
+            return list(self._workers.values())
 
 # ============================================================
 # Master coordinator
@@ -145,13 +158,11 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     """
 
     def __init__(self, artifact_root: str = "/shared/artifacts") -> None:
-        self.registry = WorkerRegistry()
-
         self.artifact_root = Path(artifact_root)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
 
-        self.consensus = InMemoryLeaderConsensusService(is_leader=True)
-        self.leadership_guard = LeadershipGuard(self.consensus)
+        # stato condiviso del master
+        self.registry = WorkerRegistry()
 
         self.store = SharedArtifactStore(str(self.artifact_root))
         self.layout = StorageLayout(str(self.artifact_root))
@@ -160,6 +171,20 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         self.model_repository = ModelRepository(self.store)
         self.task_ledger = TaskLedger(self.store)
 
+        # leadership / consenso
+        self.consensus = InMemoryLeaderConsensusService(
+            node_id="master-1",
+            start_as_leader=True,
+        )
+        self.leadership_guard = LeadershipGuard(self.consensus)
+
+        # monitor heartbeat: va creato PRIMA di orchestrator/recovery
+        self.worker_heartbeat_monitor = WorkerHeartbeatMonitor(
+            worker_registry=self.registry,
+            heartbeat_timeout_seconds=HEARTBEAT_TIMEOUT_SECONDS,
+        )
+
+        # data prep
         self.data_preparation_service = DataPreparationService(
             dataset_loader=DatasetLoader(),
             dataset_validator=DatasetValidator(),
@@ -168,7 +193,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         )
 
         self.experiment_planner = ExperimentPlanner()
-        self.model_selector = ModelSelector(selection_metric="accuracy")
+        self.model_selector = ModelSelector(selection_metric="auto")
         self.model_manifest_builder = ModelManifestBuilder()
         self.shard_planner = ShardPlanner(self.layout)
 
@@ -204,6 +229,12 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             worker_client=self.worker_client,
         )
 
+        self.recovery_planner = RecoveryPlanner(
+            task_ledger=self.task_ledger,
+            shard_planner=self.shard_planner,
+            worker_heartbeat_monitor=self.worker_heartbeat_monitor,
+        )
+
         self.training_job_service = TrainingJobService(
             leadership_guard=self.leadership_guard,
             job_repository=self.job_repository,
@@ -215,17 +246,6 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             model_selector=self.model_selector,
             model_manifest_builder=self.model_manifest_builder,
         )
-        self.recovery_planner = RecoveryPlanner(
-            task_ledger=self.task_ledger,
-            shard_planner=self.shard_planner,
-            worker_heartbeat_monitor=self.worker_heartbeat_monitor,
-        )
-        self.registry = WorkerRegistry() #forse va tolto
-        self.worker_heartbeat_monitor = WorkerHeartbeatMonitor(
-            worker_registry=self.registry,
-            heartbeat_timeout_seconds=HEARTBEAT_TIMEOUT_SECONDS,
-        )
-
     # --------------------------------------------------------
     # RPC: worker lifecycle
     # --------------------------------------------------------

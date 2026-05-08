@@ -590,31 +590,6 @@ def _task_record_from_dict(payload: dict[str, Any]) -> TaskRecord:
 class TaskLedger:
     """
     Persistent task ledger grouped by logical task_id and versioned by attempt_id.
-
-    JSON shape per job:
-    {
-      "tasks": {
-        "<task_id>": {
-          "task_id": "<task_id>",
-          "job_id": "<job_id>",
-          "experiment_id": "<experiment_id>",
-          "latest_attempt_id": 2,
-          "updated_at": 1712345678.12,
-          "attempts": {
-            "1": { ... TaskRecord.to_dict() ... },
-            "2": { ... TaskRecord.to_dict() ... }
-          }
-        }
-      }
-    }
-
-    Compatibility notes:
-    - save(record) / upsert(record) keep the current external API.
-    - load(job_id, task_id) returns the latest attempt by default.
-    - mark_running / mark_completed / mark_failed keep accepting only task_id,
-      so the current orchestrator can continue to work.
-    - If an old flat ledger exists, it is transparently normalized in memory
-      the first time it is read.
     """
 
     def __init__(self, artifact_store: SharedArtifactStore):
@@ -635,40 +610,6 @@ class TaskLedger:
 
         raw_payload = self.artifact_store.read_json(path)
         return self._normalize_payload(raw_payload)
-
-
-
-        def mark_partial_failure(
-                self,
-                task_id: str,
-                completed_tree_ids: list[str],
-                failed_tree_ids: list[str],
-                error_message: str,
-                attempt_id: Optional[int] = None,
-                job_id: Optional[str] = None,
-        ) -> None:
-            def _updater(raw: dict[str, Any]) -> None:
-                existing_completed = raw.get("completed_tree_ids", [])
-                existing_failed = raw.get("failed_tree_ids", [])
-
-                merged_completed = list(
-                    dict.fromkeys(existing_completed + list(completed_tree_ids or []))
-                )
-                merged_failed = list(
-                    dict.fromkeys(existing_failed + list(failed_tree_ids or []))
-                )
-
-                raw["completed_tree_ids"] = merged_completed
-                raw["failed_tree_ids"] = merged_failed
-                raw["status"] = TaskStatus.FAILED.value
-                raw["error_message"] = error_message
-
-            self._update_attempt_raw(
-                task_id=task_id,
-                updater=_updater,
-                attempt_id=attempt_id,
-                job_id=job_id,
-            )
 
     def _write_all(self, job_id: str, payload: dict[str, Any]) -> None:
         path = self.artifact_store.layout.task_ledger_path(job_id)
@@ -735,12 +676,16 @@ class TaskLedger:
                     if latest_attempt_id is None:
                         latest_attempt_id = max(int(k) for k in normalized_attempts.keys())
 
-                    first_attempt = normalized_attempts[str(min(int(k) for k in normalized_attempts.keys()))]
+                    first_attempt_key = str(min(int(k) for k in normalized_attempts.keys()))
+                    first_attempt = normalized_attempts[first_attempt_key]
 
                     normalized_tasks[task_id] = {
                         "task_id": raw_value.get("task_id", task_id),
                         "job_id": raw_value.get("job_id", first_attempt.get("job_id")),
-                        "experiment_id": raw_value.get("experiment_id", first_attempt.get("experiment_id")),
+                        "experiment_id": raw_value.get(
+                            "experiment_id",
+                            first_attempt.get("experiment_id"),
+                        ),
                         "latest_attempt_id": int(latest_attempt_id),
                         "updated_at": raw_value.get("updated_at", time.time()),
                         "attempts": normalized_attempts,
@@ -766,7 +711,11 @@ class TaskLedger:
     # internal task/attempt helpers
     # --------------------------------------------------------
 
-    def _ensure_task_bucket(self, payload: dict[str, Any], record: TaskRecord) -> dict[str, Any]:
+    def _ensure_task_bucket(
+        self,
+        payload: dict[str, Any],
+        record: TaskRecord,
+    ) -> dict[str, Any]:
         tasks = payload.setdefault("tasks", {})
         bucket = tasks.get(record.task_id)
 
@@ -882,7 +831,9 @@ class TaskLedger:
             attempt_key = str(resolved_attempt_id)
             raw = attempts.get(attempt_key)
             if raw is None:
-                raise ValueError(f"Task '{task_id}' attempt '{resolved_attempt_id}' not found")
+                raise ValueError(
+                    f"Task '{task_id}' attempt '{resolved_attempt_id}' not found"
+                )
 
             updater(raw)
 
@@ -951,7 +902,12 @@ class TaskLedger:
     def load_latest_attempt(self, job_id: str, task_id: str) -> Optional[TaskRecord]:
         return self.load(job_id, task_id, attempt_id=None)
 
-    def load_attempt(self, job_id: str, task_id: str, attempt_id: int) -> Optional[TaskRecord]:
+    def load_attempt(
+        self,
+        job_id: str,
+        task_id: str,
+        attempt_id: int,
+    ) -> Optional[TaskRecord]:
         return self.load(job_id, task_id, attempt_id=attempt_id)
 
     def list_raw(self, job_id: str) -> list[dict[str, Any]]:
@@ -983,7 +939,7 @@ class TaskLedger:
             return []
 
         attempts = bucket.get("attempts", {})
-        ordered_keys = sorted((int(key) for key in attempts.keys()))
+        ordered_keys = sorted(int(key) for key in attempts.keys())
         return [attempts[str(key)] for key in ordered_keys]
 
     def list_attempts(self, job_id: str, task_id: str) -> list[TaskRecord]:
@@ -1008,19 +964,27 @@ class TaskLedger:
             if record.experiment_id == experiment_id
         ]
 
-    def list_attempts_by_experiment(self, job_id: str, experiment_id: str) -> list[TaskRecord]:
+    def list_attempts_by_experiment(
+        self,
+        job_id: str,
+        experiment_id: str,
+    ) -> list[TaskRecord]:
         return [
             record
             for record in self.list_all_attempts(job_id)
             if record.experiment_id == experiment_id
         ]
 
+    # --------------------------------------------------------
+    # lease management
+    # --------------------------------------------------------
+
     def update_lease(
-            self,
-            task_id: str,
-            lease_expires_at_ts: float,
-            attempt_id: Optional[int] = None,
-            job_id: Optional[str] = None,
+        self,
+        task_id: str,
+        lease_expires_at_ts: float,
+        attempt_id: Optional[int] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         def _updater(raw: dict[str, Any]) -> None:
             raw["lease_expires_at_ts"] = lease_expires_at_ts
@@ -1032,58 +996,63 @@ class TaskLedger:
             job_id=job_id,
         )
 
-        def clear_lease(
-                self,
-                task_id: str,
-                attempt_id: Optional[int] = None,
-                job_id: Optional[str] = None,
-        ) -> None:
-            def _updater(raw: dict[str, Any]) -> None:
-                raw["lease_expires_at_ts"] = None
+    def clear_lease(
+        self,
+        task_id: str,
+        attempt_id: Optional[int] = None,
+        job_id: Optional[str] = None,
+    ) -> None:
+        def _updater(raw: dict[str, Any]) -> None:
+            raw["lease_expires_at_ts"] = None
 
-            self._update_attempt_raw(
-                task_id=task_id,
-                updater=_updater,
-                attempt_id=attempt_id,
-                job_id=job_id,
+        self._update_attempt_raw(
+            task_id=task_id,
+            updater=_updater,
+            attempt_id=attempt_id,
+            job_id=job_id,
+        )
+
+    def list_expired_running_tasks(
+        self,
+        job_id: str,
+        experiment_id: Optional[str] = None,
+        now_ts: Optional[float] = None,
+    ) -> list[TaskRecord]:
+        effective_now = time.time() if now_ts is None else now_ts
+
+        records = self.list_all_attempts(job_id)
+        expired: list[TaskRecord] = []
+
+        for record in records:
+            if experiment_id is not None and record.experiment_id != experiment_id:
+                continue
+
+            if record.status != TaskStatus.RUNNING:
+                continue
+
+            if record.lease_expires_at_ts is None:
+                continue
+
+            if record.lease_expires_at_ts <= effective_now:
+                expired.append(record)
+
+        expired.sort(
+            key=lambda item: (
+                item.lease_expires_at_ts or 0.0,
+                item.updated_at,
             )
-
-            def list_expired_running_tasks(
-                    self,
-                    job_id: str,
-                    experiment_id: Optional[str] = None,
-                    now_ts: Optional[float] = None,
-            ) -> list[TaskRecord]:
-                effective_now = time.time() if now_ts is None else now_ts
-
-                records = self.list_all_attempts(job_id)
-                expired: list[TaskRecord] = []
-
-                for record in records:
-                    if experiment_id is not None and record.experiment_id != experiment_id:
-                        continue
-
-                    if record.status != TaskStatus.RUNNING:
-                        continue
-
-                    if record.lease_expires_at_ts is None:
-                        continue
-
-                    if record.lease_expires_at_ts <= effective_now:
-                        expired.append(record)
-
-                expired.sort(key=lambda item: (item.lease_expires_at_ts or 0.0, item.updated_at))
-                return expired
+        )
+        return expired
 
     # --------------------------------------------------------
     # public state transitions
     # --------------------------------------------------------
 
     def mark_running(
-            self,
-            task_id: str,
-            attempt_id: Optional[int] = None,
-            job_id: Optional[str] = None,
+        self,
+        task_id: str,
+        attempt_id: Optional[int] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         def _updater(raw: dict[str, Any]) -> None:
             raw["status"] = TaskStatus.RUNNING.value
@@ -1097,11 +1066,11 @@ class TaskLedger:
         )
 
     def mark_completed(
-            self,
-            task_id: str,
-            completed_tree_ids: list[str],
-            attempt_id: Optional[int] = None,
-            job_id: Optional[str] = None,
+        self,
+        task_id: str,
+        completed_tree_ids: list[str],
+        attempt_id: Optional[int] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         def _updater(raw: dict[str, Any]) -> None:
             existing = raw.get("completed_tree_ids", [])
@@ -1110,6 +1079,7 @@ class TaskLedger:
             raw["failed_tree_ids"] = []
             raw["status"] = TaskStatus.COMPLETED.value
             raw["error_message"] = None
+            raw["lease_expires_at_ts"] = None
 
         self._update_attempt_raw(
             task_id=task_id,
@@ -1119,13 +1089,13 @@ class TaskLedger:
         )
 
     def mark_partial_failure(
-            self,
-            task_id: str,
-            completed_tree_ids: list[str],
-            failed_tree_ids: list[str],
-            error_message: str,
-            attempt_id: Optional[int] = None,
-            job_id: Optional[str] = None,
+        self,
+        task_id: str,
+        completed_tree_ids: list[str],
+        failed_tree_ids: list[str],
+        error_message: str,
+        attempt_id: Optional[int] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         def _updater(raw: dict[str, Any]) -> None:
             existing_completed = raw.get("completed_tree_ids", [])
@@ -1151,15 +1121,16 @@ class TaskLedger:
         )
 
     def mark_failed(
-            self,
-            task_id: str,
-            error_message: str,
-            attempt_id: Optional[int] = None,
-            job_id: Optional[str] = None,
+        self,
+        task_id: str,
+        error_message: str,
+        attempt_id: Optional[int] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         def _updater(raw: dict[str, Any]) -> None:
             raw["status"] = TaskStatus.FAILED.value
             raw["error_message"] = error_message
+            raw["lease_expires_at_ts"] = None
 
         self._update_attempt_raw(
             task_id=task_id,

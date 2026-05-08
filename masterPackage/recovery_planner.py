@@ -91,7 +91,8 @@ class RecoveryPlanner:
         completed_set = set(completed_tree_ids)
 
         all_missing_tree_ids = [
-            tree_id for tree_id in expected_tree_ids
+            tree_id
+            for tree_id in expected_tree_ids
             if tree_id not in completed_set
         ]
 
@@ -101,16 +102,12 @@ class RecoveryPlanner:
             now_ts=effective_now,
         )
 
-        stale_snapshots = self.worker_heartbeat_monitor.stale_workers(
-            now_ts=effective_now
-        )
-        stale_worker_ids = [snapshot.worker_id for snapshot in stale_snapshots]
+        stale_worker_ids = self._stale_worker_ids(now_ts=effective_now)
         stale_worker_ids_set = set(stale_worker_ids)
 
         running_owner_by_tree = self._running_owner_by_tree(
             job_id=job_id,
             experiment_id=experiment_id,
-            now_ts=effective_now,
         )
 
         decisions: list[RecoveryDecision] = []
@@ -119,6 +116,7 @@ class RecoveryPlanner:
 
         for tree_id in all_missing_tree_ids:
             owner = running_owner_by_tree.get(tree_id)
+
             decision = self._decide_missing_tree(
                 tree_id=tree_id,
                 owner=owner,
@@ -132,18 +130,25 @@ class RecoveryPlanner:
             else:
                 deferred_tree_ids.append(tree_id)
 
-        if recover_now_tree_ids:
-            recovery_shards = self.shard_planner.plan_missing_tree_ids(
+        recovery_shards: list[TrainingShard] = []
+
+        if recover_now_tree_ids and workers:
+            recovery_attempt_id = self._next_recovery_attempt_id(
                 job_id=job_id,
                 experiment_id=experiment_id,
-                forest_config=forest_config,
-                prepared_dataset=prepared_dataset,
-                workers=workers,
-                missing_tree_ids=recover_now_tree_ids,
-                attempt_id=1,
             )
-        else:
-            recovery_shards = []
+
+            recovery_shards = list(
+                self.shard_planner.plan_missing_tree_ids(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    forest_config=forest_config,
+                    prepared_dataset=prepared_dataset,
+                    workers=workers,
+                    missing_tree_ids=recover_now_tree_ids,
+                    attempt_id=recovery_attempt_id,
+                )
+            )
 
         return RecoveryPlan(
             job_id=job_id,
@@ -156,7 +161,7 @@ class RecoveryPlanner:
             expired_running_tasks=list(expired_running_tasks),
             stale_worker_ids=stale_worker_ids,
             decisions=decisions,
-            recovery_shards=list(recovery_shards),
+            recovery_shards=recovery_shards,
         )
 
     def _expected_tree_ids(
@@ -164,6 +169,9 @@ class RecoveryPlanner:
         experiment_id: str,
         n_estimators: int,
     ) -> list[str]:
+        if n_estimators <= 0:
+            raise ValueError("n_estimators must be > 0")
+
         return [
             generate_tree_id(experiment_id, index)
             for index in range(n_estimators)
@@ -173,7 +181,6 @@ class RecoveryPlanner:
         self,
         job_id: str,
         experiment_id: str,
-        now_ts: float,
     ) -> dict[str, TaskRecord]:
         attempts = self.task_ledger.list_all_attempts(job_id)
 
@@ -192,7 +199,7 @@ class RecoveryPlanner:
         owner_by_tree: dict[str, TaskRecord] = {}
 
         for record in running_attempts:
-            for tree_id in record.tree_ids:
+            for tree_id in self._record_tree_ids(record):
                 if tree_id not in owner_by_tree:
                     owner_by_tree[tree_id] = record
 
@@ -214,8 +221,9 @@ class RecoveryPlanner:
                 owner_worker_id=None,
             )
 
+        owner_worker_id = self._record_worker_id(owner)
         lease_expires_at_ts = owner.lease_expires_at_ts
-        worker_is_stale = owner.worker_id in stale_worker_ids
+        worker_is_stale = owner_worker_id in stale_worker_ids
 
         if lease_expires_at_ts is None:
             if worker_is_stale:
@@ -224,7 +232,7 @@ class RecoveryPlanner:
                     action="recover_now",
                     reason="owner worker is stale and RUNNING task has no active lease",
                     owner_task_id=owner.task_id,
-                    owner_worker_id=owner.worker_id,
+                    owner_worker_id=owner_worker_id,
                 )
 
             return RecoveryDecision(
@@ -232,7 +240,7 @@ class RecoveryPlanner:
                 action="defer",
                 reason="owner task is RUNNING with no lease expiry but worker is still alive",
                 owner_task_id=owner.task_id,
-                owner_worker_id=owner.worker_id,
+                owner_worker_id=owner_worker_id,
             )
 
         if lease_expires_at_ts > now_ts:
@@ -241,7 +249,7 @@ class RecoveryPlanner:
                 action="defer",
                 reason="owner task is RUNNING and lease is still active",
                 owner_task_id=owner.task_id,
-                owner_worker_id=owner.worker_id,
+                owner_worker_id=owner_worker_id,
             )
 
         overdue_seconds = now_ts - lease_expires_at_ts
@@ -252,7 +260,7 @@ class RecoveryPlanner:
                 action="recover_now",
                 reason="owner task lease expired and owner worker is stale",
                 owner_task_id=owner.task_id,
-                owner_worker_id=owner.worker_id,
+                owner_worker_id=owner_worker_id,
             )
 
         if overdue_seconds <= self.alive_worker_expired_lease_grace_seconds:
@@ -264,7 +272,7 @@ class RecoveryPlanner:
                     "grace period"
                 ),
                 owner_task_id=owner.task_id,
-                owner_worker_id=owner.worker_id,
+                owner_worker_id=owner_worker_id,
             )
 
         return RecoveryDecision(
@@ -275,5 +283,52 @@ class RecoveryPlanner:
                 "was exceeded"
             ),
             owner_task_id=owner.task_id,
-            owner_worker_id=owner.worker_id,
+            owner_worker_id=owner_worker_id,
         )
+
+    def _next_recovery_attempt_id(
+        self,
+        job_id: str,
+        experiment_id: str,
+    ) -> int:
+        attempts = self.task_ledger.list_attempts_by_experiment(
+            job_id=job_id,
+            experiment_id=experiment_id,
+        )
+
+        if not attempts:
+            return 1
+
+        return max(record.attempt_id for record in attempts) + 1
+
+    def _stale_worker_ids(self, now_ts: float) -> list[str]:
+        """
+        Supporta sia monitor che espongono stale_workers(now_ts),
+        sia monitor che espongono stale_worker_ids().
+        """
+        if hasattr(self.worker_heartbeat_monitor, "stale_workers"):
+            stale_snapshots = self.worker_heartbeat_monitor.stale_workers(
+                now_ts=now_ts
+            )
+            return [
+                snapshot.worker_id
+                for snapshot in stale_snapshots
+            ]
+
+        if hasattr(self.worker_heartbeat_monitor, "stale_worker_ids"):
+            return list(self.worker_heartbeat_monitor.stale_worker_ids())
+
+        return []
+
+    def _record_worker_id(self, record: TaskRecord) -> str | None:
+        worker_id = getattr(record, "worker_id", None)
+        if worker_id is not None:
+            return worker_id
+
+        return getattr(record, "assigned_worker_id", None)
+
+    def _record_tree_ids(self, record: TaskRecord) -> list[str]:
+        tree_ids = getattr(record, "tree_ids", None)
+        if tree_ids is None:
+            return []
+        return list(tree_ids)
