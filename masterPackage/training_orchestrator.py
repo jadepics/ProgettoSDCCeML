@@ -148,10 +148,8 @@ class TrainingOrchestrator:
                 )
 
             missing_tree_ids = recovery_plan.recover_now_tree_ids
-            shards = [
-                self._with_next_attempt_id(job_id, shard)
-                for shard in recovery_plan.recovery_shards
-            ]
+            shards = list(recovery_plan.recovery_shards)
+
         else:
             shards = self._plan_missing_shards(
                 job_id=job_id,
@@ -404,3 +402,310 @@ class TrainingOrchestrator:
             return []
 
         return self.worker_heartbeat_monitor.stale_worker_ids()
+
+    def _load_or_initialize_experiment(
+        self,
+        job_id: str,
+        experiment_id: str,
+        forest_config: ForestConfiguration,
+    ) -> ExperimentRecord:
+        experiment = self.job_repository.load_experiment(job_id, experiment_id)
+        if experiment is not None:
+            return experiment
+
+        experiment = ExperimentRecord(
+            experiment_id=experiment_id,
+            forest_config=forest_config,
+            status=ExperimentStatus.PENDING,
+            assigned_workers=[],
+            expected_tree_count=forest_config.n_estimators,
+            completed_tree_count=0,
+            validation_metrics=None,
+        )
+        self.job_repository.save_experiment(job_id, experiment)
+        return experiment
+
+    def _completed_tree_ids(self, job_id: str, experiment_id: str) -> list[str]:
+        return self.task_ledger.completed_tree_ids(
+            job_id=job_id,
+            experiment_id=experiment_id,
+        )
+
+    def _missing_tree_ids(
+        self,
+        job_id: str,
+        experiment_id: str,
+        forest_config: ForestConfiguration,
+    ) -> list[str]:
+        expected_tree_ids = [
+            generate_tree_id(experiment_id, tree_index)
+            for tree_index in range(forest_config.n_estimators)
+        ]
+
+        completed_tree_ids = set(
+            self.task_ledger.completed_tree_ids(
+                job_id=job_id,
+                experiment_id=experiment_id,
+            )
+        )
+
+        return [
+            tree_id
+            for tree_id in expected_tree_ids
+            if tree_id not in completed_tree_ids
+        ]
+
+    def _plan_missing_shards(
+        self,
+        job_id: str,
+        experiment_id: str,
+        forest_config: ForestConfiguration,
+        prepared_dataset,
+        workers: list[WorkerLike],
+        missing_tree_ids: list[str],
+    ) -> list[TrainingShard]:
+        attempts = self.task_ledger.list_attempts_by_experiment(
+            job_id=job_id,
+            experiment_id=experiment_id,
+        )
+        attempt_id = 1 if not attempts else max(record.attempt_id for record in attempts) + 1
+
+        return self.shard_planner.plan_missing_tree_ids(
+            job_id=job_id,
+            experiment_id=experiment_id,
+            forest_config=forest_config,
+            prepared_dataset=prepared_dataset,
+            workers=workers,
+            missing_tree_ids=missing_tree_ids,
+            attempt_id=attempt_id,
+        )
+
+    def _find_worker_or_raise(
+        self,
+        workers: list[WorkerLike],
+        worker_id: str,
+    ) -> WorkerLike:
+        for worker in workers:
+            if worker.worker_id == worker_id:
+                return worker
+
+        raise RuntimeError(f"Worker '{worker_id}' is not alive or not registered")
+
+    def _build_task_record(
+        self,
+        shard: TrainingShard,
+        status: TaskStatus,
+    ) -> TaskRecord:
+        tree_ids = [
+            generate_tree_id(shard.experiment_id, tree_index)
+            for tree_index in range(
+                shard.tree_start_index,
+                shard.tree_start_index + shard.tree_count,
+            )
+        ]
+
+        return TaskRecord(
+            task_id=shard.task_id,
+            attempt_id=shard.attempt_id,
+            job_id=shard.job_id,
+            experiment_id=shard.experiment_id,
+            worker_id=shard.assigned_worker_id,
+            status=status,
+            tree_ids=tree_ids,
+            completed_tree_ids=[],
+            failed_tree_ids=[],
+            lease_expires_at_ts=shard.lease_expires_at_ts,
+            updated_at=time.time(),
+            error_message=None,
+        )
+
+    def _build_failed_result(
+        self,
+        shard: TrainingShard,
+        worker_id: str,
+        error_message: str,
+    ) -> ShardTrainingResult:
+        failed_tree_ids = [
+            generate_tree_id(shard.experiment_id, tree_index)
+            for tree_index in range(
+                shard.tree_start_index,
+                shard.tree_start_index + shard.tree_count,
+            )
+        ]
+
+        return ShardTrainingResult(
+            task_id=shard.task_id,
+            attempt_id=shard.attempt_id,
+            worker_id=worker_id,
+            success=False,
+            tree_artifacts=[],
+            completed_tree_ids=[],
+            failed_tree_ids=failed_tree_ids,
+            completed_tree_count=0,
+            failed_tree_count=len(failed_tree_ids),
+            error_message=error_message,
+            elapsed_time_seconds=0.0,
+        )
+
+    def _normalize_result_identity(
+        self,
+        shard: TrainingShard,
+        fallback_worker_id: str,
+        result: ShardTrainingResult,
+    ) -> ShardTrainingResult:
+        completed_tree_ids = list(dict.fromkeys(result.completed_tree_ids))
+        if not completed_tree_ids and result.tree_artifacts:
+            completed_tree_ids = [
+                artifact.tree_id
+                for artifact in result.tree_artifacts
+            ]
+
+        all_tree_ids = [
+            generate_tree_id(shard.experiment_id, tree_index)
+            for tree_index in range(
+                shard.tree_start_index,
+                shard.tree_start_index + shard.tree_count,
+            )
+        ]
+
+        failed_tree_ids = list(dict.fromkeys(result.failed_tree_ids))
+        if not result.success and not failed_tree_ids:
+            completed_set = set(completed_tree_ids)
+            failed_tree_ids = [
+                tree_id
+                for tree_id in all_tree_ids
+                if tree_id not in completed_set
+            ]
+
+        success = result.success and len(failed_tree_ids) == 0
+
+        return ShardTrainingResult(
+            task_id=shard.task_id,
+            attempt_id=shard.attempt_id,
+            worker_id=result.worker_id or fallback_worker_id,
+            success=success,
+            tree_artifacts=list(result.tree_artifacts),
+            completed_tree_ids=completed_tree_ids,
+            failed_tree_ids=failed_tree_ids,
+            completed_tree_count=len(completed_tree_ids),
+            failed_tree_count=len(failed_tree_ids),
+            error_message=result.error_message,
+            elapsed_time_seconds=result.elapsed_time_seconds,
+        )
+
+    def _build_retry_shard(
+        self,
+        shard: TrainingShard,
+        retry_worker: WorkerLike,
+    ) -> TrainingShard:
+        return TrainingShard(
+            task_id=shard.task_id,
+            attempt_id=shard.attempt_id + 1,
+            job_id=shard.job_id,
+            experiment_id=shard.experiment_id,
+            assigned_worker_id=retry_worker.worker_id,
+            tree_start_index=shard.tree_start_index,
+            tree_count=shard.tree_count,
+            forest_config=shard.forest_config,
+            train_features_uri=shard.train_features_uri,
+            train_labels_uri=shard.train_labels_uri,
+            artifact_output_dir=shard.artifact_output_dir,
+            seed_base=shard.seed_base,
+            lease_expires_at_ts=None,
+        )
+
+    def _register_result_artifacts(
+        self,
+        artifact_by_tree_id: dict[str, TreeArtifactMetadata],
+        result: ShardTrainingResult,
+    ) -> None:
+        completed = set(result.completed_tree_ids)
+
+        for artifact in result.tree_artifacts:
+            if artifact.tree_id in completed or artifact.status == TreeStatus.COMPLETED:
+                artifact_by_tree_id[artifact.tree_id] = artifact
+
+    def _collect_persisted_completed_artifacts(
+        self,
+        job_id: str,
+        experiment_id: str,
+        forest_config: ForestConfiguration,
+    ) -> dict[str, TreeArtifactMetadata]:
+        result: dict[str, TreeArtifactMetadata] = {}
+
+        for tree_id in self.task_ledger.completed_tree_ids(job_id, experiment_id):
+            metadata = self._load_tree_metadata(
+                job_id=job_id,
+                experiment_id=experiment_id,
+                tree_id=tree_id,
+            )
+            if metadata is not None and metadata.status == TreeStatus.COMPLETED:
+                result[tree_id] = metadata
+
+        return result
+
+    def _collect_final_artifacts(
+        self,
+        job_id: str,
+        experiment_id: str,
+        forest_config: ForestConfiguration,
+        artifact_by_tree_id: dict[str, TreeArtifactMetadata],
+    ) -> list[TreeArtifactMetadata]:
+        final_artifacts: list[TreeArtifactMetadata] = []
+
+        for tree_index in range(forest_config.n_estimators):
+            tree_id = generate_tree_id(experiment_id, tree_index)
+
+            artifact = artifact_by_tree_id.get(tree_id)
+            if artifact is None:
+                artifact = self._load_tree_metadata(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    tree_id=tree_id,
+                )
+
+            if artifact is not None and artifact.status == TreeStatus.COMPLETED:
+                final_artifacts.append(artifact)
+
+        final_artifacts.sort(key=lambda item: item.tree_index)
+        return final_artifacts
+
+    def _load_tree_metadata(
+        self,
+        job_id: str,
+        experiment_id: str,
+        tree_id: str,
+    ) -> TreeArtifactMetadata | None:
+        tree_index = self._tree_index_from_tree_id(
+            experiment_id=experiment_id,
+            tree_id=tree_id,
+        )
+
+        metadata_path = (
+            self.task_ledger.artifact_store.layout.root
+            / "jobs"
+            / job_id
+            / "experiments"
+            / experiment_id
+            / "trees"
+            / f"tree_{tree_index}.json"
+        )
+
+        if not self.task_ledger.artifact_store.exists(metadata_path):
+            return None
+
+        payload = self.task_ledger.artifact_store.read_json(metadata_path)
+        return TreeArtifactMetadata.from_dict(payload)
+
+    def _tree_index_from_tree_id(
+        self,
+        experiment_id: str,
+        tree_id: str,
+    ) -> int:
+        prefix = f"{experiment_id}_tree_"
+        if not tree_id.startswith(prefix):
+            raise ValueError(
+                f"Tree id '{tree_id}' does not match experiment '{experiment_id}'"
+            )
+
+        return int(tree_id[len(prefix):])

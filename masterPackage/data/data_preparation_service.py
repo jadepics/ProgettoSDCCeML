@@ -59,6 +59,7 @@ class DataPreparationService:
         5. costruzione PreparedDataset
         """
         df = self.dataset_loader.load(dataset_uri)
+        df = self._encode_categorical_features(df, target_column)
 
         schema = self.dataset_validator.validate(
             df=df,
@@ -160,3 +161,23 @@ class DataPreparationService:
 
     def _to_file_uri(self, path: Path) -> str:
         return path.resolve().as_uri()
+    def _encode_categorical_features(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+    ) -> pd.DataFrame:
+        if target_column not in df.columns:
+            raise ValueError(f"Target column '{target_column}' not found")
+
+        features = df.drop(columns=[target_column])
+        target = df[target_column]
+
+        encoded_features = pd.get_dummies(
+            features,
+            dummy_na=True,
+            dtype=float,
+        )
+
+        result = encoded_features.copy()
+        result[target_column] = target.to_numpy()
+        return result

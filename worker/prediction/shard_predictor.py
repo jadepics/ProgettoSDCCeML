@@ -33,18 +33,29 @@ class ShardPredictor:
         if task_type == "classification":
             n_classes = len(class_labels)
 
-            # mapping label → index
+            if n_classes == 0:
+                raise ValueError("class_labels must be non-empty for classification")
+
             label_to_index = {
-                label: i for i, label in enumerate(class_labels)
+                str(label): i
+                for i, label in enumerate(class_labels)
             }
 
             votes = np.zeros((n_samples, n_classes), dtype=np.float64)
 
             for tree in trees:
-                preds = tree.predict(X)  # shape: (n_samples,)
+                preds = tree.predict(X)
 
                 for i, pred in enumerate(preds):
-                    class_idx = label_to_index[pred]
+                    pred_key = str(pred)
+
+                    if pred_key not in label_to_index:
+                        raise ValueError(
+                            f"Predicted label '{pred}' not found in class_labels "
+                            f"{class_labels}"
+                        )
+
+                    class_idx = label_to_index[pred_key]
                     votes[i, class_idx] += 1.0
 
             return votes

@@ -97,7 +97,15 @@ class TrainingJobService:
                 message="Preparing dataset",
             )
 
-            prepared_dataset = self.data_preparation_service.prepare(training_request)
+            prepared_dataset = self.data_preparation_service.prepare(
+                job_id=training_request.job_id,
+                dataset_uri=training_request.dataset_uri,
+                target_column=training_request.target_column,
+                task_type=training_request.task_type,
+                validation_ratio=training_request.validation_ratio,
+                test_ratio=training_request.test_ratio,
+                random_seed=training_request.global_random_seed,
+            )
             self.job_repository.attach_prepared_dataset(job_id, prepared_dataset)
 
             experiments = self._plan_experiments(training_request)
@@ -303,10 +311,10 @@ class TrainingJobService:
     # --------------------------------------------------------
 
     def _build_model_manifest(
-        self,
-        job_record: TrainingJobRecord,
-        experiment_record: ExperimentRecord,
-        tree_artifacts: list[TreeArtifactMetadata],
+            self,
+            job_record: TrainingJobRecord,
+            experiment_record: ExperimentRecord,
+            tree_artifacts: list[TreeArtifactMetadata],
     ):
         from common.enums import ModelStatus
         from common.ids import generate_model_id
@@ -320,7 +328,7 @@ class TrainingJobService:
                 f"Experiment '{experiment_record.experiment_id}' has no validation metrics"
             )
 
-        model_id = generate_model_id(job_record.job_id)
+        model_id = generate_model_id()
 
         return self.model_manifest_builder.build(
             model_id=model_id,
