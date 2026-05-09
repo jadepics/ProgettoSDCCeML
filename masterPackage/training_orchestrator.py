@@ -456,19 +456,41 @@ class TrainingOrchestrator:
         ]
 
     def _plan_missing_shards(
-        self,
-        job_id: str,
-        experiment_id: str,
-        forest_config: ForestConfiguration,
-        prepared_dataset,
-        workers: list[WorkerLike],
-        missing_tree_ids: list[str],
+            self,
+            job_id: str,
+            experiment_id: str,
+            forest_config: ForestConfiguration,
+            prepared_dataset,
+            workers: list[WorkerLike],
+            missing_tree_ids: list[str],
     ) -> list[TrainingShard]:
         attempts = self.task_ledger.list_attempts_by_experiment(
             job_id=job_id,
             experiment_id=experiment_id,
         )
+
         attempt_id = 1 if not attempts else max(record.attempt_id for record in attempts) + 1
+
+        expected_tree_ids = [
+            generate_tree_id(experiment_id, tree_index)
+            for tree_index in range(forest_config.n_estimators)
+        ]
+
+        is_initial_full_training_plan = (
+                not attempts
+                and set(missing_tree_ids) == set(expected_tree_ids)
+        )
+
+        if is_initial_full_training_plan:
+            return self.shard_planner.plan(
+                job_id=job_id,
+                experiment_id=experiment_id,
+                forest_config=forest_config,
+                prepared_dataset=prepared_dataset,
+                workers=workers,
+                missing_tree_ids=None,
+                attempt_id=attempt_id,
+            )
 
         return self.shard_planner.plan_missing_tree_ids(
             job_id=job_id,
