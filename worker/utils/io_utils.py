@@ -2,6 +2,8 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse, unquote
+
 
 import pandas as pd
 
@@ -46,10 +48,29 @@ class DataLoader:
 
         return df.to_numpy()
 
+    def _resolve_uri(self, uri: str) -> Path:
+        parsed = urlparse(uri)
 
-    def _resolve_uri(self, uri) -> Path:
-        if uri.startswith("file://"):
-            parsed = urlparse(uri)
-            return Path(parsed.path)
+        # Caso 1: path locale normale, es:
+        # C:\Users\micci\...
+        # oppure Dataset\file.parquet
+        if parsed.scheme == "":
+            return Path(uri)
 
-        return Path(uri)
+        # Caso 2: URI file://...
+        if parsed.scheme == "file":
+            path = unquote(parsed.path)
+
+            # Caso Windows:
+            # file:///C:/Users/... viene parsato come /C:/Users/...
+            # dobbiamo togliere lo slash iniziale
+            if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
+                path = path[1:]
+
+            # Caso file://server/share/file.parquet
+            if parsed.netloc:
+                path = f"//{parsed.netloc}{path}"
+
+            return Path(path)
+
+        raise ValueError(f"Unsupported URI scheme '{parsed.scheme}' for URI '{uri}'")

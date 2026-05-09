@@ -24,6 +24,13 @@ from worker.runtime.heartbeat_loop import HeartbeatLoop
 from worker.storage.filesystem_store import FilesystemArtifactStore
 
 
+GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
+
+GRPC_OPTIONS = [
+    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
+    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
+]
+
 class WorkerNode:
     """
     Entry point del worker.
@@ -41,7 +48,8 @@ class WorkerNode:
         # gRPC Server
         # --------------------------------------------------
         self.server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=config.max_workers)
+            futures.ThreadPoolExecutor(max_workers=config.max_workers),
+            options=GRPC_OPTIONS,
         )
 
         # --------------------------------------------------

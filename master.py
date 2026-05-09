@@ -46,7 +46,12 @@ from common.storage_layout import StorageLayout
 
 HEARTBEAT_TIMEOUT_SECONDS = 15.0
 DEFAULT_RPC_TIMEOUT_SECONDS = 600.0
+GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
 
+GRPC_OPTIONS = [
+    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
+    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
+]
 
 # ============================================================
 # Utility
@@ -431,7 +436,10 @@ def serve(
     port: int = 50051,
     artifact_root: str = "/shared/artifacts",
 ):
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=32))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=32),
+        options=GRPC_OPTIONS,
+    )
     rf_pb2_grpc.add_CoordinatorServiceServicer_to_server(
         MasterCoordinator(artifact_root=artifact_root),
         server,

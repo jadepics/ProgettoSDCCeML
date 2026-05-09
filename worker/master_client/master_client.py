@@ -4,12 +4,17 @@ import time
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
 
+GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
 
+GRPC_OPTIONS = [
+    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
+    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
+]
 class MasterClient:
 
     def __init__(self, host: str, port: int):
         self.address = f"{host}:{port}"
-        self.channel = grpc.insecure_channel(self.address)
+        self.channel = grpc.insecure_channel(self.address, options=GRPC_OPTIONS)
         self.stub = rf_pb2_grpc.CoordinatorServiceStub(self.channel)
 
     # --------------------------------------------------

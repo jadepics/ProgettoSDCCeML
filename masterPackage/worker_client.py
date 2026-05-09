@@ -16,6 +16,12 @@ from common.contracts import (
 )
 from common.enums import TreeStatus
 
+GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
+
+GRPC_OPTIONS = [
+    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
+    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
+]
 
 @dataclass(slots=True)
 class PredictionShardResult:
@@ -216,7 +222,7 @@ class WorkerClient:
         request: rf_pb2.TrainShardRequest,
     ) -> rf_pb2.TrainShardResponse:
         address = f"{worker_host}:{worker_port}"
-        with grpc.insecure_channel(address) as channel:
+        with grpc.insecure_channel(address, options=GRPC_OPTIONS) as channel:
             stub = rf_pb2_grpc.WorkerServiceStub(channel)
             return stub.TrainShard(request, timeout=self.timeout_train_seconds)
 
@@ -227,7 +233,7 @@ class WorkerClient:
         request: rf_pb2.PredictShardRequest,
     ) -> rf_pb2.PredictShardResponse:
         address = f"{worker_host}:{worker_port}"
-        with grpc.insecure_channel(address) as channel:
+        with grpc.insecure_channel(address, options=GRPC_OPTIONS) as channel:
             stub = rf_pb2_grpc.WorkerServiceStub(channel)
             return stub.PredictShard(request, timeout=self.timeout_predict_seconds)
 

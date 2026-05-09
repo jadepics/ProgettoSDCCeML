@@ -134,3 +134,38 @@ status: 1
 message: Training started
 
 Lo status 1 corrisponde a PENDING, perché il training parte in thread separato lato master.
+
+Per vedere solo lo stato del job:
+
+$job="job_QUI_METTI_ID"
+$j = Get-Content ".\shared_artifacts\jobs\$job\job_record.json" -Raw | ConvertFrom-Json
+$j.status
+$j.message
+$j.selected_experiment_id
+$j.model_id
+
+Per vedere gli esperimenti:
+
+$job="job_QUI_METTI_ID"
+Get-ChildItem ".\shared_artifacts\jobs\$job\experiments" -Directory | ForEach-Object {
+    Get-Content "$($_.FullName)\experiment_record.json" -Raw | ConvertFrom-Json |
+    Select-Object experiment_id,status,expected_tree_count,completed_tree_count,assigned_workers
+}
+
+Per contare gli alberi salvati:
+
+$job="job_QUI_METTI_ID"
+Get-ChildItem ".\shared_artifacts\jobs\$job\experiments" -Directory | ForEach-Object {
+    Write-Host "Experiment:" $_.Name
+    Get-ChildItem "$($_.FullName)\trees" -Filter "*.joblib" -ErrorAction SilentlyContinue | Measure-Object
+}
+
+Per vedere le metriche di validation:
+
+$job="job_QUI_METTI_ID"
+Get-ChildItem ".\shared_artifacts\jobs\$job\experiments" -Directory | ForEach-Object {
+    $metrics = "$($_.FullName)\metrics\validation_metrics.json"
+    if (Test-Path $metrics) {
+        Get-Content $metrics -Raw | ConvertFrom-Json | Format-List
+    }
+}
