@@ -47,11 +47,9 @@ class DataLoader:
         return df.to_numpy()
 
 
-    def _resolve_uri(self, uri) -> str:
-        parsed = urlparse(uri)
-        if parsed.scheme == "file":
-            path = parsed.path
-            return path
-        else:
-            print("Errore nel parsing del url %s" % uri)
-            return ""
+    def _resolve_uri(self, uri) -> Path:
+        if uri.startswith("file://"):
+            parsed = urlparse(uri)
+            return Path(parsed.path)
+
+        return Path(uri)
