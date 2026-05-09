@@ -411,6 +411,24 @@ class ValidationCoordinator:
         return pd.read_parquet(path)
 
     def _normalize_uri(self, uri: str) -> str:
-        if uri.startswith("file://"):
-            return uri.replace("file://", "", 1)
-        return uri
+        import os
+        from urllib.parse import urlparse, unquote
+        from urllib.request import url2pathname
+
+        parsed = urlparse(uri)
+
+        if parsed.scheme == "":
+            return uri
+
+        if parsed.scheme != "file":
+            return uri
+
+        path = url2pathname(unquote(parsed.path))
+
+        if os.name == "nt":
+            if parsed.netloc:
+                path = f"//{parsed.netloc}{path}"
+            elif path.startswith("/") and len(path) >= 3 and path[2] == ":":
+                path = path[1:]
+
+        return path
