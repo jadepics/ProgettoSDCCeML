@@ -1,0 +1,589 @@
+Index: worker/utils/io_utils.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import json\r\nimport os\r\nimport tempfile\r\nfrom pathlib import Path\r\nfrom urllib.parse import urlparse, unquote\r\n\r\n\r\nimport pandas as pd\r\n\r\n\r\ndef atomic_json_write(path: Path, payload: dict) -> None:\r\n    \"\"\"\r\n    Writes a JSON file atomically to avoid corruption in case of failures.\r\n\r\n    Strategy:\r\n    - Write to a temporary file\r\n    - Flush + fsync to disk\r\n    - Atomically replace the target file\r\n    \"\"\"\r\n    path = Path(path)\r\n    path.parent.mkdir(parents=True, exist_ok=True)\r\n\r\n    with tempfile.NamedTemporaryFile(\r\n        mode=\"w\",\r\n        delete=False,\r\n        dir=str(path.parent),\r\n        encoding=\"utf-8\"\r\n    ) as tmp:\r\n        json.dump(payload, tmp, indent=2)\r\n        tmp.flush()\r\n        os.fsync(tmp.fileno())\r\n        temp_path = Path(tmp.name)\r\n\r\n    # Atomic replace\r\n    temp_path.replace(path)\r\n\r\nimport numpy as np\r\nfrom urllib.parse import urlparse\r\n\r\nclass DataLoader:\r\n    def __init__(self, artifact_store):\r\n        self.store = artifact_store\r\n\r\n    def load_numpy(self, uri: str) -> np.ndarray:\r\n        path = self._resolve_uri(uri)\r\n\r\n        df = pd.read_parquet(path)\r\n\r\n        return df.to_numpy()\r\n\r\n    def _resolve_uri(self, uri: str) -> Path:\r\n        parsed = urlparse(uri)\r\n\r\n        # Caso 1: path locale normale, es:\r\n        # C:\\Users\\micci\\...\r\n        # oppure Dataset\\file.parquet\r\n        if parsed.scheme == \"\":\r\n            return Path(uri)\r\n\r\n        # Caso 2: URI file://...\r\n        if parsed.scheme == \"file\":\r\n            path = unquote(parsed.path)\r\n\r\n            # Caso Windows:\r\n            # file:///C:/Users/... viene parsato come /C:/Users/...\r\n            # dobbiamo togliere lo slash iniziale\r\n            if os.name == \"nt\" and len(path) >= 3 and path[0] == \"/\" and path[2] == \":\":\r\n                path = path[1:]\r\n\r\n            # Caso file://server/share/file.parquet\r\n            if parsed.netloc:\r\n                path = f\"//{parsed.netloc}{path}\"\r\n\r\n            return Path(path)\r\n\r\n        raise ValueError(f\"Unsupported URI scheme '{parsed.scheme}' for URI '{uri}'\")
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/utils/io_utils.py b/worker/utils/io_utils.py
+--- a/worker/utils/io_utils.py	(revision e1a5d3ed2c9a5d3db03257f149d34d0c20057e02)
++++ b/worker/utils/io_utils.py	(date 1778341083737)
+@@ -2,8 +2,6 @@
+ import os
+ import tempfile
+ from pathlib import Path
+-from urllib.parse import urlparse, unquote
+-
+ 
+ import pandas as pd
+ 
+@@ -35,7 +33,8 @@
+     temp_path.replace(path)
+ 
+ import numpy as np
+-from urllib.parse import urlparse
++from urllib.parse import urlparse, unquote
++
+ 
+ class DataLoader:
+     def __init__(self, artifact_store):
+@@ -70,7 +69,4 @@
+             # Caso file://server/share/file.parquet
+             if parsed.netloc:
+                 path = f"//{parsed.netloc}{path}"
+-
+-            return Path(path)
+-
+-        raise ValueError(f"Unsupported URI scheme '{parsed.scheme}' for URI '{uri}'")
+\ No newline at end of file
++            return Path(path)
+\ No newline at end of file
+Index: README.md
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>HOW TO RUN:\r\nSetup iniziale\r\n\r\nApri PowerShell nella root del progetto:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\nPoi fai un controllo veloce:\r\n\r\npython -m compileall -q master.py masterPackage common worker\r\n\r\nSe questo passa senza output, prosegui.\r\n\r\nPulisci gli artifact vecchi:\r\n\r\nRemove-Item -Recurse -Force .\\shared_artifacts -ErrorAction SilentlyContinue\r\nNew-Item -ItemType Directory -Force .\\shared_artifacts | Out-Null\r\nTerminale 1 — Avvia il master\r\n\r\nApri un primo terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\n$env:MASTER_HOST=\"0.0.0.0\"\r\n$env:MASTER_PORT=\"50051\"\r\n$env:ARTIFACT_ROOT=(Join-Path (Get-Location) \"shared_artifacts\")\r\n\r\npython master.py\r\n\r\nDevi vedere qualcosa tipo:\r\n\r\n[MASTER] listening on 0.0.0.0:50051\r\n\r\nLascia questo terminale aperto.\r\n\r\nTerminale 2 — Avvia worker 1\r\n\r\nApri un secondo terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\n$env:WORKER_ID=\"worker-1\"\r\n$env:WORKER_BIND_HOST=\"0.0.0.0\"\r\n$env:WORKER_PORT=\"50061\"\r\n$env:WORKER_ADVERTISE_HOST=\"127.0.0.1\"\r\n$env:MASTER_HOST=\"127.0.0.1\"\r\n$env:MASTER_PORT=\"50051\"\r\n$env:ARTIFACT_ROOT=(Join-Path (Get-Location) \"shared_artifacts\")\r\n\r\npython -c \"from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()\"\r\n\r\nDovresti vedere:\r\n\r\n[WorkerNode] gRPC server started on port 50061\r\n[MasterClient] Registered worker worker-1\r\n[WorkerNode] Registered as 127.0.0.1:50061\r\n\r\nLascia aperto anche questo terminale.\r\n\r\nTerminale 3 — Avvia worker 2\r\n\r\nApri un terzo terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\n$env:WORKER_ID=\"worker-2\"\r\n$env:WORKER_BIND_HOST=\"0.0.0.0\"\r\n$env:WORKER_PORT=\"50062\"\r\n$env:WORKER_ADVERTISE_HOST=\"127.0.0.1\"\r\n$env:MASTER_HOST=\"127.0.0.1\"\r\n$env:MASTER_PORT=\"50051\"\r\n$env:ARTIFACT_ROOT=(Join-Path (Get-Location) \"shared_artifacts\")\r\n\r\npython -c \"from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()\"\r\n\r\nPer una prima run puoi anche usare un solo worker, ma con due inizi già a verificare la distribuzione.\r\n\r\nTerminale 4 — Invia il training job\r\n\r\nApri un quarto terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\nCrea un piccolo client temporaneo:\r\n\r\n@'\r\nfrom pathlib import Path\r\nimport grpc\r\n\r\nimport rf_v2_pb2 as pb\r\nimport rf_v2_pb2_grpc as pbgrpc\r\n\r\ndataset_path = Path(\"Dataset/diabetes_dataset.csv\").resolve()\r\n\r\nchannel = grpc.insecure_channel(\"127.0.0.1:50051\")\r\nstub = pbgrpc.CoordinatorServiceStub(channel)\r\n\r\nrequest = pb.SubmitTrainingRequest(\r\n    dataset_url=str(dataset_path),\r\n    target_column=\"diagnosed_diabetes\",\r\n    task_type=\"classification\",\r\n    n_estimators_total=4,\r\n    validation_ratio=0.2,\r\n    test_ratio=0.2,\r\n    bootstrap=True,\r\n    global_random_seed=42,\r\n    max_depth_candidates=[5],\r\n    max_features_candidates=[\"sqrt\"],\r\n    min_samples_split_candidates=[2],\r\n    min_samples_leaf_candidates=[1],\r\n    criterion_candidates=[\"gini\"],\r\n)\r\n\r\nresponse = stub.SubmitTraining(request, timeout=30)\r\n\r\nprint(\"job_id:\", response.job_id)\r\nprint(\"status:\", response.status)\r\nprint(\"message:\", response.message)\r\n'@ | Set-Content .\\submit_training.py\r\n\r\nPoi lancia:\r\n\r\npython .\\submit_training.py\r\n\r\nDovresti ottenere una risposta tipo:\r\n\r\njob_id: job_...\r\nstatus: 1\r\nmessage: Training started\r\n\r\nLo status 1 corrisponde a PENDING, perché il training parte in thread separato lato master.\r\n\r\nPer vedere solo lo stato del job:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\n$j = Get-Content \".\\shared_artifacts\\jobs\\$job\\job_record.json\" -Raw | ConvertFrom-Json\r\n$j.status\r\n$j.message\r\n$j.selected_experiment_id\r\n$j.model_id\r\n\r\nPer vedere gli esperimenti:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\nGet-ChildItem \".\\shared_artifacts\\jobs\\$job\\experiments\" -Directory | ForEach-Object {\r\n    Get-Content \"$($_.FullName)\\experiment_record.json\" -Raw | ConvertFrom-Json |\r\n    Select-Object experiment_id,status,expected_tree_count,completed_tree_count,assigned_workers\r\n}\r\n\r\nPer contare gli alberi salvati:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\nGet-ChildItem \".\\shared_artifacts\\jobs\\$job\\experiments\" -Directory | ForEach-Object {\r\n    Write-Host \"Experiment:\" $_.Name\r\n    Get-ChildItem \"$($_.FullName)\\trees\" -Filter \"*.joblib\" -ErrorAction SilentlyContinue | Measure-Object\r\n}\r\n\r\nPer vedere le metriche di validation:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\nGet-ChildItem \".\\shared_artifacts\\jobs\\$job\\experiments\" -Directory | ForEach-Object {\r\n    $metrics = \"$($_.FullName)\\metrics\\validation_metrics.json\"\r\n    if (Test-Path $metrics) {\r\n        Get-Content $metrics -Raw | ConvertFrom-Json | Format-List\r\n    }\r\n}
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/README.md b/README.md
+--- a/README.md	(revision e1a5d3ed2c9a5d3db03257f149d34d0c20057e02)
++++ b/README.md	(date 1778342539037)
+@@ -3,30 +3,20 @@
+ 
+ Apri PowerShell nella root del progetto:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+-Poi fai un controllo veloce:
+-
+-python -m compileall -q master.py masterPackage common worker
+-
+-Se questo passa senza output, prosegui.
+-
+ Pulisci gli artifact vecchi:
+ 
+ Remove-Item -Recurse -Force .\shared_artifacts -ErrorAction SilentlyContinue
+ New-Item -ItemType Directory -Force .\shared_artifacts | Out-Null
++
++
++
+ Terminale 1 — Avvia il master
+ 
+ Apri un primo terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ $env:MASTER_HOST="0.0.0.0"
+ $env:MASTER_PORT="50051"
+ $env:ARTIFACT_ROOT=(Join-Path (Get-Location) "shared_artifacts")
+-
+ python master.py
+ 
+ Devi vedere qualcosa tipo:
+@@ -35,13 +25,12 @@
+ 
+ Lascia questo terminale aperto.
+ 
++
++
+ Terminale 2 — Avvia worker 1
+ 
+ Apri un secondo terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ $env:WORKER_ID="worker-1"
+ $env:WORKER_BIND_HOST="0.0.0.0"
+ $env:WORKER_PORT="50061"
+@@ -49,7 +38,6 @@
+ $env:MASTER_HOST="127.0.0.1"
+ $env:MASTER_PORT="50051"
+ $env:ARTIFACT_ROOT=(Join-Path (Get-Location) "shared_artifacts")
+-
+ python -c "from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()"
+ 
+ Dovresti vedere:
+@@ -60,13 +48,12 @@
+ 
+ Lascia aperto anche questo terminale.
+ 
++
++
+ Terminale 3 — Avvia worker 2
+ 
+ Apri un terzo terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ $env:WORKER_ID="worker-2"
+ $env:WORKER_BIND_HOST="0.0.0.0"
+ $env:WORKER_PORT="50062"
+@@ -74,18 +61,16 @@
+ $env:MASTER_HOST="127.0.0.1"
+ $env:MASTER_PORT="50051"
+ $env:ARTIFACT_ROOT=(Join-Path (Get-Location) "shared_artifacts")
+-
+ python -c "from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()"
+ 
+ Per una prima run puoi anche usare un solo worker, ma con due inizi già a verificare la distribuzione.
+ 
++
++
+ Terminale 4 — Invia il training job
+ 
+ Apri un quarto terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ Crea un piccolo client temporaneo:
+ 
+ @'
+@@ -123,8 +108,6 @@
+ print("message:", response.message)
+ '@ | Set-Content .\submit_training.py
+ 
+-Poi lancia:
+-
+ python .\submit_training.py
+ 
+ Dovresti ottenere una risposta tipo:
+@@ -135,6 +118,8 @@
+ 
+ Lo status 1 corrisponde a PENDING, perché il training parte in thread separato lato master.
+ 
++
++
+ Per vedere solo lo stato del job:
+ 
+ $job="job_QUI_METTI_ID"
+@@ -144,6 +129,8 @@
+ $j.selected_experiment_id
+ $j.model_id
+ 
++
++
+ Per vedere gli esperimenti:
+ 
+ $job="job_QUI_METTI_ID"
+@@ -154,7 +141,7 @@
+ 
+ Per contare gli alberi salvati:
+ 
+-$job="job_QUI_METTI_ID"
++$job="job_6ad41ebc8e07423d8195eeaebe2ac057"
+ Get-ChildItem ".\shared_artifacts\jobs\$job\experiments" -Directory | ForEach-Object {
+     Write-Host "Experiment:" $_.Name
+     Get-ChildItem "$($_.FullName)\trees" -Filter "*.joblib" -ErrorAction SilentlyContinue | Measure-Object
+@@ -162,10 +149,13 @@
+ 
+ Per vedere le metriche di validation:
+ 
+-$job="job_QUI_METTI_ID"
+-Get-ChildItem ".\shared_artifacts\jobs\$job\experiments" -Directory | ForEach-Object {
+-    $metrics = "$($_.FullName)\metrics\validation_metrics.json"
+-    if (Test-Path $metrics) {
+-        Get-Content $metrics -Raw | ConvertFrom-Json | Format-List
+-    }
+-}
+\ No newline at end of file
++$job = "job_6eecde96785446e4922b5f43166f03f2"
++$exp = "job_6eecde96785446e4922b5f43166f03f2_exp_000"
++
++$er = Get-Content ".\shared_artifacts\jobs\$job\experiments\$exp\experiment_record.json" -Raw | ConvertFrom-Json
++
++$er.status
++$er.expected_tree_count
++$er.completed_tree_count
++$er.assigned_workers
++$er.validation_metrics
+\ No newline at end of file
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"BufProjectSettings\">\r\n    <option name=\"bufCLIPath\" value=\"$ brew install bufbuild/buf/buf\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"ristrutturato master\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/master.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/master.py\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;jadepics&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\">{\r\n  &quot;selectedUrlAndAccountId&quot;: {\r\n    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,\r\n    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;\r\n  }\r\n}</component>\r\n  <component name=\"KubernetesApiPersistence\">{}</component>\r\n  <component name=\"KubernetesApiProvider\">{\r\n  &quot;isMigrated&quot;: true\r\n}</component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 8\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\">{\r\n  &quot;keyToString&quot;: {\r\n    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,\r\n    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,\r\n    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,\r\n    &quot;git-widget-placeholder&quot;: &quot;master&quot;,\r\n    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,\r\n    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,\r\n    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,\r\n    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,\r\n    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,\r\n    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;\r\n  }\r\n}</component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"CopyFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\" />\r\n    </key>\r\n    <key name=\"MoveFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\worker\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"\" />\r\n      <created>1772718028304</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1772718028304</updated>\r\n      <workItem from=\"1774557139933\" duration=\"1949000\" />\r\n      <workItem from=\"1774559557015\" duration=\"480000\" />\r\n      <workItem from=\"1774600460605\" duration=\"10626000\" />\r\n      <workItem from=\"1774694994766\" duration=\"3422000\" />\r\n      <workItem from=\"1774720403281\" duration=\"207000\" />\r\n      <workItem from=\"1774730844650\" duration=\"5746000\" />\r\n      <workItem from=\"1774964855112\" duration=\"688000\" />\r\n    </task>\r\n    <task id=\"LOCAL-00001\" summary=\"First commit\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772718604332</created>\r\n      <option name=\"number\" value=\"00001\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772718604332</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00002\" summary=\"Introduzione artifact_store, filesystem_stoere e paths\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774605271956</created>\r\n      <option name=\"number\" value=\"00002\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00002\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774605271956</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00003\" summary=\"refactoring worker.py e paths.py\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774698083683</created>\r\n      <option name=\"number\" value=\"00003\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00003\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774698083683</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00004\" summary=\"aggiunto commento\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774875188528</created>\r\n      <option name=\"number\" value=\"00004\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00004\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774875188528</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00005\" summary=\"ristrutturato master\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774886067552</created>\r\n      <option name=\"number\" value=\"00005\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00005\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774886067552</updated>\r\n    </task>\r\n    <option name=\"localTasksCounter\" value=\"6\" />\r\n    <servers />\r\n  </component>\r\n  <component name=\"TypeScriptGeneratedFilesManager\">\r\n    <option name=\"version\" value=\"3\" />\r\n  </component>\r\n  <component name=\"VcsManagerConfiguration\">\r\n    <MESSAGE value=\"First commit\" />\r\n    <MESSAGE value=\"Introduzione artifact_store, filesystem_stoere e paths\" />\r\n    <MESSAGE value=\"refactoring worker.py e paths.py\" />\r\n    <MESSAGE value=\"aggiunto commento\" />\r\n    <MESSAGE value=\"ristrutturato master\" />\r\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"ristrutturato master\" />\r\n  </component>\r\n  <component name=\"github-copilot-workspace\">\r\n    <instructionFileLocations>\r\n      <option value=\".github/instructions\" />\r\n    </instructionFileLocations>\r\n    <promptFileLocations>\r\n      <option value=\".github/prompts\" />\r\n    </promptFileLocations>\r\n  </component>\r\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision e1a5d3ed2c9a5d3db03257f149d34d0c20057e02)
++++ b/.idea/workspace.xml	(date 1778344673891)
+@@ -7,14 +7,21 @@
+     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
+   </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="ristrutturato master">
++    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="modifica file io_utils.py">
+       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/submit_training.py" beforeDir="false" afterPath="$PROJECT_DIR$/submit_training.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/utils/io_utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/utils/io_utils.py" afterDir="false" />
+     </list>
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+     <option name="LAST_RESOLUTION" value="IGNORE" />
++  </component>
++  <component name="CopilotPersistence">
++    <persistenceIdMap>
++      <entry key="_C:/Users/PC/Desktop/materie/ISW/Mvn/ProgettoSDCCeML" value="3AWp9QFcSCr26GObyiuq4gjJYSa" />
++    </persistenceIdMap>
+   </component>
+   <component name="FileTemplateManagerImpl">
+     <option name="RECENT_TEMPLATES">
+@@ -25,6 +32,7 @@
+   </component>
+   <component name="Git.Settings">
+     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
++    <option name="UPDATE_TYPE" value="REBASE" />
+   </component>
+   <component name="GitHubPullRequestSearchHistory">{
+   &quot;lastFilter&quot;: {
+@@ -34,13 +42,9 @@
+ }</component>
+   <component name="GithubPullRequestsUISettings">{
+   &quot;selectedUrlAndAccountId&quot;: {
+-    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,
+-    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
++    &quot;url&quot;: &quot;https://github.com/jadepics/ProgettoSDCCeML.git&quot;,
++    &quot;accountId&quot;: &quot;64b32a3e-6402-44ac-8316-64089203d618&quot;
+   }
+-}</component>
+-  <component name="KubernetesApiPersistence">{}</component>
+-  <component name="KubernetesApiProvider">{
+-  &quot;isMigrated&quot;: true
+ }</component>
+   <component name="ProjectColorInfo">{
+   &quot;associatedIndex&quot;: 8
+@@ -53,28 +57,29 @@
+     <option name="hideEmptyMiddlePackages" value="true" />
+     <option name="showLibraryContents" value="true" />
+   </component>
+-  <component name="PropertiesComponent">{
+-  &quot;keyToString&quot;: {
+-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+-    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+-    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+-    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+-    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+-    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+-    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+-    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
+-    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,
+-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+-    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+-    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,
+-    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
++  <component name="PropertiesComponent"><![CDATA[{
++  "keyToString": {
++    "ModuleVcsDetector.initialDetectionPerformed": "true",
++    "Python.boh.executor": "Run",
++    "Python.training_debug_cli.executor": "Run",
++    "RunOnceActivity.ShowReadmeOnStart": "true",
++    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
++    "RunOnceActivity.git.unshallow": "true",
++    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
++    "ai.playground.ignore.import.keys.banner.in.settings": "true",
++    "codeWithMe.voiceChat.enabledByDefault": "false",
++    "git-widget-placeholder": "master",
++    "ignore.virus.scanning.warn.message": "true",
++    "last_opened_file_path": "C:/Users/micci/PycharmProjects/PythonProject1/Dataset",
++    "node.js.detected.package.eslint": "true",
++    "node.js.detected.package.tslint": "true",
++    "node.js.selected.package.eslint": "(autodetect)",
++    "node.js.selected.package.tslint": "(autodetect)",
++    "nodejs_package_manager_path": "npm",
++    "settings.editor.selected.configurable": "settings.sync",
++    "vue.rearranger.settings.migration": "true"
+   }
+-}</component>
++}]]></component>
+   <component name="RecentsManager">
+     <key name="CopyFile.RECENT_KEYS">
+       <recent name="C:\Users\micci\PycharmProjects\PythonProject1\Dataset" />
+@@ -82,11 +87,70 @@
+     <key name="MoveFile.RECENT_KEYS">
+       <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\worker" />
+     </key>
++  </component>
++  <component name="RunManager" selected="Python.boh">
++    <configuration name="boh" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
++      <module name="ProgSDCC&amp;ML" />
++      <option name="ENV_FILES" value="" />
++      <option name="INTERPRETER_OPTIONS" value="" />
++      <option name="PARENT_ENVS" value="true" />
++      <envs>
++        <env name="PYTHONUNBUFFERED" value="1" />
++      </envs>
++      <option name="SDK_HOME" value="" />
++      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
++      <option name="IS_MODULE_SDK" value="true" />
++      <option name="ADD_CONTENT_ROOTS" value="true" />
++      <option name="ADD_SOURCE_ROOTS" value="true" />
++      <option name="DEBUG_JUST_MY_CODE" value="false" />
++      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
++      <option name="RUN_TOOL" value="" />
++      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/boh.py" />
++      <option name="PARAMETERS" value="" />
++      <option name="SHOW_COMMAND_LINE" value="false" />
++      <option name="EMULATE_TERMINAL" value="false" />
++      <option name="MODULE_MODE" value="false" />
++      <option name="REDIRECT_INPUT" value="false" />
++      <option name="INPUT_FILE" value="" />
++      <method v="2" />
++    </configuration>
++    <configuration name="training_debug_cli" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
++      <module name="ProgSDCC&amp;ML" />
++      <option name="ENV_FILES" value="" />
++      <option name="INTERPRETER_OPTIONS" value="" />
++      <option name="PARENT_ENVS" value="true" />
++      <envs>
++        <env name="PYTHONUNBUFFERED" value="1" />
++      </envs>
++      <option name="SDK_HOME" value="" />
++      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
++      <option name="IS_MODULE_SDK" value="true" />
++      <option name="ADD_CONTENT_ROOTS" value="true" />
++      <option name="ADD_SOURCE_ROOTS" value="true" />
++      <option name="DEBUG_JUST_MY_CODE" value="false" />
++      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
++      <option name="RUN_TOOL" value="" />
++      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/training_debug_cli.py" />
++      <option name="PARAMETERS" value="" />
++      <option name="SHOW_COMMAND_LINE" value="false" />
++      <option name="EMULATE_TERMINAL" value="false" />
++      <option name="MODULE_MODE" value="false" />
++      <option name="REDIRECT_INPUT" value="false" />
++      <option name="INPUT_FILE" value="" />
++      <method v="2" />
++    </configuration>
++    <recent_temporary>
++      <list>
++        <item itemvalue="Python.boh" />
++        <item itemvalue="Python.training_debug_cli" />
++      </list>
++    </recent_temporary>
+   </component>
+   <component name="SharedIndexes">
+     <attachedChunks>
+       <set>
+-        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
++        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.23567.174" />
++        <option value="bundled-python-sdk-024ed6589d45-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.23567.174" />
+       </set>
+     </attachedChunks>
+   </component>
+@@ -103,7 +167,50 @@
+       <workItem from="1774694994766" duration="3422000" />
+       <workItem from="1774720403281" duration="207000" />
+       <workItem from="1774730844650" duration="5746000" />
+-      <workItem from="1774964855112" duration="688000" />
++      <workItem from="1775288233161" duration="3626000" />
++      <workItem from="1775292566531" duration="13927000" />
++      <workItem from="1775326919099" duration="1110000" />
++      <workItem from="1775392617284" duration="708000" />
++      <workItem from="1775393448729" duration="122000" />
++      <workItem from="1775654904055" duration="483000" />
++      <workItem from="1775656481674" duration="4490000" />
++      <workItem from="1775808451484" duration="3808000" />
++      <workItem from="1775823854807" duration="5818000" />
++      <workItem from="1776069786364" duration="782000" />
++      <workItem from="1776153906549" duration="10068000" />
++      <workItem from="1776168387308" duration="6627000" />
++      <workItem from="1776242022766" duration="5812000" />
++      <workItem from="1776249159797" duration="5681000" />
++      <workItem from="1776284328231" duration="3004000" />
++      <workItem from="1776321911178" duration="373000" />
++      <workItem from="1776323207044" duration="1578000" />
++      <workItem from="1776328104086" duration="1919000" />
++      <workItem from="1776337645995" duration="10337000" />
++      <workItem from="1776362220672" duration="7630000" />
++      <workItem from="1776413459436" duration="3307000" />
++      <workItem from="1777018288438" duration="388000" />
++      <workItem from="1777019274594" duration="2480000" />
++      <workItem from="1777278724808" duration="286000" />
++      <workItem from="1777279070090" duration="6945000" />
++      <workItem from="1777380308736" duration="4031000" />
++      <workItem from="1777484104625" duration="304000" />
++      <workItem from="1777484595780" duration="6659000" />
++      <workItem from="1777533131214" duration="6713000" />
++      <workItem from="1777542703506" duration="685000" />
++      <workItem from="1777544082737" duration="476000" />
++      <workItem from="1778010992686" duration="6112000" />
++      <workItem from="1778018415390" duration="72000" />
++      <workItem from="1778137776999" duration="569000" />
++      <workItem from="1778138895859" duration="19000" />
++      <workItem from="1778147012176" duration="4982000" />
++      <workItem from="1778226721585" duration="575000" />
++      <workItem from="1778227401623" duration="4457000" />
++      <workItem from="1778233356244" duration="198000" />
++      <workItem from="1778285538991" duration="1425000" />
++      <workItem from="1778322871779" duration="3414000" />
++      <workItem from="1778330210005" duration="191000" />
++      <workItem from="1778330466239" duration="3375000" />
++      <workItem from="1778338080629" duration="6541000" />
+     </task>
+     <task id="LOCAL-00001" summary="First commit">
+       <option name="closed" value="true" />
+@@ -137,15 +244,119 @@
+       <option name="project" value="LOCAL" />
+       <updated>1774875188528</updated>
+     </task>
+-    <task id="LOCAL-00005" summary="ristrutturato master">
++    <task id="LOCAL-00005" summary="Commit worker prima dell'introduzione del manifest per evitare master stateless">
+       <option name="closed" value="true" />
+-      <created>1774886067552</created>
++      <created>1775250185553</created>
+       <option name="number" value="00005" />
+       <option name="presentableId" value="LOCAL-00005" />
+       <option name="project" value="LOCAL" />
+-      <updated>1774886067552</updated>
++      <updated>1775250185553</updated>
++    </task>
++    <task id="LOCAL-00006" summary="Sistemati bootstrap_sampler.py e worker_service.py">
++      <option name="closed" value="true" />
++      <created>1776170087506</created>
++      <option name="number" value="00006" />
++      <option name="presentableId" value="LOCAL-00006" />
++      <option name="project" value="LOCAL" />
++      <updated>1776170087509</updated>
++    </task>
++    <task id="LOCAL-00007" summary="refactoring shard_trainer.py, decision_tree_factory.py">
++      <option name="closed" value="true" />
++      <created>1776245231565</created>
++      <option name="number" value="00007" />
++      <option name="presentableId" value="LOCAL-00007" />
++      <option name="project" value="LOCAL" />
++      <updated>1776245231565</updated>
++    </task>
++    <task id="LOCAL-00008" summary="Implementazione esplicita dei metodi di worker_state.py">
++      <option name="closed" value="true" />
++      <created>1776245958340</created>
++      <option name="number" value="00008" />
++      <option name="presentableId" value="LOCAL-00008" />
++      <option name="project" value="LOCAL" />
++      <updated>1776245958341</updated>
++    </task>
++    <task id="LOCAL-00009" summary="Implementazione esplicita dei metodi di worker_state.py e introduzione di tree_artifact_mapper.py per mapping">
++      <option name="closed" value="true" />
++      <created>1776259068456</created>
++      <option name="number" value="00009" />
++      <option name="presentableId" value="LOCAL-00009" />
++      <option name="project" value="LOCAL" />
++      <updated>1776259068457</updated>
++    </task>
++    <task id="LOCAL-00010" summary="Fase 1 delle correzioni, Heartbeat implementato">
++      <option name="closed" value="true" />
++      <created>1776287063737</created>
++      <option name="number" value="00010" />
++      <option name="presentableId" value="LOCAL-00010" />
++      <option name="project" value="LOCAL" />
++      <updated>1776287063737</updated>
++    </task>
++    <task id="LOCAL-00011" summary="Fase 2 e 4 delle correzioni: 2)Riallineare WorkerService come facciata RPC pura Obiettivo e 4) Rendere ShardTrainer retry-safe e progress-aware Obiettivo">
++      <option name="closed" value="true" />
++      <created>1776414703550</created>
++      <option name="number" value="00011" />
++      <option name="presentableId" value="LOCAL-00011" />
++      <option name="project" value="LOCAL" />
++      <updated>1776414703550</updated>
++    </task>
++    <task id="LOCAL-00012" summary="Push pre modifiche">
++      <option name="closed" value="true" />
++      <created>1777019839625</created>
++      <option name="number" value="00012" />
++      <option name="presentableId" value="LOCAL-00012" />
++      <option name="project" value="LOCAL" />
++      <updated>1777019839625</updated>
++    </task>
++    <task id="LOCAL-00013" summary="Correzione errori notati in 22/04">
++      <option name="closed" value="true" />
++      <created>1777486042664</created>
++      <option name="number" value="00013" />
++      <option name="presentableId" value="LOCAL-00013" />
++      <option name="project" value="LOCAL" />
++      <updated>1777486042664</updated>
++    </task>
++    <task id="LOCAL-00014" summary="modifiche minime lato worker">
++      <option name="closed" value="true" />
++      <created>1777544484058</created>
++      <option name="number" value="00014" />
++      <option name="presentableId" value="LOCAL-00014" />
++      <option name="project" value="LOCAL" />
++      <updated>1777544484059</updated>
+     </task>
+-    <option name="localTasksCounter" value="6" />
++    <task id="LOCAL-00015" summary="Risoluzione di ultimo problema proposto in data 22/4/2026 e gestione edge cases per di shard_trainer.train">
++      <option name="closed" value="true" />
++      <created>1778018088282</created>
++      <option name="number" value="00015" />
++      <option name="presentableId" value="LOCAL-00015" />
++      <option name="project" value="LOCAL" />
++      <updated>1778018088282</updated>
++    </task>
++    <task id="LOCAL-00016" summary="Risoluzione di worker_progress_store.py e aggiornamento firma shard_predictor.py">
++      <option name="closed" value="true" />
++      <created>1778150932178</created>
++      <option name="number" value="00016" />
++      <option name="presentableId" value="LOCAL-00016" />
++      <option name="project" value="LOCAL" />
++      <updated>1778150932178</updated>
++    </task>
++    <task id="LOCAL-00017" summary="Risoluzione step 3 e 5 per testing">
++      <option name="closed" value="true" />
++      <created>1778233244420</created>
++      <option name="number" value="00017" />
++      <option name="presentableId" value="LOCAL-00017" />
++      <option name="project" value="LOCAL" />
++      <updated>1778233244420</updated>
++    </task>
++    <task id="LOCAL-00018" summary="modifica file io_utils.py">
++      <option name="closed" value="true" />
++      <created>1778323194816</created>
++      <option name="number" value="00018" />
++      <option name="presentableId" value="LOCAL-00018" />
++      <option name="project" value="LOCAL" />
++      <updated>1778323194817</updated>
++    </task>
++    <option name="localTasksCounter" value="19" />
+     <servers />
+   </component>
+   <component name="TypeScriptGeneratedFilesManager">
+@@ -156,8 +367,25 @@
+     <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
+     <MESSAGE value="refactoring worker.py e paths.py" />
+     <MESSAGE value="aggiunto commento" />
+-    <MESSAGE value="ristrutturato master" />
+-    <option name="LAST_COMMIT_MESSAGE" value="ristrutturato master" />
++    <MESSAGE value="Commit worker prima dell'introduzione del manifest per evitare master stateless" />
++    <MESSAGE value="Sistemati bootstrap_sampler.py e worker_service.py" />
++    <MESSAGE value="refactoring shard_trainer.py, decision_tree_factory.py" />
++    <MESSAGE value="Implementazione esplicita dei metodi di worker_state.py" />
++    <MESSAGE value="Implementazione esplicita dei metodi di worker_state.py e introduzione di tree_artifact_mapper.py per mapping" />
++    <MESSAGE value="Fase 1 delle correzioni, Heartbeat implementato" />
++    <MESSAGE value="Fase 2 e 4 delle correzioni: 2)Riallineare WorkerService come facciata RPC pura Obiettivo e 4) Rendere ShardTrainer retry-safe e progress-aware Obiettivo" />
++    <MESSAGE value="Push pre modifiche" />
++    <MESSAGE value="Correzione errori notati in 22/04" />
++    <MESSAGE value="modifiche minime lato worker" />
++    <MESSAGE value="Risoluzione di ultimo problema proposto in data 22/4/2026 e gestione edge cases per di shard_trainer.train" />
++    <MESSAGE value="Risoluzione di worker_progress_store.py e aggiornamento firma shard_predictor.py" />
++    <MESSAGE value="Risoluzione step 3 e 5 per testing" />
++    <MESSAGE value="modifica file io_utils.py" />
++    <option name="LAST_COMMIT_MESSAGE" value="modifica file io_utils.py" />
++  </component>
++  <component name="com.intellij.coverage.CoverageDataManagerImpl">
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$boh.coverage" NAME="boh Coverage Results" MODIFIED="1778343706146" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$training_debug_cli.coverage" NAME="training_debug_cli Coverage Results" MODIFIED="1778342721687" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+   </component>
+   <component name="github-copilot-workspace">
+     <instructionFileLocations>
