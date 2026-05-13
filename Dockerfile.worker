@@ -9,6 +9,6 @@ COPY . .
 
 RUN mkdir -p /shared/artifacts
 
-EXPOSE 50061
+EXPOSE 50052
 
 CMD ["python", "worker.py"]
