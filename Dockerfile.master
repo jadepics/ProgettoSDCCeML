@@ -2,12 +2,22 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# dipendenze
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY master.py .
+# copia TUTTO il progetto
+COPY . .
 
-RUN mkdir -p /shared/artifacts
+# genera protobuf
+RUN python -m grpc_tools.protoc \
+    -I. \
+    --python_out=. \
+    --grpc_python_out=. \
+    proto/rf_v2.proto
+
+# storage condiviso
+RUN mkdir -p /mnt/efs/gp_artifacts
 
 EXPOSE 50051
 
