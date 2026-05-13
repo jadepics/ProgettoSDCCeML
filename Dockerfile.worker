@@ -21,4 +21,4 @@ RUN mkdir -p /mnt/efs/gp_artifacts
 
 EXPOSE 50061
 
-CMD ["python", "worker.py"]
+CMD ["python", "run_worker.py"]
