@@ -2,20 +2,23 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# genera protobuf
 RUN python -m grpc_tools.protoc \
-    -I. \
-    --python_out=. \
-    --grpc_python_out=. \
-    proto/rf_v2.proto
-# storage condiviso
+    -I./proto \
+    --python_out=/app \
+    --grpc_python_out=/app \
+    ./proto/rf_v2.proto
+
 RUN mkdir -p /mnt/efs/gp_artifacts
 
-EXPOSE 50052
+EXPOSE 50061
 
-CMD ["python", "run_worker.py"]
+CMD ["python", "worker.py"]

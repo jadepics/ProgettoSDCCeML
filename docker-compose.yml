@@ -1,43 +1,30 @@
+version: "3.9"
+
 services:
-  master:
+  gp-master:
     build:
       context: .
       dockerfile: Dockerfile.master
-    environment:
-      MASTER_HOST: "0.0.0.0"
-      MASTER_PORT: "50051"
-      ARTIFACT_ROOT: "/shared/artifacts"
-    ports:
-      - "50051:50051"
+    container_name: gp-master
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env.master
     volumes:
-      - ./Dataset:/shared/datasets
-      - shared_artifacts:/shared/artifacts
-    networks:
-      - rfnet
-    cpus: 1.0
+      - /mnt/efs/gp_artifacts:/mnt/efs/gp_artifacts
+    profiles:
+      - master
 
-  worker:
+  gp-worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    depends_on:
-      - master
-    environment:
-      WORKER_BIND_HOST: "0.0.0.0"
-      WORKER_PORT: "50061"
-      MASTER_HOST: "masterPackage"
-      MASTER_PORT: "50051"
-      ARTIFACT_ROOT: "/shared/artifacts"
+    container_name: gp-worker
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env.worker
     volumes:
-      - ./Dataset:/shared/datasets
-      - shared_artifacts:/shared/artifacts
-    networks:
-      - rfnet
-    cpus: 1.0
-
-volumes:
-  shared_artifacts:
-
-networks:
-  rfnet:
-    driver: bridge
+      - /mnt/efs/gp_artifacts:/mnt/efs/gp_artifacts
+    profiles:
+      - worker
