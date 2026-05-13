@@ -162,7 +162,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     - sostituire TrainingJobService / TrainingOrchestrator
     """
 
-    def __init__(self, artifact_root: str = "/shared/artifacts") -> None:
+    def __init__(self, artifact_root: str = "/mnt/efs/gp_artifacts") -> None:
         self.artifact_root = Path(artifact_root)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
 
@@ -434,7 +434,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 def serve(
     host: str = "0.0.0.0",
     port: int = 50051,
-    artifact_root: str = "/shared/artifacts",
+    artifact_root: str = "/mnt/efs/gp_artifacts",
 ):
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=32),
@@ -454,5 +454,6 @@ if __name__ == "__main__":
     serve(
         host=os.getenv("MASTER_HOST", "0.0.0.0"),
         port=int(os.getenv("MASTER_PORT", "50051")),
-        artifact_root=os.getenv("ARTIFACT_ROOT", "/shared/artifacts"),
+        #modificato questo codice da os.getenv("ARTIFACT_ROOT", "/mnt/efs/gp_artifacts") per salvare direttaente nel path condiviso di efs
+        artifact_root=os.getenv("ARTIFACT_ROOT","/mnt/efs/gp_artifacts")
     )

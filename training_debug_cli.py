@@ -7,13 +7,20 @@ import submit_training_classification, submit_training_regression
 # CONFIG
 # =========================================================
 
-MASTER_ADDRESS = "127.0.0.1:50051"
+##########################################################
+#
+#utilizzare l'ip privato del master per fare l'allenamento
+#Correggere per rendere tutto automatico
+#
+###########################################################
+MASTER_ADDRESS = "172.31.37.47:50051"
 
-ARTIFACT_ROOT = (
-    Path("shared_artifacts")
-    .resolve()
-)
-
+###########################################################
+#
+#Modificare, se non funziona, con il mount comune
+#
+###########################################################
+ARTIFACT_ROOT = Path("/mnt/efs/gp_artifacts").resolve()
 
 # =========================================================
 # SUBMIT TRAINING
@@ -31,10 +38,10 @@ def submit_training():
     ).strip()
 
     if choice == "1":
-        submit_training_classification.main()
+        submit_training_classification.main(MASTER_ADDRESS)
 
     elif choice == "2":
-        submit_training_regression.main()
+        submit_training_regression.main(MASTER_ADDRESS)
 
     elif choice == '3':
         return
@@ -384,7 +391,7 @@ def see_validation_metrics_launcher():
 from pathlib import Path
 import shutil
 
-
+#RIVEDERE QUESTO CODICE PERCHé NON è PIù CONFORME CON IL PATHING DELL'ARCH
 def reset_shared_artifacts(root_path: str = "./shared_artifacts") -> None:
     """
     Rimuove completamente la directory shared_artifacts

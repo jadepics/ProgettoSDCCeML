@@ -4,10 +4,10 @@ import grpc
 import rf_v2_pb2 as pb
 import rf_v2_pb2_grpc as pbgrpc
 
-def main():
+def main(PrivateIp_Port : str):
     dataset_path = Path("Dataset/diabetes_dataset.csv").resolve()
 
-    channel = grpc.insecure_channel("127.0.0.1:50051")
+    channel = grpc.insecure_channel(PrivateIp_Port)
     stub = pbgrpc.CoordinatorServiceStub(channel)
 
     request = pb.SubmitTrainingRequest(
