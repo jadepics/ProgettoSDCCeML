@@ -11,4 +11,4 @@ RUN mkdir -p /shared/artifacts
 
 EXPOSE 50052
 
-CMD ["python", "worker.py"]
+CMD ["python", "run_worker.py"]
