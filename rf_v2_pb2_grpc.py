@@ -49,6 +49,11 @@ class CoordinatorServiceStub(object):
                 request_serializer=rf__v2__pb2.SubmitTrainingRequest.SerializeToString,
                 response_deserializer=rf__v2__pb2.SubmitTrainingResponse.FromString,
                 _registered_method=True)
+        self.SubmitInference = channel.unary_unary(
+                '/distributedrf.CoordinatorService/SubmitInference',
+                request_serializer=rf__v2__pb2.SubmitInferenceRequest.SerializeToString,
+                response_deserializer=rf__v2__pb2.SubmitInferenceResponse.FromString,
+                _registered_method=True)
 
 
 class CoordinatorServiceServicer(object):
@@ -72,6 +77,12 @@ class CoordinatorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SubmitInference(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_CoordinatorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -89,6 +100,11 @@ def add_CoordinatorServiceServicer_to_server(servicer, server):
                     servicer.SubmitTraining,
                     request_deserializer=rf__v2__pb2.SubmitTrainingRequest.FromString,
                     response_serializer=rf__v2__pb2.SubmitTrainingResponse.SerializeToString,
+            ),
+            'SubmitInference': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitInference,
+                    request_deserializer=rf__v2__pb2.SubmitInferenceRequest.FromString,
+                    response_serializer=rf__v2__pb2.SubmitInferenceResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -172,6 +188,33 @@ class CoordinatorService(object):
             '/distributedrf.CoordinatorService/SubmitTraining',
             rf__v2__pb2.SubmitTrainingRequest.SerializeToString,
             rf__v2__pb2.SubmitTrainingResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SubmitInference(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/distributedrf.CoordinatorService/SubmitInference',
+            rf__v2__pb2.SubmitInferenceRequest.SerializeToString,
+            rf__v2__pb2.SubmitInferenceResponse.FromString,
             options,
             channel_credentials,
             insecure,

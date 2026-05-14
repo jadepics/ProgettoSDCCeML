@@ -228,6 +228,13 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             worker_heartbeat_monitor=self.worker_heartbeat_monitor,
         )
 
+        self.inference_coordinator = InferenceCoordinator(
+            leadership_guard=self.leadership_guard,
+            worker_registry=self.registry,
+            worker_client=self.worker_client,
+            model_repository=self.model_repository,
+        )
+
         self.validation_coordinator = ValidationCoordinator(
             leadership_guard=self.leadership_guard,
             worker_registry=self.registry,
@@ -322,7 +329,41 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             status=rf_pb2.PENDING,
             message="Training started",
         )
+    def SubmitInference(self, request, context):
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            return self._failed_submit_inference_response(f"Not leader: {exc}")
 
+        model_id = request.model_id.strip()
+        if not model_id:
+            return self._failed_submit_inference_response("model_id must be non-empty")
+
+        try:
+            features = matrix_from_proto(request.features)
+        except Exception as exc:
+            return self._failed_submit_inference_response(f"Invalid features matrix: {exc}")
+
+        alive_workers = self.registry.alive_workers()
+        if not alive_workers:
+            return self._failed_submit_inference_response("No alive workers available")
+
+        try:
+            result = self.inference_coordinator.run_inference(
+                model_id=model_id,
+                features=features,
+            )
+
+            return rf_pb2.SubmitInferenceResponse(
+                success=True,
+                error="",
+                task_type=result.task_type,
+                predicted_labels=result.predicted_labels or [],
+                predicted_values=result.predicted_values or [],
+            )
+
+        except Exception as exc:
+            return self._failed_submit_inference_response(str(exc))
     # --------------------------------------------------------
     # Helpers
     # --------------------------------------------------------
@@ -355,6 +396,15 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             return "validation_ratio + test_ratio must be < 1.0"
 
         return None
+
+    def _failed_submit_inference_response(self, message: str) -> rf_pb2.SubmitInferenceResponse:
+        return rf_pb2.SubmitInferenceResponse(
+            success=False,
+            error=message,
+            task_type="",
+            predicted_labels=[],
+            predicted_values=[],
+        )
 
     def _build_training_request(self, request) -> TrainingRequest:
         task_type = request.task_type.strip().lower()

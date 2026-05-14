@@ -1,7 +1,16 @@
 from pathlib import Path
 import json
-import submit_training_classification, submit_training_regression
+import shutil
 
+import grpc
+import numpy as np
+import pandas as pd
+
+import rf_v2_pb2 as rf_pb2
+import rf_v2_pb2_grpc as rf_pb2_grpc
+
+import submit_training_classification
+import submit_training_regression
 
 # =========================================================
 # CONFIG
@@ -23,6 +32,12 @@ MASTER_ADDRESS = "172.31.37.47:50051"
 ARTIFACT_ROOT = Path("/mnt/efs/gp_artifacts").resolve()
 dataset_path = Path(ARTIFACT_ROOT / "datasets" / "diabetes_dataset.csv").resolve()
 
+GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024
+
+GRPC_OPTIONS = [
+    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
+    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
+]
 # =========================================================
 # SUBMIT TRAINING
 # =========================================================
@@ -387,10 +402,272 @@ def see_validation_metrics_launcher():
         job_id,
         experiment_id,
     )
+# =========================================================
+# SUBMIT INFERENCE
+# =========================================================
+
+def path_from_file_uri(uri: str) -> Path:
+    if uri.startswith("file://"):
+        return Path(uri.replace("file://", "", 1))
+    return Path(uri)
 
 
-from pathlib import Path
-import shutil
+def matrix_to_proto(X: np.ndarray) -> rf_pb2.DenseMatrix:
+    X = np.asarray(X, dtype=float)
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D matrix")
+
+    return rf_pb2.DenseMatrix(
+        values=X.ravel().tolist(),
+        n_rows=X.shape[0],
+        n_cols=X.shape[1],
+    )
+
+
+def load_manifest_by_model_id(model_id: str) -> dict:
+    manifest_path = (
+        ARTIFACT_ROOT
+        / "models"
+        / model_id
+        / "manifest.json"
+    )
+
+    if manifest_path.exists():
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    # fallback più robusto: cerca tutti i manifest e trova quello col model_id corretto
+    for candidate in ARTIFACT_ROOT.rglob("manifest.json"):
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+
+            if manifest.get("model_id") == model_id:
+                return manifest
+
+        except Exception:
+            continue
+
+    raise FileNotFoundError(
+        f"Manifest not found for model_id={model_id}"
+    )
+
+
+def select_features_uri_from_manifest(
+    manifest: dict,
+    split_name: str,
+) -> str:
+    if split_name == "train":
+        return manifest["train_features_uri"]
+
+    if split_name == "validation":
+        return manifest["validation_features_uri"]
+
+    if split_name == "test":
+        return manifest["test_features_uri"]
+
+    raise ValueError(f"Unsupported split_name: {split_name}")
+
+
+def select_labels_uri_from_manifest(
+    manifest: dict,
+    split_name: str,
+) -> str | None:
+    key = f"{split_name}_labels_uri"
+    return manifest.get(key)
+
+
+def submit_inference(
+    model_id: str,
+    split_name: str,
+    rows: int,
+):
+
+    try:
+        manifest = load_manifest_by_model_id(model_id)
+
+    except Exception as exc:
+        print()
+        print("[ERROR] Manifest loading failed")
+        print(exc)
+        print()
+        return
+
+    try:
+        features_uri = select_features_uri_from_manifest(
+            manifest,
+            split_name,
+        )
+
+        features_path = path_from_file_uri(features_uri)
+
+        if not features_path.exists():
+            print()
+            print("[ERROR] features file not found")
+            print(features_path)
+            print()
+            return
+
+        X_df = pd.read_parquet(features_path)
+
+        feature_names = manifest.get("feature_names") or []
+        if feature_names:
+            missing_features = [
+                feature
+                for feature in feature_names
+                if feature not in X_df.columns
+            ]
+
+            if missing_features:
+                print()
+                print("[ERROR] Some manifest features are missing from features parquet")
+                print(missing_features)
+                print()
+                return
+
+            X_df = X_df[feature_names]
+
+        X = X_df.head(rows).to_numpy(dtype=float)
+
+        request = rf_pb2.SubmitInferenceRequest(
+            model_id=model_id,
+            features=matrix_to_proto(X),
+        )
+
+        with grpc.insecure_channel(
+            MASTER_ADDRESS,
+            options=GRPC_OPTIONS,
+        ) as channel:
+
+            stub = rf_pb2_grpc.CoordinatorServiceStub(channel)
+
+            response = stub.SubmitInference(
+                request,
+                timeout=120,
+            )
+
+    except Exception as exc:
+        print()
+        print("[ERROR] SubmitInference RPC failed")
+        print(exc)
+        print()
+        return
+
+    print()
+    print("success:")
+    print(response.success)
+
+    print()
+    print("error:")
+    print(response.error)
+
+    print()
+    print("task_type:")
+    print(response.task_type)
+
+    if response.predicted_labels:
+        print()
+        print("predicted_labels:")
+        print(list(response.predicted_labels))
+
+    if response.predicted_values:
+        print()
+        print("predicted_values:")
+        print(list(response.predicted_values))
+
+    labels_uri = select_labels_uri_from_manifest(
+        manifest,
+        split_name,
+    )
+
+    if labels_uri is not None:
+        labels_path = path_from_file_uri(labels_uri)
+
+        if labels_path.exists():
+            y_df = pd.read_parquet(labels_path)
+            y_values = y_df.head(rows).values.reshape(-1).tolist()
+
+            print()
+            print("expected_values_from_split:")
+            print(y_values)
+
+    print()
+
+
+def submit_inference_launcher():
+
+    print()
+    print("===================================")
+    print("SUBMIT INFERENCE")
+    print("===================================")
+
+    model_id = input(
+        "\nInsert model_id: "
+    ).strip()
+
+    if not model_id:
+        print()
+        print("[ERROR] model_id cannot be empty")
+        print()
+        return
+
+    print()
+    print("CHOOSE SPLIT")
+    print("1 -> VALIDATION")
+    print("2 -> TEST")
+    print("3 -> TRAIN")
+    print("4 -> GO BACK")
+
+    split_choice = input(
+        "\nSelect option: "
+    ).strip()
+
+    if split_choice == "1":
+        split_name = "validation"
+
+    elif split_choice == "2":
+        split_name = "test"
+
+    elif split_choice == "3":
+        split_name = "train"
+
+    elif split_choice == "4":
+        return
+
+    else:
+        print()
+        print("[ERROR] Invalid split option")
+        print()
+        return
+
+    rows_raw = input(
+        "\nHow many rows? Default 5: "
+    ).strip()
+
+    if rows_raw == "":
+        rows = 5
+    else:
+        try:
+            rows = int(rows_raw)
+        except ValueError:
+            print()
+            print("[ERROR] rows must be an integer")
+            print()
+            return
+
+    if rows <= 0:
+        print()
+        print("[ERROR] rows must be > 0")
+        print()
+        return
+
+    submit_inference(
+        model_id=model_id,
+        split_name=split_name,
+        rows=rows,
+    )
+
 
 #RIVEDERE QUESTO CODICE PERCHé NON è PIù CONFORME CON IL PATHING DELL'ARCH
 def reset_shared_artifacts(root_path: str = "./shared_artifacts") -> None:
@@ -451,7 +728,8 @@ def main():
         print("3 -> See experiments")
         print("4 -> Count saved trees")
         print("5 -> See validation metrics")
-        print("6 -> Eliminate shared artifacts")
+        print("6 -> Submit inference")
+        print("7 -> Eliminate shared artifacts")
         print("0 -> Exit")
 
         choice = input(
@@ -478,7 +756,13 @@ def main():
 
             see_validation_metrics_launcher()
 
+
         elif choice == "6":
+
+            submit_inference_launcher()
+
+
+        elif choice == "7":
 
             reset_shared_artifacts_launcher()
 

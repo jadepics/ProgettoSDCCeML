@@ -61,6 +61,19 @@ message SubmitTrainingResponse {
   JobStatus status = 2;
   string message = 3;
 }
+message SubmitInferenceRequest {
+  string model_id = 1;
+  DenseMatrix features = 2;
+}
+
+message SubmitInferenceResponse {
+  bool success = 1;
+  string error = 2;
+  string task_type = 3;
+
+  repeated string predicted_labels = 4;
+  repeated double predicted_values = 5;
+}
 
 message TrainedTreeArtifact {
   string tree_id = 1;
@@ -132,6 +145,7 @@ service CoordinatorService {
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc SubmitTraining(SubmitTrainingRequest) returns (SubmitTrainingResponse);
+  rpc SubmitInference(SubmitInferenceRequest) returns (SubmitInferenceResponse);
 }
 
 service WorkerService {
