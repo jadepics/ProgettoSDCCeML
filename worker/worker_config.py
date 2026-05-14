@@ -56,7 +56,7 @@ class WorkerConfig:
             #Ip privato del worker. Per adesso lo hardcodiamo, poi sarà da modificare in modo che se creiamo diverse istanze ec2, questo venga preso in automatico
             advertise_host=os.getenv(
                 "WORKER_ADVERTISE_HOST",
-                "172.31.34.236"
+                "172.31.39.5"
             ),
 
             max_workers=int(
