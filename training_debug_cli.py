@@ -21,6 +21,7 @@ MASTER_ADDRESS = "172.31.37.47:50051"
 #
 ###########################################################
 ARTIFACT_ROOT = Path("/mnt/efs/gp_artifacts").resolve()
+dataset_path = Path(ARTIFACT_ROOT / "datasets" / "diabetes_dataset.csv").resolve()
 
 # =========================================================
 # SUBMIT TRAINING
@@ -38,10 +39,10 @@ def submit_training():
     ).strip()
 
     if choice == "1":
-        submit_training_classification.main(MASTER_ADDRESS)
+        submit_training_classification.main(MASTER_ADDRESS,dataset_path)
 
     elif choice == "2":
-        submit_training_regression.main(MASTER_ADDRESS)
+        submit_training_regression.main(MASTER_ADDRESS,dataset_path)
 
     elif choice == '3':
         return
