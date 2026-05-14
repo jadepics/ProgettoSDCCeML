@@ -5,6 +5,7 @@ import shutil
 import grpc
 import numpy as np
 import pandas as pd
+from typing import Optional
 
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
@@ -473,7 +474,7 @@ def select_features_uri_from_manifest(
 def select_labels_uri_from_manifest(
     manifest: dict,
     split_name: str,
-) -> str | None:
+) -> Optional[str]:
     key = f"{split_name}_labels_uri"
     return manifest.get(key)
 
@@ -670,8 +671,9 @@ def submit_inference_launcher():
 
 
 #RIVEDERE QUESTO CODICE PERCHé NON è PIù CONFORME CON IL PATHING DELL'ARCH
+"""
 def reset_shared_artifacts(root_path: str = "./shared_artifacts") -> None:
-    """
+  
     Rimuove completamente la directory shared_artifacts
     e la ricrea vuota.
 
@@ -681,7 +683,7 @@ def reset_shared_artifacts(root_path: str = "./shared_artifacts") -> None:
         New-Item -ItemType Directory -Force .\\shared_artifacts
 
     Sicuro da chiamare prima di un test end-to-end.
-    """
+  
 
     root = Path(root_path)
 
@@ -691,6 +693,22 @@ def reset_shared_artifacts(root_path: str = "./shared_artifacts") -> None:
 
     # ricreazione directory
     root.mkdir(parents=True, exist_ok=True)
+ """
+def reset_shared_artifacts() -> None:
+    """
+    Rimuove gli artifact generati dai job, lasciando intatti i dataset.
+    """
+
+    folders_to_clean = [
+        ARTIFACT_ROOT / "jobs",
+        ARTIFACT_ROOT / "models",
+    ]
+
+    for folder in folders_to_clean:
+        if folder.exists():
+            shutil.rmtree(folder, ignore_errors=True)
+
+        folder.mkdir(parents=True, exist_ok=True)
 
 def reset_shared_artifacts_launcher():
     print()
@@ -701,7 +719,7 @@ def reset_shared_artifacts_launcher():
     print("2 -> GO BACK TO MENU")
 
     choice = input(
-        "\nInsert job_id: "
+        "\nSelect option: "
     ).strip()
 
     if choice == "1":
