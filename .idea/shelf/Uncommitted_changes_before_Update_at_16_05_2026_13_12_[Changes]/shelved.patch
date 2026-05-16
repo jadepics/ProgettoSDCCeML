@@ -1,0 +1,807 @@
+Index: masterPackage/training_job_service.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nimport threading\r\nimport time\r\nfrom typing import Optional\r\n\r\nfrom common.contracts import (\r\n    ExperimentRecord,\r\n    ForestConfiguration,\r\n    TrainingJobRecord,\r\n    TrainingRequest,\r\n    TreeArtifactMetadata,\r\n)\r\nfrom common.enums import ExperimentStatus, JobStatus\r\n\r\n\r\nclass TrainingJobService:\r\n    \"\"\"\r\n    Responsabilità:\r\n    - avviare un training job lato master\r\n    - persistire lo stato del job tramite JobRepository\r\n    - orchestrare data preparation, planning, training, validation,\r\n      model selection e manifest build\r\n    - NON fare lavoro RPC diretto\r\n    - NON sostituire TrainingOrchestrator / ValidationCoordinator\r\n    \"\"\"\r\n\r\n    def __init__(\r\n        self,\r\n        leadership_guard,\r\n        job_repository,\r\n        model_repository,\r\n        data_preparation_service,\r\n        experiment_planner,\r\n        training_orchestrator,\r\n        validation_coordinator,\r\n        model_selector,\r\n        model_manifest_builder,\r\n    ) -> None:\r\n        self.leadership_guard = leadership_guard\r\n        self.job_repository = job_repository\r\n        self.model_repository = model_repository\r\n        self.data_preparation_service = data_preparation_service\r\n        self.experiment_planner = experiment_planner\r\n        self.training_orchestrator = training_orchestrator\r\n        self.validation_coordinator = validation_coordinator\r\n        self.model_selector = model_selector\r\n        self.model_manifest_builder = model_manifest_builder\r\n\r\n    # --------------------------------------------------------\r\n    # public API\r\n    # --------------------------------------------------------\r\n\r\n    def start_training_job(self, training_request: TrainingRequest) -> str:\r\n        self.leadership_guard.require_leader()\r\n\r\n        job_id = training_request.job_id\r\n\r\n        initial_record = TrainingJobRecord(\r\n            job_id=job_id,\r\n            status=JobStatus.PENDING,\r\n            training_request=training_request,\r\n            prepared_dataset=None,\r\n            experiment_ids=[],\r\n            selected_experiment_id=None,\r\n            model_id=None,\r\n            message=\"Training job created\",\r\n            created_at=time.time(),\r\n            updated_at=time.time(),\r\n        )\r\n        self.job_repository.save(initial_record)\r\n\r\n        worker = threading.Thread(\r\n            target=self._run_training_job,\r\n            args=(job_id,),\r\n            daemon=True,\r\n        )\r\n        worker.start()\r\n\r\n        return job_id\r\n\r\n    # --------------------------------------------------------\r\n    # internal workflow\r\n    # --------------------------------------------------------\r\n\r\n    def _run_training_job(self, job_id: str) -> None:\r\n        current_experiment_id: str | None = None\r\n\r\n        try:\r\n            self.leadership_guard.require_leader()\r\n\r\n            job_record = self._load_job_or_raise(job_id)\r\n            training_request = job_record.training_request\r\n\r\n            self.job_repository.mark_running(\r\n                job_id=job_id,\r\n                message=\"Preparing dataset\",\r\n            )\r\n\r\n            prepared_dataset = self.data_preparation_service.prepare(\r\n                job_id=training_request.job_id,\r\n                dataset_uri=training_request.dataset_uri,\r\n                target_column=training_request.target_column,\r\n                task_type=training_request.task_type,\r\n                validation_ratio=training_request.validation_ratio,\r\n                test_ratio=training_request.test_ratio,\r\n                random_seed=training_request.global_random_seed,\r\n            )\r\n            self.job_repository.attach_prepared_dataset(job_id, prepared_dataset)\r\n\r\n            experiments = self._plan_experiments(training_request)\r\n            if not experiments:\r\n                raise RuntimeError(\"ExperimentPlanner produced no experiments\")\r\n\r\n            artifacts_by_experiment_id: dict[str, list[TreeArtifactMetadata]] = {}\r\n\r\n            for experiment in experiments:\r\n                self.job_repository.save_experiment(job_id, experiment)\r\n\r\n            for experiment in experiments:\r\n                current_experiment_id = experiment.experiment_id\r\n\r\n                self.job_repository.update_experiment_status(\r\n                    job_id=job_id,\r\n                    experiment_id=experiment.experiment_id,\r\n                    status=ExperimentStatus.RUNNING,\r\n                )\r\n                self.job_repository.mark_running(\r\n                    job_id=job_id,\r\n                    message=f\"Training experiment {experiment.experiment_id}\",\r\n                )\r\n\r\n                tree_artifacts = self.training_orchestrator.run_experiment(\r\n                    job_id=job_id,\r\n                    experiment_id=experiment.experiment_id,\r\n                    forest_config=experiment.forest_config,\r\n                )\r\n                artifacts_by_experiment_id[experiment.experiment_id] = list(tree_artifacts)\r\n\r\n                validation_result = self._validate_experiment(\r\n                    job_id=job_id,\r\n                    experiment=experiment,\r\n                    tree_artifacts=tree_artifacts,\r\n                )\r\n\r\n                self.job_repository.update_experiment_status(\r\n                    job_id=job_id,\r\n                    experiment_id=experiment.experiment_id,\r\n                    status=ExperimentStatus.COMPLETED,\r\n                    completed_tree_count=len(tree_artifacts),\r\n                    validation_metrics=validation_result.metrics,\r\n                )\r\n\r\n            completed_experiments = self.job_repository.list_experiments(job_id)\r\n            if not completed_experiments:\r\n                raise RuntimeError(\"No persisted experiments found after training\")\r\n\r\n            winning_experiment = self._select_best_experiment(completed_experiments)\r\n            if winning_experiment is None:\r\n                raise RuntimeError(\"ModelSelector did not return a winning experiment\")\r\n\r\n            self.job_repository.set_selected_experiment(\r\n                job_id=job_id,\r\n                experiment_id=winning_experiment.experiment_id,\r\n            )\r\n\r\n            selected_tree_artifacts = artifacts_by_experiment_id.get(\r\n                winning_experiment.experiment_id,\r\n                [],\r\n            )\r\n            if not selected_tree_artifacts:\r\n                raise RuntimeError(\r\n                    f\"No tree artifacts found for selected experiment \"\r\n                    f\"{winning_experiment.experiment_id}\"\r\n                )\r\n\r\n            current_job = self._load_job_or_raise(job_id)\r\n            if current_job.prepared_dataset is None:\r\n                raise RuntimeError(f\"Job '{job_id}' has no prepared dataset\")\r\n\r\n            manifest = self._build_model_manifest(\r\n                job_record=current_job,\r\n                experiment_record=winning_experiment,\r\n                tree_artifacts=selected_tree_artifacts,\r\n            )\r\n\r\n            self.model_repository.save(manifest)\r\n            if hasattr(self.model_repository, \"mark_ready\"):\r\n                self.model_repository.mark_ready(manifest.model_id)\r\n\r\n            self.job_repository.mark_completed(\r\n                job_id=job_id,\r\n                selected_experiment_id=winning_experiment.experiment_id,\r\n                model_id=manifest.model_id,\r\n                message=(\r\n                    f\"Training completed. Selected experiment \"\r\n                    f\"{winning_experiment.experiment_id}\"\r\n                ),\r\n            )\r\n\r\n        except Exception as exc:\r\n            self._mark_job_failed(\r\n                job_id=job_id,\r\n                error_message=str(exc),\r\n                experiment_id=current_experiment_id,\r\n            )\r\n\r\n    # --------------------------------------------------------\r\n    # planning helpers\r\n    # --------------------------------------------------------\r\n\r\n    def _plan_experiments(\r\n        self,\r\n        training_request: TrainingRequest,\r\n    ) -> list[ExperimentRecord]:\r\n        \"\"\"\r\n        Normalizza l'output del planner in una lista di ExperimentRecord.\r\n        Supporta diversi nomi di metodo del planner per restare compatibile\r\n        con versioni leggermente diverse del progetto.\r\n        \"\"\"\r\n        planned = None\r\n\r\n        if hasattr(self.experiment_planner, \"plan\"):\r\n            planned = self.experiment_planner.plan(training_request)\r\n        elif hasattr(self.experiment_planner, \"plan_experiments\"):\r\n            planned = self.experiment_planner.plan_experiments(training_request)\r\n        elif hasattr(self.experiment_planner, \"select_initial_experiment\"):\r\n            planned = self.experiment_planner.select_initial_experiment(training_request)\r\n        else:\r\n            raise AttributeError(\r\n                \"ExperimentPlanner must expose one of: \"\r\n                \"plan, plan_experiments, select_initial_experiment\"\r\n            )\r\n\r\n        if planned is None:\r\n            return []\r\n\r\n        if isinstance(planned, ExperimentRecord):\r\n            return [planned]\r\n\r\n        if isinstance(planned, ForestConfiguration):\r\n            return [self._experiment_from_forest_config(planned)]\r\n\r\n        if isinstance(planned, list):\r\n            normalized: list[ExperimentRecord] = []\r\n            for item in planned:\r\n                if isinstance(item, ExperimentRecord):\r\n                    normalized.append(item)\r\n                elif isinstance(item, ForestConfiguration):\r\n                    normalized.append(self._experiment_from_forest_config(item))\r\n                else:\r\n                    raise TypeError(\r\n                        f\"Unsupported planner output item type: {type(item)!r}\"\r\n                    )\r\n            return normalized\r\n\r\n        raise TypeError(f\"Unsupported planner output type: {type(planned)!r}\")\r\n\r\n    def _experiment_from_forest_config(\r\n        self,\r\n        forest_config: ForestConfiguration,\r\n    ) -> ExperimentRecord:\r\n        experiment_id = getattr(forest_config, \"experiment_id\", None)\r\n        if not experiment_id:\r\n            raise ValueError(\r\n                \"ForestConfiguration must carry experiment_id to build ExperimentRecord\"\r\n            )\r\n\r\n        return ExperimentRecord(\r\n            experiment_id=experiment_id,\r\n            forest_config=forest_config,\r\n            status=ExperimentStatus.PENDING,\r\n            assigned_workers=[],\r\n            expected_tree_count=forest_config.n_estimators,\r\n            completed_tree_count=0,\r\n            validation_metrics=None,\r\n        )\r\n\r\n    # --------------------------------------------------------\r\n    # validation / selection helpers\r\n    # --------------------------------------------------------\r\n\r\n    def _validate_experiment(\r\n        self,\r\n        job_id: str,\r\n        experiment: ExperimentRecord,\r\n        tree_artifacts: list[TreeArtifactMetadata],\r\n    ):\r\n        job_record = self._load_job_or_raise(job_id)\r\n        prepared_dataset = job_record.prepared_dataset\r\n        if prepared_dataset is None:\r\n            raise ValueError(f\"Job '{job_id}' has no prepared dataset\")\r\n\r\n        return self.validation_coordinator.validate_experiment(\r\n            experiment_id=experiment.experiment_id,\r\n            task_type=job_record.training_request.task_type,\r\n            validation_features_uri=prepared_dataset.validation_features_uri,\r\n            validation_labels_uri=prepared_dataset.validation_labels_uri,\r\n            tree_artifacts=tree_artifacts,\r\n            class_labels=prepared_dataset.class_labels,\r\n        )\r\n\r\n    def _select_best_experiment(\r\n        self,\r\n        experiments: list[ExperimentRecord],\r\n    ) -> Optional[ExperimentRecord]:\r\n        return self.model_selector.select_best(experiments)\r\n\r\n    # --------------------------------------------------------\r\n    # manifest helper\r\n    # --------------------------------------------------------\r\n\r\n    def _build_model_manifest(\r\n            self,\r\n            job_record: TrainingJobRecord,\r\n            experiment_record: ExperimentRecord,\r\n            tree_artifacts: list[TreeArtifactMetadata],\r\n    ):\r\n        from common.enums import ModelStatus\r\n        from common.ids import generate_model_id\r\n\r\n        prepared_dataset = job_record.prepared_dataset\r\n        if prepared_dataset is None:\r\n            raise ValueError(f\"Job '{job_record.job_id}' has no prepared dataset\")\r\n\r\n        if experiment_record.validation_metrics is None:\r\n            raise ValueError(\r\n                f\"Experiment '{experiment_record.experiment_id}' has no validation metrics\"\r\n            )\r\n\r\n        model_id = generate_model_id()\r\n\r\n        return self.model_manifest_builder.build(\r\n            model_id=model_id,\r\n            job_id=job_record.job_id,\r\n            experiment_id=experiment_record.experiment_id,\r\n            model_type=job_record.training_request.task_type,\r\n            forest_config=experiment_record.forest_config,\r\n            prepared_dataset=prepared_dataset,\r\n            tree_artifacts=tree_artifacts,\r\n            validation_metrics=experiment_record.validation_metrics,\r\n            test_metrics=None,\r\n            status=ModelStatus.READY,\r\n        )\r\n\r\n    # --------------------------------------------------------\r\n    # failure handling\r\n    # --------------------------------------------------------\r\n\r\n    def _mark_job_failed(\r\n        self,\r\n        job_id: str,\r\n        error_message: str,\r\n        experiment_id: str | None = None,\r\n    ) -> None:\r\n        try:\r\n            if experiment_id is not None:\r\n                self.job_repository.update_experiment_status(\r\n                    job_id=job_id,\r\n                    experiment_id=experiment_id,\r\n                    status=ExperimentStatus.FAILED,\r\n                )\r\n        finally:\r\n            try:\r\n                self.job_repository.mark_failed(\r\n                    job_id=job_id,\r\n                    message=error_message,\r\n                )\r\n            except Exception:\r\n                pass\r\n\r\n    def _load_job_or_raise(self, job_id: str) -> TrainingJobRecord:\r\n        record = self.job_repository.load(job_id)\r\n        if record is None:\r\n            raise ValueError(f\"Job '{job_id}' not found\")\r\n        return record
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/masterPackage/training_job_service.py b/masterPackage/training_job_service.py
+--- a/masterPackage/training_job_service.py	(revision 5f495b234e700283402ec0f5560b56af65d93acf)
++++ b/masterPackage/training_job_service.py	(date 1778927730878)
+@@ -36,6 +36,7 @@
+         validation_coordinator,
+         model_selector,
+         model_manifest_builder,
++        test_evaluator,
+     ) -> None:
+         self.leadership_guard = leadership_guard
+         self.job_repository = job_repository
+@@ -46,6 +47,7 @@
+         self.validation_coordinator = validation_coordinator
+         self.model_selector = model_selector
+         self.model_manifest_builder = model_manifest_builder
++        self.test_evaluator=test_evaluator
+ 
+     # --------------------------------------------------------
+     # public API
+@@ -330,6 +332,19 @@
+ 
+         model_id = generate_model_id()
+ 
++        test_metrics = None
++        if prepared_dataset.n_test > 0:
++            test_result = self.test_evaluator.evaluate_model(
++                model_id=model_id,
++                experiment_id=experiment_record.experiment_id,
++                task_type=job_record.training_request.task_type,
++                test_features_uri=prepared_dataset.test_features_uri,
++                test_labels_uri=prepared_dataset.test_labels_uri,
++                tree_artifacts=tree_artifacts,
++                class_labels=prepared_dataset.class_labels,
++            )
++            test_metrics = test_result.metrics.to_dict()
++
+         return self.model_manifest_builder.build(
+             model_id=model_id,
+             job_id=job_record.job_id,
+@@ -339,9 +354,9 @@
+             prepared_dataset=prepared_dataset,
+             tree_artifacts=tree_artifacts,
+             validation_metrics=experiment_record.validation_metrics,
+-            test_metrics=None,
++            test_metrics=test_metrics,
+             status=ModelStatus.READY,
+-        )
++        )   
+ 
+     # --------------------------------------------------------
+     # failure handling
+Index: training_debug_cli.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from pathlib import Path\r\nimport json\r\nimport shutil\r\n\r\nimport grpc\r\nimport numpy as np\r\nimport pandas as pd\r\nfrom typing import Optional\r\n\r\nimport rf_v2_pb2 as rf_pb2\r\nimport rf_v2_pb2_grpc as rf_pb2_grpc\r\n\r\nimport submit_training_classification\r\nimport submit_training_regression\r\n\r\n# =========================================================\r\n# CONFIG\r\n# =========================================================\r\n\r\n##########################################################\r\n#\r\n#utilizzare l'ip privato del master per fare l'allenamento\r\n#Correggere per rendere tutto automatico\r\n#\r\n###########################################################\r\nMASTER_ADDRESS = \"172.31.37.47:50051\"\r\n\r\n###########################################################\r\n#\r\n#Modificare, se non funziona, con il mount comune\r\n#\r\n###########################################################\r\nARTIFACT_ROOT = Path(\"/mnt/efs/gp_artifacts\").resolve()\r\ndataset_path = Path(ARTIFACT_ROOT / \"datasets\" / \"diabetes_dataset.csv\").resolve()\r\n\r\nGRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024\r\n\r\nGRPC_OPTIONS = [\r\n    (\"grpc.max_send_message_length\", GRPC_MAX_MESSAGE_LENGTH),\r\n    (\"grpc.max_receive_message_length\", GRPC_MAX_MESSAGE_LENGTH),\r\n]\r\n# =========================================================\r\n# SUBMIT TRAINING\r\n# =========================================================\r\n\r\ndef submit_training():\r\n\r\n    print(\"CHOOSE BETWEEN CLASSIFICATION AND REGRESSION\")\r\n    print(\"1 -> CLASSIFICATION\")\r\n    print(\"2 -> REGRESSION\")\r\n    print(\"3 -> GO BACK\")\r\n\r\n    choice = input(\r\n        \"\\nSelect option: \"\r\n    ).strip()\r\n\r\n    if choice == \"1\":\r\n        submit_training_classification.main(MASTER_ADDRESS,dataset_path)\r\n\r\n    elif choice == \"2\":\r\n        submit_training_regression.main(MASTER_ADDRESS,dataset_path)\r\n\r\n    elif choice == '3':\r\n        return\r\n\r\n\r\ndef submit_training_launcher():\r\n\r\n    print()\r\n    print(\"===================================\")\r\n    print(\"SUBMIT TRAINING\")\r\n    print(\"===================================\")\r\n\r\n    submit_training()\r\n\r\n\r\n# =========================================================\r\n# JOB STATUS\r\n# =========================================================\r\n\r\ndef see_job_status(job_id: str):\r\n\r\n    job_record_path = (\r\n        ARTIFACT_ROOT\r\n        / \"jobs\"\r\n        / job_id\r\n        / \"job_record.json\"\r\n    )\r\n\r\n    if not job_record_path.exists():\r\n\r\n        print()\r\n        print(\"[ERROR] job_record.json not found\")\r\n        print(job_record_path)\r\n        print()\r\n\r\n        return\r\n\r\n    with open(\r\n        job_record_path,\r\n        \"r\",\r\n        encoding=\"utf-8\"\r\n    ) as f:\r\n\r\n        job_record = json.load(f)\r\n\r\n    print()\r\n    print(\"status:\")\r\n    print(job_record.get(\"status\"))\r\n\r\n    print()\r\n    print(\"message:\")\r\n    print(job_record.get(\"message\"))\r\n\r\n    print()\r\n    print(\"selected_experiment_id:\")\r\n    print(job_record.get(\"selected_experiment_id\"))\r\n\r\n    print()\r\n    print(\"model_id:\")\r\n    print(job_record.get(\"model_id\"))\r\n    print()\r\n\r\n\r\ndef see_job_status_launcher():\r\n\r\n    print()\r\n    print(\"===================================\")\r\n    print(\"SEE JOB STATUS\")\r\n    print(\"===================================\")\r\n\r\n    job_id = input(\r\n        \"\\nInsert job_id: \"\r\n    ).strip()\r\n\r\n    see_job_status(job_id)\r\n\r\n\r\n# =========================================================\r\n# SEE EXPERIMENTS\r\n# =========================================================\r\n\r\ndef see_experiments(job_id: str):\r\n\r\n    experiments_root = (\r\n        ARTIFACT_ROOT\r\n        / \"jobs\"\r\n        / job_id\r\n        / \"experiments\"\r\n    )\r\n\r\n    if not experiments_root.exists():\r\n\r\n        print()\r\n        print(\"[ERROR] experiments folder not found\")\r\n        print(experiments_root)\r\n        print()\r\n\r\n        return\r\n\r\n    print()\r\n\r\n    for experiment_dir in experiments_root.iterdir():\r\n\r\n        if not experiment_dir.is_dir():\r\n            continue\r\n\r\n        experiment_record_path = (\r\n            experiment_dir\r\n            / \"experiment_record.json\"\r\n        )\r\n\r\n        if not experiment_record_path.exists():\r\n            continue\r\n\r\n        with open(\r\n            experiment_record_path,\r\n            \"r\",\r\n            encoding=\"utf-8\"\r\n        ) as f:\r\n\r\n            experiment_record = json.load(f)\r\n\r\n        print(\"===================================\")\r\n\r\n        print(\"experiment_id:\")\r\n        print(\r\n            experiment_record.get(\r\n                \"experiment_id\"\r\n            )\r\n        )\r\n\r\n        print()\r\n        print(\"status:\")\r\n        print(\r\n            experiment_record.get(\r\n                \"status\"\r\n            )\r\n        )\r\n\r\n        print()\r\n        print(\"expected_tree_count:\")\r\n        print(\r\n            experiment_record.get(\r\n                \"expected_tree_count\"\r\n            )\r\n        )\r\n\r\n        print()\r\n        print(\"completed_tree_count:\")\r\n        print(\r\n            experiment_record.get(\r\n                \"completed_tree_count\"\r\n            )\r\n        )\r\n\r\n        print()\r\n        print(\"assigned_workers:\")\r\n        print(\r\n            experiment_record.get(\r\n                \"assigned_workers\"\r\n            )\r\n        )\r\n\r\n        print()\r\n\r\n\r\ndef see_experiments_launcher():\r\n\r\n    print()\r\n    print(\"===================================\")\r\n    print(\"SEE EXPERIMENTS\")\r\n    print(\"===================================\")\r\n\r\n    job_id = input(\r\n        \"\\nInsert job_id: \"\r\n    ).strip()\r\n\r\n    see_experiments(job_id)\r\n\r\n\r\n# =========================================================\r\n# COUNT TREES\r\n# =========================================================\r\n\r\ndef count_saved_trees(job_id: str):\r\n\r\n    experiments_root = (\r\n        ARTIFACT_ROOT\r\n        / \"jobs\"\r\n        / job_id\r\n        / \"experiments\"\r\n    )\r\n\r\n    if not experiments_root.exists():\r\n\r\n        print()\r\n        print(\"[ERROR] experiments folder not found\")\r\n        print(experiments_root)\r\n        print()\r\n\r\n        return\r\n\r\n    print()\r\n\r\n    for experiment_dir in experiments_root.iterdir():\r\n\r\n        if not experiment_dir.is_dir():\r\n            continue\r\n\r\n        trees_dir = (\r\n            experiment_dir\r\n            / \"trees\"\r\n        )\r\n\r\n        tree_count = len(\r\n            list(\r\n                trees_dir.glob(\"*.joblib\")\r\n            )\r\n        )\r\n\r\n        print(\"===================================\")\r\n\r\n        print(\"Experiment:\")\r\n        print(experiment_dir.name)\r\n\r\n        print()\r\n        print(\"Saved trees:\")\r\n        print(tree_count)\r\n\r\n        print()\r\n\r\n\r\ndef count_saved_trees_launcher():\r\n\r\n    print()\r\n    print(\"===================================\")\r\n    print(\"COUNT SAVED TREES\")\r\n    print(\"===================================\")\r\n\r\n    job_id = input(\r\n        \"\\nInsert job_id: \"\r\n    ).strip()\r\n\r\n    count_saved_trees(job_id)\r\n\r\n\r\n# =========================================================\r\n# SEE METRICS\r\n# =========================================================\r\n\r\ndef see_validation_metrics(\r\n    job_id: str,\r\n    experiment_id: str,\r\n):\r\n\r\n    experiment_record_path = (\r\n        ARTIFACT_ROOT\r\n        / \"jobs\"\r\n        / job_id\r\n        / \"experiments\"\r\n        / experiment_id\r\n        / \"experiment_record.json\"\r\n    )\r\n\r\n    if not experiment_record_path.exists():\r\n\r\n        print()\r\n        print(\"[ERROR] experiment_record.json not found\")\r\n        print(experiment_record_path)\r\n        print()\r\n\r\n        return\r\n\r\n    with open(\r\n        experiment_record_path,\r\n        \"r\",\r\n        encoding=\"utf-8\"\r\n    ) as f:\r\n\r\n        experiment_record = json.load(f)\r\n\r\n    print()\r\n\r\n    print(\"status:\")\r\n    print(\r\n        experiment_record.get(\r\n            \"status\"\r\n        )\r\n    )\r\n\r\n    print()\r\n    print(\"expected_tree_count:\")\r\n    print(\r\n        experiment_record.get(\r\n            \"expected_tree_count\"\r\n        )\r\n    )\r\n\r\n    print()\r\n    print(\"completed_tree_count:\")\r\n    print(\r\n        experiment_record.get(\r\n            \"completed_tree_count\"\r\n        )\r\n    )\r\n\r\n    print()\r\n    print(\"assigned_workers:\")\r\n    print(\r\n        experiment_record.get(\r\n            \"assigned_workers\"\r\n        )\r\n    )\r\n\r\n    print()\r\n    print(\"validation_metrics:\")\r\n    print(\r\n        experiment_record.get(\r\n            \"validation_metrics\"\r\n        )\r\n    )\r\n\r\n    print()\r\n\r\n\r\ndef see_validation_metrics_launcher():\r\n\r\n    print()\r\n    print(\"===================================\")\r\n    print(\"SEE VALIDATION METRICS\")\r\n    print(\"===================================\")\r\n\r\n    job_id = input(\r\n        \"\\nInsert job_id: \"\r\n    ).strip()\r\n\r\n    experiment_id = input(\r\n        \"Insert experiment_id: \"\r\n    ).strip()\r\n\r\n    see_validation_metrics(\r\n        job_id,\r\n        experiment_id,\r\n    )\r\n# =========================================================\r\n# SUBMIT INFERENCE\r\n# =========================================================\r\n\r\ndef path_from_file_uri(uri: str) -> Path:\r\n    if uri.startswith(\"file://\"):\r\n        return Path(uri.replace(\"file://\", \"\", 1))\r\n    return Path(uri)\r\n\r\n\r\ndef matrix_to_proto(X: np.ndarray) -> rf_pb2.DenseMatrix:\r\n    X = np.asarray(X, dtype=float)\r\n\r\n    if X.ndim != 2:\r\n        raise ValueError(\"X must be a 2D matrix\")\r\n\r\n    return rf_pb2.DenseMatrix(\r\n        values=X.ravel().tolist(),\r\n        n_rows=X.shape[0],\r\n        n_cols=X.shape[1],\r\n    )\r\n\r\n\r\ndef load_manifest_by_model_id(model_id: str) -> dict:\r\n    manifest_path = (\r\n        ARTIFACT_ROOT\r\n        / \"models\"\r\n        / model_id\r\n        / \"manifest.json\"\r\n    )\r\n\r\n    if manifest_path.exists():\r\n        with open(manifest_path, \"r\", encoding=\"utf-8\") as f:\r\n            return json.load(f)\r\n\r\n    # fallback più robusto: cerca tutti i manifest e trova quello col model_id corretto\r\n    for candidate in ARTIFACT_ROOT.rglob(\"manifest.json\"):\r\n        try:\r\n            with open(candidate, \"r\", encoding=\"utf-8\") as f:\r\n                manifest = json.load(f)\r\n\r\n            if manifest.get(\"model_id\") == model_id:\r\n                return manifest\r\n\r\n        except Exception:\r\n            continue\r\n\r\n    raise FileNotFoundError(\r\n        f\"Manifest not found for model_id={model_id}\"\r\n    )\r\n\r\n\r\ndef select_features_uri_from_manifest(\r\n    manifest: dict,\r\n    split_name: str,\r\n) -> str:\r\n    if split_name == \"train\":\r\n        return manifest[\"train_features_uri\"]\r\n\r\n    if split_name == \"validation\":\r\n        return manifest[\"validation_features_uri\"]\r\n\r\n    if split_name == \"test\":\r\n        return manifest[\"test_features_uri\"]\r\n\r\n    raise ValueError(f\"Unsupported split_name: {split_name}\")\r\n\r\n\r\ndef select_labels_uri_from_manifest(\r\n    manifest: dict,\r\n    split_name: str,\r\n) -> Optional[str]:\r\n    key = f\"{split_name}_labels_uri\"\r\n    return manifest.get(key)\r\n\r\n\r\ndef submit_inference(\r\n    model_id: str,\r\n    split_name: str,\r\n    rows: int,\r\n):\r\n\r\n    try:\r\n        manifest = load_manifest_by_model_id(model_id)\r\n\r\n    except Exception as exc:\r\n        print()\r\n        print(\"[ERROR] Manifest loading failed\")\r\n        print(exc)\r\n        print()\r\n        return\r\n\r\n    try:\r\n        features_uri = select_features_uri_from_manifest(\r\n            manifest,\r\n            split_name,\r\n        )\r\n\r\n        features_path = path_from_file_uri(features_uri)\r\n\r\n        if not features_path.exists():\r\n            print()\r\n            print(\"[ERROR] features file not found\")\r\n            print(features_path)\r\n            print()\r\n            return\r\n\r\n        X_df = pd.read_parquet(features_path)\r\n\r\n        feature_names = manifest.get(\"feature_names\") or []\r\n        if feature_names:\r\n            missing_features = [\r\n                feature\r\n                for feature in feature_names\r\n                if feature not in X_df.columns\r\n            ]\r\n\r\n            if missing_features:\r\n                print()\r\n                print(\"[ERROR] Some manifest features are missing from features parquet\")\r\n                print(missing_features)\r\n                print()\r\n                return\r\n\r\n            X_df = X_df[feature_names]\r\n\r\n        X = X_df.head(rows).to_numpy(dtype=float)\r\n\r\n        request = rf_pb2.SubmitInferenceRequest(\r\n            model_id=model_id,\r\n            features=matrix_to_proto(X),\r\n        )\r\n\r\n        with grpc.insecure_channel(\r\n            MASTER_ADDRESS,\r\n            options=GRPC_OPTIONS,\r\n        ) as channel:\r\n\r\n            stub = rf_pb2_grpc.CoordinatorServiceStub(channel)\r\n\r\n            response = stub.SubmitInference(\r\n                request,\r\n                timeout=120,\r\n            )\r\n\r\n    except Exception as exc:\r\n        print()\r\n        print(\"[ERROR] SubmitInference RPC failed\")\r\n        print(exc)\r\n        print()\r\n        return\r\n\r\n    print()\r\n    print(\"success:\")\r\n    print(response.success)\r\n\r\n    print()\r\n    print(\"error:\")\r\n    print(response.error)\r\n\r\n    print()\r\n    print(\"task_type:\")\r\n    print(response.task_type)\r\n\r\n    if response.predicted_labels:\r\n        print()\r\n        print(\"predicted_labels:\")\r\n        print(list(response.predicted_labels))\r\n\r\n    if response.predicted_values:\r\n        print()\r\n        print(\"predicted_values:\")\r\n        print(list(response.predicted_values))\r\n\r\n    labels_uri = select_labels_uri_from_manifest(\r\n        manifest,\r\n        split_name,\r\n    )\r\n\r\n    if labels_uri is not None:\r\n        labels_path = path_from_file_uri(labels_uri)\r\n\r\n        if labels_path.exists():\r\n            y_df = pd.read_parquet(labels_path)\r\n            y_values = y_df.head(rows).values.reshape(-1).tolist()\r\n\r\n            print()\r\n            print(\"expected_values_from_split:\")\r\n            print(y_values)\r\n\r\n    print()\r\n\r\n\r\ndef submit_inference_launcher():\r\n\r\n    print()\r\n    print(\"===================================\")\r\n    print(\"SUBMIT INFERENCE\")\r\n    print(\"===================================\")\r\n\r\n    model_id = input(\r\n        \"\\nInsert model_id: \"\r\n    ).strip()\r\n\r\n    if not model_id:\r\n        print()\r\n        print(\"[ERROR] model_id cannot be empty\")\r\n        print()\r\n        return\r\n\r\n    print()\r\n    print(\"CHOOSE SPLIT\")\r\n    print(\"1 -> VALIDATION\")\r\n    print(\"2 -> TEST\")\r\n    print(\"3 -> TRAIN\")\r\n    print(\"4 -> GO BACK\")\r\n\r\n    split_choice = input(\r\n        \"\\nSelect option: \"\r\n    ).strip()\r\n\r\n    if split_choice == \"1\":\r\n        split_name = \"validation\"\r\n\r\n    elif split_choice == \"2\":\r\n        split_name = \"test\"\r\n\r\n    elif split_choice == \"3\":\r\n        split_name = \"train\"\r\n\r\n    elif split_choice == \"4\":\r\n        return\r\n\r\n    else:\r\n        print()\r\n        print(\"[ERROR] Invalid split option\")\r\n        print()\r\n        return\r\n\r\n    rows_raw = input(\r\n        \"\\nHow many rows? Default 5: \"\r\n    ).strip()\r\n\r\n    if rows_raw == \"\":\r\n        rows = 5\r\n    else:\r\n        try:\r\n            rows = int(rows_raw)\r\n        except ValueError:\r\n            print()\r\n            print(\"[ERROR] rows must be an integer\")\r\n            print()\r\n            return\r\n\r\n    if rows <= 0:\r\n        print()\r\n        print(\"[ERROR] rows must be > 0\")\r\n        print()\r\n        return\r\n\r\n    submit_inference(\r\n        model_id=model_id,\r\n        split_name=split_name,\r\n        rows=rows,\r\n    )\r\n\r\n\r\n#RIVEDERE QUESTO CODICE PERCHé NON è PIù CONFORME CON IL PATHING DELL'ARCH\r\n\"\"\"\r\ndef reset_shared_artifacts(root_path: str = \"./shared_artifacts\") -> None:\r\n  \r\n    Rimuove completamente la directory shared_artifacts\r\n    e la ricrea vuota.\r\n\r\n    Equivalente Python di:\r\n\r\n        Remove-Item -Recurse -Force .\\\\shared_artifacts\r\n        New-Item -ItemType Directory -Force .\\\\shared_artifacts\r\n\r\n    Sicuro da chiamare prima di un test end-to-end.\r\n  \r\n\r\n    root = Path(root_path)\r\n\r\n    # rimozione completa se esiste\r\n    if root.exists():\r\n        shutil.rmtree(root, ignore_errors=True)\r\n\r\n    # ricreazione directory\r\n    root.mkdir(parents=True, exist_ok=True)\r\n \"\"\"\r\ndef reset_shared_artifacts() -> None:\r\n    \"\"\"\r\n    Rimuove gli artifact generati dai job, lasciando intatti i dataset.\r\n    \"\"\"\r\n\r\n    folders_to_clean = [\r\n        ARTIFACT_ROOT / \"jobs\",\r\n        ARTIFACT_ROOT / \"models\",\r\n    ]\r\n\r\n    for folder in folders_to_clean:\r\n        if folder.exists():\r\n            shutil.rmtree(folder, ignore_errors=True)\r\n\r\n        folder.mkdir(parents=True, exist_ok=True)\r\n\r\ndef reset_shared_artifacts_launcher():\r\n    print()\r\n    print(\"===================================\")\r\n    print(\"ELIMINATING PAST SHARED ARTIFACTS\")\r\n    print(\"===================================\")\r\n    print(\"1 -> ELIMINATE ARTIFACTS\")\r\n    print(\"2 -> GO BACK TO MENU\")\r\n\r\n    choice = input(\r\n        \"\\nSelect option: \"\r\n    ).strip()\r\n\r\n    if choice == \"1\":\r\n        reset_shared_artifacts()\r\n\r\n    elif choice == \"2\":\r\n        return\r\n\r\n# =========================================================\r\n# MAIN MENU\r\n# =========================================================\r\n\r\ndef main():\r\n\r\n    while True:\r\n\r\n        print()\r\n        print(\"===================================\")\r\n        print(\"TRAINING DEBUG CLI\")\r\n        print(\"===================================\")\r\n\r\n        print(\"1 -> Submit training\")\r\n        print(\"2 -> See job status\")\r\n        print(\"3 -> See experiments\")\r\n        print(\"4 -> Count saved trees\")\r\n        print(\"5 -> See validation metrics\")\r\n        print(\"6 -> Submit inference\")\r\n        print(\"7 -> Eliminate shared artifacts\")\r\n        print(\"0 -> Exit\")\r\n\r\n        choice = input(\r\n            \"\\nSelect option: \"\r\n        ).strip()\r\n\r\n        if choice == \"1\":\r\n\r\n            submit_training_launcher()\r\n\r\n        elif choice == \"2\":\r\n\r\n            see_job_status_launcher()\r\n\r\n        elif choice == \"3\":\r\n\r\n            see_experiments_launcher()\r\n\r\n        elif choice == \"4\":\r\n\r\n            count_saved_trees_launcher()\r\n\r\n        elif choice == \"5\":\r\n\r\n            see_validation_metrics_launcher()\r\n\r\n\r\n        elif choice == \"6\":\r\n\r\n            submit_inference_launcher()\r\n\r\n\r\n        elif choice == \"7\":\r\n\r\n            reset_shared_artifacts_launcher()\r\n\r\n        elif choice == \"0\":\r\n\r\n            print()\r\n            print(\"Closing CLI...\")\r\n            print()\r\n\r\n            break\r\n\r\n        else:\r\n\r\n            print()\r\n            print(\"[ERROR] Invalid option\")\r\n            print()\r\n\r\n\r\nif __name__ == \"__main__\":\r\n\r\n    main()
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/training_debug_cli.py b/training_debug_cli.py
+--- a/training_debug_cli.py	(revision 5f495b234e700283402ec0f5560b56af65d93acf)
++++ b/training_debug_cli.py	(date 1778929413147)
+@@ -593,6 +593,19 @@
+             print("expected_values_from_split:")
+             print(y_values)
+ 
++            if response.predicted_labels:
++                correct = sum(
++                    1
++                    for pred, true in zip(response.predicted_labels, y_values)
++                    if str(pred) == str(true)
++                )
++
++                accuracy = correct / len(y_values)
++
++                print()
++                print("local_accuracy:")
++                print(round(accuracy, 4))
++
+     print()
+ 
+ 
+Index: master.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nimport os\r\nimport threading\r\nimport time\r\nfrom concurrent import futures\r\nfrom pathlib import Path\r\nfrom typing import Optional\r\n\r\nimport grpc\r\nimport numpy as np\r\n\r\nimport rf_v2_pb2 as rf_pb2\r\nimport rf_v2_pb2_grpc as rf_pb2_grpc\r\n\r\nfrom masterPackage.data.data_preparation_service import DataPreparationService\r\nfrom masterPackage.data.dataset_loader import DatasetLoader\r\nfrom masterPackage.data.dataset_validator import DatasetValidator\r\nfrom masterPackage.data.split_manager import SplitManager\r\nfrom masterPackage.experiment_planner import ExperimentPlanner\r\nfrom masterPackage.fault_tolerance import (\r\n    InMemoryLeaderConsensusService,\r\n    LeadershipGuard,\r\n)\r\nfrom masterPackage.inference_coordinator import InferenceCoordinator\r\nfrom masterPackage.model_manifest_builder import ModelManifestBuilder\r\nfrom masterPackage.model_selector import ModelSelector\r\nfrom masterPackage.retry_policy import RetryPolicy\r\nfrom masterPackage.shard_planner import ShardPlanner\r\nfrom masterPackage.task_lease_manager import TaskLeaseManager\r\nfrom masterPackage.training_job_service import TrainingJobService\r\nfrom masterPackage.training_orchestrator import TrainingOrchestrator\r\nfrom masterPackage.validation_coordinator import ValidationCoordinator\r\nfrom masterPackage.worker_client import WorkerClient\r\nfrom masterPackage.worker_heartbeat_monitor import WorkerHeartbeatMonitor\r\nfrom masterPackage.recovery_planner import RecoveryPlanner\r\n\r\nfrom common.contracts import HyperparameterSpace, TrainingRequest\r\nfrom common.repositories import (\r\n    JobRepository,\r\n    ModelRepository,\r\n    SharedArtifactStore,\r\n    TaskLedger,\r\n)\r\nfrom common.storage_layout import StorageLayout\r\n\r\nHEARTBEAT_TIMEOUT_SECONDS = 15.0\r\nDEFAULT_RPC_TIMEOUT_SECONDS = 600.0\r\nGRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB\r\n\r\nGRPC_OPTIONS = [\r\n    (\"grpc.max_send_message_length\", GRPC_MAX_MESSAGE_LENGTH),\r\n    (\"grpc.max_receive_message_length\", GRPC_MAX_MESSAGE_LENGTH),\r\n]\r\n\r\n# ============================================================\r\n# Utility\r\n# ============================================================\r\n\r\ndef matrix_from_proto(msg: rf_pb2.DenseMatrix) -> np.ndarray:\r\n    arr = np.asarray(msg.values, dtype=float)\r\n    if msg.n_rows * msg.n_cols != arr.size:\r\n        raise ValueError(\"DenseMatrix shape mismatch\")\r\n    return arr.reshape(msg.n_rows, msg.n_cols)\r\n\r\n\r\ndef now_ts() -> float:\r\n    return time.time()\r\n\r\n\r\n# ============================================================\r\n# Worker registry\r\n# ============================================================\r\nclass WorkerInfo:\r\n    def __init__(self, worker_id: str, host: str, port: int) -> None:\r\n        self.worker_id = worker_id\r\n        self.host = host\r\n        self.port = port\r\n        self.last_heartbeat = now_ts()\r\n        self.running_tasks = 0\r\n        self.active_task_ids: list[str] = []\r\n\r\n    @property\r\n    def address(self) -> str:\r\n        return f\"{self.host}:{self.port}\"\r\n\r\n\r\nclass WorkerRegistry:\r\n    def __init__(self) -> None:\r\n        self._workers: dict[str, WorkerInfo] = {}\r\n        self._lock = threading.Lock()\r\n\r\n    def register(self, worker_id: str, host: str, port: int) -> None:\r\n        with self._lock:\r\n            self._workers[worker_id] = WorkerInfo(worker_id, host, port)\r\n\r\n    def heartbeat(\r\n        self,\r\n        worker_id: str,\r\n        running_tasks: int,\r\n        active_task_ids: Optional[list[str]] = None,\r\n    ) -> bool:\r\n        with self._lock:\r\n            worker = self._workers.get(worker_id)\r\n            if worker is None:\r\n                return False\r\n\r\n            worker.last_heartbeat = now_ts()\r\n            worker.running_tasks = running_tasks\r\n            worker.active_task_ids = list(active_task_ids or [])\r\n            return True\r\n\r\n    def alive_workers(self) -> list[WorkerInfo]:\r\n        cutoff = now_ts() - HEARTBEAT_TIMEOUT_SECONDS\r\n        with self._lock:\r\n            return [\r\n                worker\r\n                for worker in self._workers.values()\r\n                if worker.last_heartbeat >= cutoff\r\n            ]\r\n\r\n    def get_retry_candidate(\r\n        self,\r\n        exclude_worker_id: str | None = None,\r\n    ) -> Optional[WorkerInfo]:\r\n        candidates = [\r\n            worker\r\n            for worker in self.alive_workers()\r\n            if exclude_worker_id is None or worker.worker_id != exclude_worker_id\r\n        ]\r\n        if not candidates:\r\n            return None\r\n        return sorted(candidates, key=lambda worker: worker.running_tasks)[0]\r\n\r\n    def list_workers(self) -> list[WorkerInfo]:\r\n        with self._lock:\r\n            return list(self._workers.values())\r\n\r\n# ============================================================\r\n# Master coordinator\r\n# ============================================================\r\n\r\nclass MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):\r\n    \"\"\"\r\n    Facciata RPC del master.\r\n\r\n    Stato coerente col proto rf_v2.proto:\r\n    - RegisterWorker\r\n    - Heartbeat\r\n    - SubmitTraining\r\n\r\n    Responsabilità:\r\n    - ricevere le RPC esposte dal CoordinatorService\r\n    - validare input minimi a livello RPC\r\n    - applicare leader-only execution dove richiesto\r\n    - tradurre protobuf -> contratti di dominio\r\n    - delegare ai servizi applicativi del control plane\r\n\r\n    Non deve:\r\n    - orchestrare direttamente training o validation\r\n    - contenere logica di inferenza distribuita\r\n    - sostituire TrainingJobService / TrainingOrchestrator\r\n    \"\"\"\r\n\r\n    def __init__(self, artifact_root: str = \"/mnt/efs/gp_artifacts\") -> None:\r\n        self.artifact_root = Path(artifact_root)\r\n        self.artifact_root.mkdir(parents=True, exist_ok=True)\r\n\r\n        # stato condiviso del master\r\n        self.registry = WorkerRegistry()\r\n\r\n        self.store = SharedArtifactStore(str(self.artifact_root))\r\n        self.layout = StorageLayout(str(self.artifact_root))\r\n\r\n        self.job_repository = JobRepository(self.store)\r\n        self.model_repository = ModelRepository(self.store)\r\n        self.task_ledger = TaskLedger(self.store)\r\n\r\n        # leadership / consenso\r\n        self.consensus = InMemoryLeaderConsensusService(\r\n            node_id=\"master-1\",\r\n            start_as_leader=True,\r\n        )\r\n        self.leadership_guard = LeadershipGuard(self.consensus)\r\n\r\n        # monitor heartbeat: va creato PRIMA di orchestrator/recovery\r\n        self.worker_heartbeat_monitor = WorkerHeartbeatMonitor(\r\n            worker_registry=self.registry,\r\n            heartbeat_timeout_seconds=HEARTBEAT_TIMEOUT_SECONDS,\r\n        )\r\n\r\n        # data prep\r\n        self.data_preparation_service = DataPreparationService(\r\n            dataset_loader=DatasetLoader(),\r\n            dataset_validator=DatasetValidator(),\r\n            split_manager=SplitManager(),\r\n            artifact_store=self.store,\r\n        )\r\n\r\n        self.experiment_planner = ExperimentPlanner()\r\n        self.model_selector = ModelSelector(selection_metric=\"auto\")\r\n        self.model_manifest_builder = ModelManifestBuilder()\r\n        self.shard_planner = ShardPlanner(self.layout)\r\n\r\n        self.worker_client = WorkerClient(\r\n            timeout_train_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,\r\n            timeout_predict_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,\r\n        )\r\n\r\n        self.training_orchestrator = TrainingOrchestrator(\r\n            leadership_guard=self.leadership_guard,\r\n            worker_registry=self.registry,\r\n            task_ledger=self.task_ledger,\r\n            job_repository=self.job_repository,\r\n            shard_planner=self.shard_planner,\r\n            worker_client=self.worker_client,\r\n            retry_policy=RetryPolicy(\r\n                max_attempts_per_task=2,\r\n                base_backoff_seconds=0.5,\r\n                retry_on_timeout=True,\r\n                retry_on_worker_failure=True,\r\n                retry_on_unknown_error=False,\r\n            ),\r\n            task_lease_manager=TaskLeaseManager(\r\n                task_ledger=self.task_ledger,\r\n                lease_timeout_seconds=600.0,\r\n            ),\r\n            worker_heartbeat_monitor=self.worker_heartbeat_monitor,\r\n        )\r\n\r\n        self.inference_coordinator = InferenceCoordinator(\r\n            leadership_guard=self.leadership_guard,\r\n            worker_registry=self.registry,\r\n            worker_client=self.worker_client,\r\n            model_repository=self.model_repository,\r\n        )\r\n\r\n        self.validation_coordinator = ValidationCoordinator(\r\n            leadership_guard=self.leadership_guard,\r\n            worker_registry=self.registry,\r\n            worker_client=self.worker_client,\r\n        )\r\n\r\n        self.recovery_planner = RecoveryPlanner(\r\n            task_ledger=self.task_ledger,\r\n            shard_planner=self.shard_planner,\r\n            worker_heartbeat_monitor=self.worker_heartbeat_monitor,\r\n        )\r\n\r\n        self.training_job_service = TrainingJobService(\r\n            leadership_guard=self.leadership_guard,\r\n            job_repository=self.job_repository,\r\n            model_repository=self.model_repository,\r\n            data_preparation_service=self.data_preparation_service,\r\n            experiment_planner=self.experiment_planner,\r\n            training_orchestrator=self.training_orchestrator,\r\n            validation_coordinator=self.validation_coordinator,\r\n            model_selector=self.model_selector,\r\n            model_manifest_builder=self.model_manifest_builder,\r\n        )\r\n    # --------------------------------------------------------\r\n    # RPC: worker lifecycle\r\n    # --------------------------------------------------------\r\n\r\n    def RegisterWorker(self, request, context):\r\n        if not request.worker_id.strip():\r\n            return rf_pb2.RegisterWorkerResponse(\r\n                accepted=False,\r\n                message=\"worker_id must be non-empty\",\r\n            )\r\n\r\n        if not request.host.strip():\r\n            return rf_pb2.RegisterWorkerResponse(\r\n                accepted=False,\r\n                message=\"host must be non-empty\",\r\n            )\r\n\r\n        if request.port <= 0:\r\n            return rf_pb2.RegisterWorkerResponse(\r\n                accepted=False,\r\n                message=\"port must be > 0\",\r\n            )\r\n\r\n        self.registry.register(\r\n            worker_id=request.worker_id,\r\n            host=request.host,\r\n            port=request.port,\r\n        )\r\n        return rf_pb2.RegisterWorkerResponse(\r\n            accepted=True,\r\n            message=f\"Worker {request.worker_id} registered\",\r\n        )\r\n\r\n    def Heartbeat(self, request, context):\r\n        ok = self.registry.heartbeat(\r\n            worker_id=request.worker_id,\r\n            running_tasks=request.running_tasks,\r\n            active_task_ids=list(request.active_task_ids),\r\n        )\r\n        return rf_pb2.HeartbeatResponse(ok=ok)\r\n\r\n    # --------------------------------------------------------\r\n    # RPC: submit training\r\n    # --------------------------------------------------------\r\n\r\n    def SubmitTraining(self, request, context):\r\n        try:\r\n            self.leadership_guard.require_leader()\r\n        except Exception as exc:\r\n            return self._failed_submit_training_response(f\"Not leader: {exc}\")\r\n\r\n        validation_error = self._validate_submit_training_request(request)\r\n        if validation_error is not None:\r\n            return self._failed_submit_training_response(validation_error)\r\n\r\n        alive_workers = self.registry.alive_workers()\r\n        if not alive_workers:\r\n            return self._failed_submit_training_response(\"No alive workers available\")\r\n\r\n        training_request = self._build_training_request(request)\r\n\r\n        try:\r\n            created_job_id = self.training_job_service.start_training_job(training_request)\r\n        except Exception as exc:\r\n            return self._failed_submit_training_response(str(exc))\r\n\r\n        return rf_pb2.SubmitTrainingResponse(\r\n            job_id=created_job_id,\r\n            status=rf_pb2.PENDING,\r\n            message=\"Training started\",\r\n        )\r\n    def SubmitInference(self, request, context):\r\n        try:\r\n            self.leadership_guard.require_leader()\r\n        except Exception as exc:\r\n            return self._failed_submit_inference_response(f\"Not leader: {exc}\")\r\n\r\n        model_id = request.model_id.strip()\r\n        if not model_id:\r\n            return self._failed_submit_inference_response(\"model_id must be non-empty\")\r\n\r\n        try:\r\n            features = matrix_from_proto(request.features)\r\n        except Exception as exc:\r\n            return self._failed_submit_inference_response(f\"Invalid features matrix: {exc}\")\r\n\r\n        alive_workers = self.registry.alive_workers()\r\n        if not alive_workers:\r\n            return self._failed_submit_inference_response(\"No alive workers available\")\r\n\r\n        try:\r\n            result = self.inference_coordinator.run_inference(\r\n                model_id=model_id,\r\n                features=features,\r\n            )\r\n\r\n            return rf_pb2.SubmitInferenceResponse(\r\n                success=True,\r\n                error=\"\",\r\n                task_type=result.task_type,\r\n                predicted_labels=result.predicted_labels or [],\r\n                predicted_values=result.predicted_values or [],\r\n            )\r\n\r\n        except Exception as exc:\r\n            return self._failed_submit_inference_response(str(exc))\r\n    # --------------------------------------------------------\r\n    # Helpers\r\n    # --------------------------------------------------------\r\n\r\n    def _failed_submit_training_response(self, message: str) -> rf_pb2.SubmitTrainingResponse:\r\n        return rf_pb2.SubmitTrainingResponse(\r\n            job_id=\"\",\r\n            status=rf_pb2.FAILED,\r\n            message=message,\r\n        )\r\n\r\n    def _validate_submit_training_request(self, request) -> Optional[str]:\r\n        task_type = request.task_type.strip().lower()\r\n        if task_type not in {\"classification\", \"regression\"}:\r\n            return \"task_type must be 'classification' or 'regression'\"\r\n\r\n        if request.n_estimators_total <= 0:\r\n            return \"n_estimators_total must be > 0\"\r\n\r\n        if not request.dataset_url.strip():\r\n            return \"dataset_url must be non-empty\"\r\n\r\n        if not request.target_column.strip():\r\n            return \"target_column must be non-empty\"\r\n\r\n        if request.validation_ratio < 0.0 or request.test_ratio < 0.0:\r\n            return \"validation_ratio and test_ratio must be >= 0\"\r\n\r\n        if request.validation_ratio + request.test_ratio >= 1.0:\r\n            return \"validation_ratio + test_ratio must be < 1.0\"\r\n\r\n        return None\r\n\r\n    def _failed_submit_inference_response(self, message: str) -> rf_pb2.SubmitInferenceResponse:\r\n        return rf_pb2.SubmitInferenceResponse(\r\n            success=False,\r\n            error=message,\r\n            task_type=\"\",\r\n            predicted_labels=[],\r\n            predicted_values=[],\r\n        )\r\n\r\n    def _build_training_request(self, request) -> TrainingRequest:\r\n        task_type = request.task_type.strip().lower()\r\n        job_id = self._generate_job_id()\r\n\r\n        max_depth_candidates = [\r\n            value if value > 0 else None\r\n            for value in request.max_depth_candidates\r\n        ]\r\n        if not max_depth_candidates:\r\n            max_depth_candidates = [None]\r\n\r\n        max_features_candidates = [\r\n            self._parse_max_features_candidate(value)\r\n            for value in request.max_features_candidates\r\n        ]\r\n        if not max_features_candidates:\r\n            max_features_candidates = [\"sqrt\" if task_type == \"classification\" else 1.0]\r\n\r\n        min_samples_split_candidates = list(request.min_samples_split_candidates)\r\n        if not min_samples_split_candidates:\r\n            min_samples_split_candidates = [2]\r\n\r\n        min_samples_leaf_candidates = list(request.min_samples_leaf_candidates)\r\n        if not min_samples_leaf_candidates:\r\n            min_samples_leaf_candidates = [1]\r\n\r\n        criterion_candidates = list(request.criterion_candidates)\r\n        if not criterion_candidates:\r\n            criterion_candidates = [\"gini\"] if task_type == \"classification\" else [\"squared_error\"]\r\n\r\n        return TrainingRequest(\r\n            job_id=job_id,\r\n            dataset_uri=request.dataset_url,\r\n            target_column=request.target_column,\r\n            task_type=task_type,\r\n            hyperparameter_space=HyperparameterSpace(\r\n                n_estimators_candidates=[request.n_estimators_total],\r\n                max_depth_candidates=max_depth_candidates,\r\n                max_features_candidates=max_features_candidates,\r\n                min_samples_split_candidates=min_samples_split_candidates,\r\n                min_samples_leaf_candidates=min_samples_leaf_candidates,\r\n                criterion_candidates=criterion_candidates,\r\n                bootstrap=request.bootstrap,\r\n                global_random_seed=request.global_random_seed,\r\n            ),\r\n            n_estimators_total=request.n_estimators_total,\r\n            validation_ratio=request.validation_ratio,\r\n            test_ratio=request.test_ratio,\r\n            global_random_seed=request.global_random_seed,\r\n            bootstrap=request.bootstrap,\r\n        )\r\n\r\n    def _parse_max_features_candidate(self, raw_value: str):\r\n        value = raw_value.strip()\r\n        if not value:\r\n            return None\r\n\r\n        lowered = value.lower()\r\n        if lowered in {\"none\", \"null\"}:\r\n            return None\r\n\r\n        try:\r\n            return float(value)\r\n        except ValueError:\r\n            return value\r\n\r\n    def _generate_job_id(self) -> str:\r\n        from common.ids import generate_job_id\r\n        return generate_job_id()\r\n\r\n\r\n# ============================================================\r\n# Server bootstrap\r\n# ============================================================\r\n\r\ndef serve(\r\n    host: str = \"0.0.0.0\",\r\n    port: int = 50051,\r\n    artifact_root: str = \"/mnt/efs/gp_artifacts\",\r\n):\r\n    server = grpc.server(\r\n        futures.ThreadPoolExecutor(max_workers=32),\r\n        options=GRPC_OPTIONS,\r\n    )\r\n    rf_pb2_grpc.add_CoordinatorServiceServicer_to_server(\r\n        MasterCoordinator(artifact_root=artifact_root),\r\n        server,\r\n    )\r\n    server.add_insecure_port(f\"{host}:{port}\")\r\n    server.start()\r\n    print(f\"[MASTER] listening on {host}:{port}\")\r\n    server.wait_for_termination()\r\n\r\n\r\nif __name__ == \"__main__\":\r\n    serve(\r\n        host=os.getenv(\"MASTER_HOST\", \"0.0.0.0\"),\r\n        port=int(os.getenv(\"MASTER_PORT\", \"50051\")),\r\n        #modificato questo codice da os.getenv(\"ARTIFACT_ROOT\", \"/mnt/efs/gp_artifacts\") per salvare direttaente nel path condiviso di efs\r\n        artifact_root=os.getenv(\"ARTIFACT_ROOT\",\"/mnt/efs/gp_artifacts\")\r\n    )
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/master.py b/master.py
+--- a/master.py	(revision 5f495b234e700283402ec0f5560b56af65d93acf)
++++ b/master.py	(date 1778927195824)
+@@ -12,7 +12,9 @@
+ 
+ import rf_v2_pb2 as rf_pb2
+ import rf_v2_pb2_grpc as rf_pb2_grpc
++from masterPackage import test_evaluator
+ 
++from masterPackage.test_evaluator import TestEvaluator
+ from masterPackage.data.data_preparation_service import DataPreparationService
+ from masterPackage.data.dataset_loader import DatasetLoader
+ from masterPackage.data.dataset_validator import DatasetValidator
+@@ -247,6 +249,12 @@
+             worker_heartbeat_monitor=self.worker_heartbeat_monitor,
+         )
+ 
++        self.test_evaluator = TestEvaluator(
++            leadership_guard=self.leadership_guard,
++            worker_registry=self.registry,
++            worker_client=self.worker_client,
++        )
++
+         self.training_job_service = TrainingJobService(
+             leadership_guard=self.leadership_guard,
+             job_repository=self.job_repository,
+@@ -257,6 +265,7 @@
+             validation_coordinator=self.validation_coordinator,
+             model_selector=self.model_selector,
+             model_manifest_builder=self.model_manifest_builder,
++            test_evaluator=test_evaluator,
+         )
+     # --------------------------------------------------------
+     # RPC: worker lifecycle
+Index: README.md
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>HOW TO RUN:\r\nSetup iniziale\r\n\r\nApri PowerShell nella root del progetto:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\nPoi fai un controllo veloce:\r\n\r\npython -m compileall -q master.py masterPackage common worker\r\n\r\nSe questo passa senza output, prosegui.\r\n\r\nPulisci gli artifact vecchi:\r\n\r\nRemove-Item -Recurse -Force .\\shared_artifacts -ErrorAction SilentlyContinue\r\nNew-Item -ItemType Directory -Force .\\shared_artifacts | Out-Null\r\n\r\nTerminale 1 — Avvia il master\r\n\r\nApri un primo terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\n$env:MASTER_HOST=\"0.0.0.0\"\r\n$env:MASTER_PORT=\"50051\"\r\n$env:ARTIFACT_ROOT=(Join-Path (Get-Location) \"shared_artifacts\")\r\n\r\npython master.py\r\n\r\nDevi vedere qualcosa tipo:\r\n\r\n[MASTER] listening on 0.0.0.0:50051\r\n\r\nLascia questo terminale aperto.\r\n\r\nTerminale 2 — Avvia worker 1\r\n\r\nApri un secondo terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\n$env:WORKER_ID=\"worker-1\"\r\n$env:WORKER_BIND_HOST=\"0.0.0.0\"\r\n$env:WORKER_PORT=\"50061\"\r\n$env:WORKER_ADVERTISE_HOST=\"127.0.0.1\"\r\n$env:MASTER_HOST=\"127.0.0.1\"\r\n$env:MASTER_PORT=\"50051\"\r\n$env:ARTIFACT_ROOT=(Join-Path (Get-Location) \"shared_artifacts\")\r\n\r\npython -c \"from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()\"\r\n\r\nDovresti vedere:\r\n\r\n[WorkerNode] gRPC server started on port 50061\r\n[MasterClient] Registered worker worker-1\r\n[WorkerNode] Registered as 127.0.0.1:50061\r\n\r\nLascia aperto anche questo terminale.\r\n\r\nTerminale 3 — Avvia worker 2\r\n\r\nApri un terzo terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\n$env:WORKER_ID=\"worker-2\"\r\n$env:WORKER_BIND_HOST=\"0.0.0.0\"\r\n$env:WORKER_PORT=\"50062\"\r\n$env:WORKER_ADVERTISE_HOST=\"127.0.0.1\"\r\n$env:MASTER_HOST=\"127.0.0.1\"\r\n$env:MASTER_PORT=\"50051\"\r\n$env:ARTIFACT_ROOT=(Join-Path (Get-Location) \"shared_artifacts\")\r\n\r\npython -c \"from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()\"\r\n\r\nPer una prima run puoi anche usare un solo worker, ma con due inizi già a verificare la distribuzione.\r\n\r\nTerminale 4 — Invia il training job\r\n\r\nApri un quarto terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\nCrea un piccolo client temporaneo:\r\n\r\n@'\r\nfrom pathlib import Path\r\nimport grpc\r\n\r\nimport rf_v2_pb2 as pb\r\nimport rf_v2_pb2_grpc as pbgrpc\r\n\r\ndataset_path = Path(\"Dataset/diabetes_dataset.csv\").resolve()\r\n\r\nchannel = grpc.insecure_channel(\"127.0.0.1:50051\")\r\nstub = pbgrpc.CoordinatorServiceStub(channel)\r\n\r\nrequest = pb.SubmitTrainingRequest(\r\n    dataset_url=str(dataset_path),\r\n    target_column=\"diagnosed_diabetes\",\r\n    task_type=\"classification\",\r\n    n_estimators_total=4,\r\n    validation_ratio=0.2,\r\n    test_ratio=0.2,\r\n    bootstrap=True,\r\n    global_random_seed=42,\r\n    max_depth_candidates=[5],\r\n    max_features_candidates=[\"sqrt\"],\r\n    min_samples_split_candidates=[2],\r\n    min_samples_leaf_candidates=[1],\r\n    criterion_candidates=[\"gini\"],\r\n)\r\n\r\nresponse = stub.SubmitTraining(request, timeout=30)\r\n\r\nprint(\"job_id:\", response.job_id)\r\nprint(\"status:\", response.status)\r\nprint(\"message:\", response.message)\r\n'@ | Set-Content .\\submit_training.py\r\n\r\n\r\n@'\r\nfrom pathlib import Path\r\nimport grpc\r\n\r\nimport rf_v2_pb2 as pb\r\nimport rf_v2_pb2_grpc as pbgrpc\r\n\r\ndataset_path = Path(\"Dataset/diabetes_dataset.csv\").resolve()\r\n\r\nchannel = grpc.insecure_channel(\"127.0.0.1:50051\")\r\nstub = pbgrpc.CoordinatorServiceStub(channel)\r\n\r\nrequest = pb.SubmitTrainingRequest(\r\n    dataset_url=str(dataset_path),\r\n    target_column=\"diagnosed_diabetes\",\r\n    task_type=\"classification\",\r\n    n_estimators_total=4,\r\n    validation_ratio=0.2,\r\n    test_ratio=0.2,\r\n    bootstrap=True,\r\n    global_random_seed=42,\r\n    max_depth_candidates=[5],\r\n    max_features_candidates=[\"sqrt\"],\r\n    min_samples_split_candidates=[2],\r\n    min_samples_leaf_candidates=[1],\r\n    criterion_candidates=[\"gini\"],\r\n)\r\n\r\nresponse = stub.SubmitTraining(request, timeout=30)\r\n\r\nprint(\"job_id:\", response.job_id)\r\nprint(\"status:\", response.status)\r\nprint(\"message:\", response.message)\r\n'@ | Set-Content .\\submit_training_regression.py\r\n\r\nPoi lancia:\r\n\r\npython .\\submit_training.py\r\n\r\no\r\n\r\n\r\npython .\\submit_training_regression.pyDovresti ottenere una risposta tipo:\r\n\r\n\r\njob_id: job_...\r\nstatus: 1\r\nmessage: Training started\r\n\r\nLo status 1 corrisponde a PENDING, perché il training parte in thread separato lato master.\r\n\r\nPer vedere solo lo stato del job:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\n$j = Get-Content \".\\shared_artifacts\\jobs\\$job\\job_record.json\" -Raw | ConvertFrom-Json\r\n$j.status\r\n$j.message\r\n$j.selected_experiment_id\r\n$j.model_id\r\n\r\nPer vedere gli esperimenti:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\nGet-ChildItem \".\\shared_artifacts\\jobs\\$job\\experiments\" -Directory | ForEach-Object {\r\n    Get-Content \"$($_.FullName)\\experiment_record.json\" -Raw | ConvertFrom-Json |\r\n    Select-Object experiment_id,status,expected_tree_count,completed_tree_count,assigned_workers\r\n}\r\n\r\nPer contare gli alberi salvati:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\nGet-ChildItem \".\\shared_artifacts\\jobs\\$job\\experiments\" -Directory | ForEach-Object {\r\n    Write-Host \"Experiment:\" $_.Name\r\n    Get-ChildItem \"$($_.FullName)\\trees\" -Filter \"*.joblib\" -ErrorAction SilentlyContinue | Measure-Object\r\n}\r\n\r\nPer vedere le metriche di validation:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\nGet-ChildItem \".\\shared_artifacts\\jobs\\$job\\experiments\" -Directory | ForEach-Object {\r\n    $metrics = \"$($_.FullName)\\metrics\\validation_metrics.json\"\r\n    if (Test-Path $metrics) {\r\n        Get-Content $metrics -Raw | ConvertFrom-Json | Format-List\r\n    }\r\n}\r\n\r\n$job = \"JobQUI\r\n$exp = \"job__exp_000\"\r\n\r\n$er = Get-Content \".\\shared_artifacts\\jobs\\$job\\experiments\\$exp\\experiment_record.json\" -Raw | ConvertFrom-Json\r\n\r\n$er.status\r\n$er.expected_tree_count\r\n$er.completed_tree_count\r\n$er.assigned_workers\r\n$er.validation_metrics
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/README.md b/README.md
+--- a/README.md	(revision 5f495b234e700283402ec0f5560b56af65d93acf)
++++ b/README.md	(date 1778344803922)
+@@ -3,31 +3,20 @@
+ 
+ Apri PowerShell nella root del progetto:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+-Poi fai un controllo veloce:
+-
+-python -m compileall -q master.py masterPackage common worker
+-
+-Se questo passa senza output, prosegui.
+-
+ Pulisci gli artifact vecchi:
+ 
+ Remove-Item -Recurse -Force .\shared_artifacts -ErrorAction SilentlyContinue
+ New-Item -ItemType Directory -Force .\shared_artifacts | Out-Null
+ 
++
++
+ Terminale 1 — Avvia il master
+ 
+ Apri un primo terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ $env:MASTER_HOST="0.0.0.0"
+ $env:MASTER_PORT="50051"
+ $env:ARTIFACT_ROOT=(Join-Path (Get-Location) "shared_artifacts")
+-
+ python master.py
+ 
+ Devi vedere qualcosa tipo:
+@@ -36,13 +25,12 @@
+ 
+ Lascia questo terminale aperto.
+ 
++
++
+ Terminale 2 — Avvia worker 1
+ 
+ Apri un secondo terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ $env:WORKER_ID="worker-1"
+ $env:WORKER_BIND_HOST="0.0.0.0"
+ $env:WORKER_PORT="50061"
+@@ -50,7 +38,6 @@
+ $env:MASTER_HOST="127.0.0.1"
+ $env:MASTER_PORT="50051"
+ $env:ARTIFACT_ROOT=(Join-Path (Get-Location) "shared_artifacts")
+-
+ python -c "from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()"
+ 
+ Dovresti vedere:
+@@ -61,13 +48,12 @@
+ 
+ Lascia aperto anche questo terminale.
+ 
++
++
+ Terminale 3 — Avvia worker 2
+ 
+ Apri un terzo terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ $env:WORKER_ID="worker-2"
+ $env:WORKER_BIND_HOST="0.0.0.0"
+ $env:WORKER_PORT="50062"
+@@ -75,18 +61,16 @@
+ $env:MASTER_HOST="127.0.0.1"
+ $env:MASTER_PORT="50051"
+ $env:ARTIFACT_ROOT=(Join-Path (Get-Location) "shared_artifacts")
+-
+ python -c "from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()"
+ 
+ Per una prima run puoi anche usare un solo worker, ma con due inizi già a verificare la distribuzione.
+ 
++
++
+ Terminale 4 — Invia il training job
+ 
+ Apri un quarto terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ Crea un piccolo client temporaneo:
+ 
+ @'
+@@ -124,51 +108,9 @@
+ print("message:", response.message)
+ '@ | Set-Content .\submit_training.py
+ 
+-
+-@'
+-from pathlib import Path
+-import grpc
+-
+-import rf_v2_pb2 as pb
+-import rf_v2_pb2_grpc as pbgrpc
+-
+-dataset_path = Path("Dataset/diabetes_dataset.csv").resolve()
+-
+-channel = grpc.insecure_channel("127.0.0.1:50051")
+-stub = pbgrpc.CoordinatorServiceStub(channel)
+-
+-request = pb.SubmitTrainingRequest(
+-    dataset_url=str(dataset_path),
+-    target_column="diagnosed_diabetes",
+-    task_type="classification",
+-    n_estimators_total=4,
+-    validation_ratio=0.2,
+-    test_ratio=0.2,
+-    bootstrap=True,
+-    global_random_seed=42,
+-    max_depth_candidates=[5],
+-    max_features_candidates=["sqrt"],
+-    min_samples_split_candidates=[2],
+-    min_samples_leaf_candidates=[1],
+-    criterion_candidates=["gini"],
+-)
+-
+-response = stub.SubmitTraining(request, timeout=30)
+-
+-print("job_id:", response.job_id)
+-print("status:", response.status)
+-print("message:", response.message)
+-'@ | Set-Content .\submit_training_regression.py
+-
+-Poi lancia:
+-
+ python .\submit_training.py
+ 
+-o
+-
+-
+-python .\submit_training_regression.pyDovresti ottenere una risposta tipo:
+-
++Dovresti ottenere una risposta tipo:
+ 
+ job_id: job_...
+ status: 1
+@@ -176,6 +118,8 @@
+ 
+ Lo status 1 corrisponde a PENDING, perché il training parte in thread separato lato master.
+ 
++
++
+ Per vedere solo lo stato del job:
+ 
+ $job="job_QUI_METTI_ID"
+@@ -185,6 +129,8 @@
+ $j.selected_experiment_id
+ $j.model_id
+ 
++
++
+ Per vedere gli esperimenti:
+ 
+ $job="job_QUI_METTI_ID"
+@@ -195,7 +141,7 @@
+ 
+ Per contare gli alberi salvati:
+ 
+-$job="job_QUI_METTI_ID"
++$job="job_6ad41ebc8e07423d8195eeaebe2ac057"
+ Get-ChildItem ".\shared_artifacts\jobs\$job\experiments" -Directory | ForEach-Object {
+     Write-Host "Experiment:" $_.Name
+     Get-ChildItem "$($_.FullName)\trees" -Filter "*.joblib" -ErrorAction SilentlyContinue | Measure-Object
+@@ -203,16 +149,8 @@
+ 
+ Per vedere le metriche di validation:
+ 
+-$job="job_QUI_METTI_ID"
+-Get-ChildItem ".\shared_artifacts\jobs\$job\experiments" -Directory | ForEach-Object {
+-    $metrics = "$($_.FullName)\metrics\validation_metrics.json"
+-    if (Test-Path $metrics) {
+-        Get-Content $metrics -Raw | ConvertFrom-Json | Format-List
+-    }
+-}
+-
+-$job = "JobQUI
+-$exp = "job__exp_000"
++$job = "job_6eecde96785446e4922b5f43166f03f2"
++$exp = "job_6eecde96785446e4922b5f43166f03f2_exp_000"
+ 
+ $er = Get-Content ".\shared_artifacts\jobs\$job\experiments\$exp\experiment_record.json" -Raw | ConvertFrom-Json
+ 
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"BufProjectSettings\">\r\n    <option name=\"bufCLIPath\" value=\"$ brew install bufbuild/buf/buf\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"ristrutturato master\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/master.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/master.py\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;jadepics&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\">{\r\n  &quot;selectedUrlAndAccountId&quot;: {\r\n    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,\r\n    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;\r\n  }\r\n}</component>\r\n  <component name=\"KubernetesApiPersistence\">{}</component>\r\n  <component name=\"KubernetesApiProvider\">{\r\n  &quot;isMigrated&quot;: true\r\n}</component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 8\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\">{\r\n  &quot;keyToString&quot;: {\r\n    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,\r\n    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,\r\n    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,\r\n    &quot;git-widget-placeholder&quot;: &quot;master&quot;,\r\n    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,\r\n    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,\r\n    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,\r\n    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,\r\n    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,\r\n    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;\r\n  }\r\n}</component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"CopyFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\" />\r\n    </key>\r\n    <key name=\"MoveFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\worker\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"\" />\r\n      <created>1772718028304</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1772718028304</updated>\r\n      <workItem from=\"1774557139933\" duration=\"1949000\" />\r\n      <workItem from=\"1774559557015\" duration=\"480000\" />\r\n      <workItem from=\"1774600460605\" duration=\"10626000\" />\r\n      <workItem from=\"1774694994766\" duration=\"3422000\" />\r\n      <workItem from=\"1774720403281\" duration=\"207000\" />\r\n      <workItem from=\"1774730844650\" duration=\"5746000\" />\r\n      <workItem from=\"1774964855112\" duration=\"688000\" />\r\n    </task>\r\n    <task id=\"LOCAL-00001\" summary=\"First commit\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772718604332</created>\r\n      <option name=\"number\" value=\"00001\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772718604332</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00002\" summary=\"Introduzione artifact_store, filesystem_stoere e paths\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774605271956</created>\r\n      <option name=\"number\" value=\"00002\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00002\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774605271956</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00003\" summary=\"refactoring worker.py e paths.py\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774698083683</created>\r\n      <option name=\"number\" value=\"00003\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00003\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774698083683</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00004\" summary=\"aggiunto commento\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774875188528</created>\r\n      <option name=\"number\" value=\"00004\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00004\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774875188528</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00005\" summary=\"ristrutturato master\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774886067552</created>\r\n      <option name=\"number\" value=\"00005\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00005\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774886067552</updated>\r\n    </task>\r\n    <option name=\"localTasksCounter\" value=\"6\" />\r\n    <servers />\r\n  </component>\r\n  <component name=\"TypeScriptGeneratedFilesManager\">\r\n    <option name=\"version\" value=\"3\" />\r\n  </component>\r\n  <component name=\"VcsManagerConfiguration\">\r\n    <MESSAGE value=\"First commit\" />\r\n    <MESSAGE value=\"Introduzione artifact_store, filesystem_stoere e paths\" />\r\n    <MESSAGE value=\"refactoring worker.py e paths.py\" />\r\n    <MESSAGE value=\"aggiunto commento\" />\r\n    <MESSAGE value=\"ristrutturato master\" />\r\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"ristrutturato master\" />\r\n  </component>\r\n  <component name=\"github-copilot-workspace\">\r\n    <instructionFileLocations>\r\n      <option value=\".github/instructions\" />\r\n    </instructionFileLocations>\r\n    <promptFileLocations>\r\n      <option value=\".github/prompts\" />\r\n    </promptFileLocations>\r\n  </component>\r\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision 5f495b234e700283402ec0f5560b56af65d93acf)
++++ b/.idea/workspace.xml	(date 1778929687527)
+@@ -7,14 +7,23 @@
+     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
+   </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="ristrutturato master">
++    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="multi-workers">
+       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+       <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/masterPackage/training_job_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/masterPackage/training_job_service.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/shared_artifacts/prova" beforeDir="false" />
++      <change beforePath="$PROJECT_DIR$/training_debug_cli.py" beforeDir="false" afterPath="$PROJECT_DIR$/training_debug_cli.py" afterDir="false" />
+     </list>
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+     <option name="LAST_RESOLUTION" value="IGNORE" />
++  </component>
++  <component name="CopilotPersistence">
++    <persistenceIdMap>
++      <entry key="_C:/Users/PC/Desktop/materie/ISW/Mvn/ProgettoSDCCeML" value="3AWp9QFcSCr26GObyiuq4gjJYSa" />
++    </persistenceIdMap>
+   </component>
+   <component name="FileTemplateManagerImpl">
+     <option name="RECENT_TEMPLATES">
+@@ -34,13 +43,9 @@
+ }</component>
+   <component name="GithubPullRequestsUISettings">{
+   &quot;selectedUrlAndAccountId&quot;: {
+-    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,
+-    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
++    &quot;url&quot;: &quot;https://github.com/jadepics/ProgettoSDCCeML.git&quot;,
++    &quot;accountId&quot;: &quot;64b32a3e-6402-44ac-8316-64089203d618&quot;
+   }
+-}</component>
+-  <component name="KubernetesApiPersistence">{}</component>
+-  <component name="KubernetesApiProvider">{
+-  &quot;isMigrated&quot;: true
+ }</component>
+   <component name="ProjectColorInfo">{
+   &quot;associatedIndex&quot;: 8
+@@ -56,6 +61,10 @@
+   <component name="PropertiesComponent">{
+   &quot;keyToString&quot;: {
+     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
++    &quot;Python.Start_Master_Worker.executor&quot;: &quot;Run&quot;,
++    &quot;Python.boh.executor&quot;: &quot;Run&quot;,
++    &quot;Python.submit_training_classification.executor&quot;: &quot;Run&quot;,
++    &quot;Python.training_debug_cli.executor&quot;: &quot;Run&quot;,
+     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+     &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+@@ -64,14 +73,13 @@
+     &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+     &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+     &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+-    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
+     &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,
+     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+     &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+-    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,
++    &quot;settings.editor.selected.configurable&quot;: &quot;settings.sync&quot;,
+     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+   }
+ }</component>
+@@ -82,11 +90,44 @@
+     <key name="MoveFile.RECENT_KEYS">
+       <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\worker" />
+     </key>
++  </component>
++  <component name="RunManager">
++    <configuration name="training_debug_cli" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
++      <module name="ProgSDCC&amp;ML" />
++      <option name="ENV_FILES" value="" />
++      <option name="INTERPRETER_OPTIONS" value="" />
++      <option name="PARENT_ENVS" value="true" />
++      <envs>
++        <env name="PYTHONUNBUFFERED" value="1" />
++      </envs>
++      <option name="SDK_HOME" value="" />
++      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
++      <option name="IS_MODULE_SDK" value="true" />
++      <option name="ADD_CONTENT_ROOTS" value="true" />
++      <option name="ADD_SOURCE_ROOTS" value="true" />
++      <option name="DEBUG_JUST_MY_CODE" value="false" />
++      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
++      <option name="RUN_TOOL" value="" />
++      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/training_debug_cli.py" />
++      <option name="PARAMETERS" value="" />
++      <option name="SHOW_COMMAND_LINE" value="false" />
++      <option name="EMULATE_TERMINAL" value="false" />
++      <option name="MODULE_MODE" value="false" />
++      <option name="REDIRECT_INPUT" value="false" />
++      <option name="INPUT_FILE" value="" />
++      <method v="2" />
++    </configuration>
++    <recent_temporary>
++      <list>
++        <item itemvalue="Python.training_debug_cli" />
++      </list>
++    </recent_temporary>
+   </component>
+   <component name="SharedIndexes">
+     <attachedChunks>
+       <set>
+-        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
++        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.23567.174" />
++        <option value="bundled-python-sdk-024ed6589d45-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.23567.174" />
+       </set>
+     </attachedChunks>
+   </component>
+@@ -103,7 +144,60 @@
+       <workItem from="1774694994766" duration="3422000" />
+       <workItem from="1774720403281" duration="207000" />
+       <workItem from="1774730844650" duration="5746000" />
+-      <workItem from="1774964855112" duration="688000" />
++      <workItem from="1775288233161" duration="3626000" />
++      <workItem from="1775292566531" duration="13927000" />
++      <workItem from="1775326919099" duration="1110000" />
++      <workItem from="1775392617284" duration="708000" />
++      <workItem from="1775393448729" duration="122000" />
++      <workItem from="1775654904055" duration="483000" />
++      <workItem from="1775656481674" duration="4490000" />
++      <workItem from="1775808451484" duration="3808000" />
++      <workItem from="1775823854807" duration="5818000" />
++      <workItem from="1776069786364" duration="782000" />
++      <workItem from="1776153906549" duration="10068000" />
++      <workItem from="1776168387308" duration="6627000" />
++      <workItem from="1776242022766" duration="5812000" />
++      <workItem from="1776249159797" duration="5681000" />
++      <workItem from="1776284328231" duration="3004000" />
++      <workItem from="1776321911178" duration="373000" />
++      <workItem from="1776323207044" duration="1578000" />
++      <workItem from="1776328104086" duration="1919000" />
++      <workItem from="1776337645995" duration="10337000" />
++      <workItem from="1776362220672" duration="7630000" />
++      <workItem from="1776413459436" duration="3307000" />
++      <workItem from="1777018288438" duration="388000" />
++      <workItem from="1777019274594" duration="2480000" />
++      <workItem from="1777278724808" duration="286000" />
++      <workItem from="1777279070090" duration="6945000" />
++      <workItem from="1777380308736" duration="4031000" />
++      <workItem from="1777484104625" duration="304000" />
++      <workItem from="1777484595780" duration="6659000" />
++      <workItem from="1777533131214" duration="6713000" />
++      <workItem from="1777542703506" duration="685000" />
++      <workItem from="1777544082737" duration="476000" />
++      <workItem from="1778010992686" duration="6112000" />
++      <workItem from="1778018415390" duration="72000" />
++      <workItem from="1778137776999" duration="569000" />
++      <workItem from="1778138895859" duration="19000" />
++      <workItem from="1778147012176" duration="4982000" />
++      <workItem from="1778226721585" duration="575000" />
++      <workItem from="1778227401623" duration="4457000" />
++      <workItem from="1778233356244" duration="198000" />
++      <workItem from="1778285538991" duration="1425000" />
++      <workItem from="1778322871779" duration="3414000" />
++      <workItem from="1778330210005" duration="191000" />
++      <workItem from="1778330466239" duration="3375000" />
++      <workItem from="1778338080629" duration="6835000" />
++      <workItem from="1778345005048" duration="1836000" />
++      <workItem from="1778488611077" duration="1211000" />
++      <workItem from="1778515913944" duration="3141000" />
++      <workItem from="1778528734735" duration="3689000" />
++      <workItem from="1778595247382" duration="4200000" />
++      <workItem from="1778660520775" duration="226000" />
++      <workItem from="1778675414930" duration="9605000" />
++      <workItem from="1778701362738" duration="10269000" />
++      <workItem from="1778747100034" duration="9340000" />
++      <workItem from="1778832263659" duration="13694000" />
+     </task>
+     <task id="LOCAL-00001" summary="First commit">
+       <option name="closed" value="true" />
+@@ -137,27 +231,277 @@
+       <option name="project" value="LOCAL" />
+       <updated>1774875188528</updated>
+     </task>
+-    <task id="LOCAL-00005" summary="ristrutturato master">
++    <task id="LOCAL-00005" summary="Commit worker prima dell'introduzione del manifest per evitare master stateless">
+       <option name="closed" value="true" />
+-      <created>1774886067552</created>
++      <created>1775250185553</created>
+       <option name="number" value="00005" />
+       <option name="presentableId" value="LOCAL-00005" />
+       <option name="project" value="LOCAL" />
+-      <updated>1774886067552</updated>
++      <updated>1775250185553</updated>
++    </task>
++    <task id="LOCAL-00006" summary="Sistemati bootstrap_sampler.py e worker_service.py">
++      <option name="closed" value="true" />
++      <created>1776170087506</created>
++      <option name="number" value="00006" />
++      <option name="presentableId" value="LOCAL-00006" />
++      <option name="project" value="LOCAL" />
++      <updated>1776170087509</updated>
++    </task>
++    <task id="LOCAL-00007" summary="refactoring shard_trainer.py, decision_tree_factory.py">
++      <option name="closed" value="true" />
++      <created>1776245231565</created>
++      <option name="number" value="00007" />
++      <option name="presentableId" value="LOCAL-00007" />
++      <option name="project" value="LOCAL" />
++      <updated>1776245231565</updated>
++    </task>
++    <task id="LOCAL-00008" summary="Implementazione esplicita dei metodi di worker_state.py">
++      <option name="closed" value="true" />
++      <created>1776245958340</created>
++      <option name="number" value="00008" />
++      <option name="presentableId" value="LOCAL-00008" />
++      <option name="project" value="LOCAL" />
++      <updated>1776245958341</updated>
++    </task>
++    <task id="LOCAL-00009" summary="Implementazione esplicita dei metodi di worker_state.py e introduzione di tree_artifact_mapper.py per mapping">
++      <option name="closed" value="true" />
++      <created>1776259068456</created>
++      <option name="number" value="00009" />
++      <option name="presentableId" value="LOCAL-00009" />
++      <option name="project" value="LOCAL" />
++      <updated>1776259068457</updated>
++    </task>
++    <task id="LOCAL-00010" summary="Fase 1 delle correzioni, Heartbeat implementato">
++      <option name="closed" value="true" />
++      <created>1776287063737</created>
++      <option name="number" value="00010" />
++      <option name="presentableId" value="LOCAL-00010" />
++      <option name="project" value="LOCAL" />
++      <updated>1776287063737</updated>
++    </task>
++    <task id="LOCAL-00011" summary="Fase 2 e 4 delle correzioni: 2)Riallineare WorkerService come facciata RPC pura Obiettivo e 4) Rendere ShardTrainer retry-safe e progress-aware Obiettivo">
++      <option name="closed" value="true" />
++      <created>1776414703550</created>
++      <option name="number" value="00011" />
++      <option name="presentableId" value="LOCAL-00011" />
++      <option name="project" value="LOCAL" />
++      <updated>1776414703550</updated>
++    </task>
++    <task id="LOCAL-00012" summary="Push pre modifiche">
++      <option name="closed" value="true" />
++      <created>1777019839625</created>
++      <option name="number" value="00012" />
++      <option name="presentableId" value="LOCAL-00012" />
++      <option name="project" value="LOCAL" />
++      <updated>1777019839625</updated>
++    </task>
++    <task id="LOCAL-00013" summary="Correzione errori notati in 22/04">
++      <option name="closed" value="true" />
++      <created>1777486042664</created>
++      <option name="number" value="00013" />
++      <option name="presentableId" value="LOCAL-00013" />
++      <option name="project" value="LOCAL" />
++      <updated>1777486042664</updated>
++    </task>
++    <task id="LOCAL-00014" summary="modifiche minime lato worker">
++      <option name="closed" value="true" />
++      <created>1777544484058</created>
++      <option name="number" value="00014" />
++      <option name="presentableId" value="LOCAL-00014" />
++      <option name="project" value="LOCAL" />
++      <updated>1777544484059</updated>
++    </task>
++    <task id="LOCAL-00015" summary="Risoluzione di ultimo problema proposto in data 22/4/2026 e gestione edge cases per di shard_trainer.train">
++      <option name="closed" value="true" />
++      <created>1778018088282</created>
++      <option name="number" value="00015" />
++      <option name="presentableId" value="LOCAL-00015" />
++      <option name="project" value="LOCAL" />
++      <updated>1778018088282</updated>
++    </task>
++    <task id="LOCAL-00016" summary="Risoluzione di worker_progress_store.py e aggiornamento firma shard_predictor.py">
++      <option name="closed" value="true" />
++      <created>1778150932178</created>
++      <option name="number" value="00016" />
++      <option name="presentableId" value="LOCAL-00016" />
++      <option name="project" value="LOCAL" />
++      <updated>1778150932178</updated>
++    </task>
++    <task id="LOCAL-00017" summary="Risoluzione step 3 e 5 per testing">
++      <option name="closed" value="true" />
++      <created>1778233244420</created>
++      <option name="number" value="00017" />
++      <option name="presentableId" value="LOCAL-00017" />
++      <option name="project" value="LOCAL" />
++      <updated>1778233244420</updated>
++    </task>
++    <task id="LOCAL-00018" summary="modifica file io_utils.py">
++      <option name="closed" value="true" />
++      <created>1778323194816</created>
++      <option name="number" value="00018" />
++      <option name="presentableId" value="LOCAL-00018" />
++      <option name="project" value="LOCAL" />
++      <updated>1778323194817</updated>
++    </task>
++    <task id="LOCAL-00019" summary="inserimento codice per l'inizializione di master e workers">
++      <option name="closed" value="true" />
++      <created>1778345252376</created>
++      <option name="number" value="00019" />
++      <option name="presentableId" value="LOCAL-00019" />
++      <option name="project" value="LOCAL" />
++      <updated>1778345252376</updated>
++    </task>
++    <task id="LOCAL-00020" summary="Creazione di training_debug_cli.py per provare le funzionalità del sistema">
++      <option name="closed" value="true" />
++      <created>1778518248384</created>
++      <option name="number" value="00020" />
++      <option name="presentableId" value="LOCAL-00020" />
++      <option name="project" value="LOCAL" />
++      <updated>1778518248384</updated>
++    </task>
++    <task id="LOCAL-00021" summary="introduzione run_worker.py">
++      <option name="closed" value="true" />
++      <created>1778595422669</created>
++      <option name="number" value="00021" />
++      <option name="presentableId" value="LOCAL-00021" />
++      <option name="project" value="LOCAL" />
++      <updated>1778595422670</updated>
++    </task>
++    <task id="LOCAL-00022" summary="sistemazione dockers">
++      <option name="closed" value="true" />
++      <created>1778660655098</created>
++      <option name="number" value="00022" />
++      <option name="presentableId" value="LOCAL-00022" />
++      <option name="project" value="LOCAL" />
++      <updated>1778660655098</updated>
+     </task>
+-    <option name="localTasksCounter" value="6" />
++    <task id="LOCAL-00023" summary="sistemazione dockers worker">
++      <option name="closed" value="true" />
++      <created>1778675576376</created>
++      <option name="number" value="00023" />
++      <option name="presentableId" value="LOCAL-00023" />
++      <option name="project" value="LOCAL" />
++      <updated>1778675576376</updated>
++    </task>
++    <task id="LOCAL-00024" summary="sistemazione porta dockers worker">
++      <option name="closed" value="true" />
++      <created>1778676482186</created>
++      <option name="number" value="00024" />
++      <option name="presentableId" value="LOCAL-00024" />
++      <option name="project" value="LOCAL" />
++      <updated>1778676482186</updated>
++    </task>
++    <task id="LOCAL-00025" summary="docker worker pt3: run_worker.py">
++      <option name="closed" value="true" />
++      <created>1778676756540</created>
++      <option name="number" value="00025" />
++      <option name="presentableId" value="LOCAL-00025" />
++      <option name="project" value="LOCAL" />
++      <updated>1778676756540</updated>
++    </task>
++    <task id="LOCAL-00026" summary="docker worker e master">
++      <option name="closed" value="true" />
++      <created>1778678059406</created>
++      <option name="number" value="00026" />
++      <option name="presentableId" value="LOCAL-00026" />
++      <option name="project" value="LOCAL" />
++      <updated>1778678059407</updated>
++    </task>
++    <task id="LOCAL-00027" summary="docker worker">
++      <option name="closed" value="true" />
++      <created>1778680962851</created>
++      <option name="number" value="00027" />
++      <option name="presentableId" value="LOCAL-00027" />
++      <option name="project" value="LOCAL" />
++      <updated>1778680962851</updated>
++    </task>
++    <task id="LOCAL-00028" summary="docker run_worker">
++      <option name="closed" value="true" />
++      <created>1778683711417</created>
++      <option name="number" value="00028" />
++      <option name="presentableId" value="LOCAL-00028" />
++      <option name="project" value="LOCAL" />
++      <updated>1778683711417</updated>
++    </task>
++    <task id="LOCAL-00029" summary="prova">
++      <option name="closed" value="true" />
++      <created>1778686931933</created>
++      <option name="number" value="00029" />
++      <option name="presentableId" value="LOCAL-00029" />
++      <option name="project" value="LOCAL" />
++      <updated>1778686931933</updated>
++    </task>
++    <task id="LOCAL-00030" summary="Modifica del path per la scrittura corretta nel file system efs invece della root principale della root principale del sistema. Raffinamento di worker_config.py per rispecchiare meglio il passaggio a docker">
++      <option name="closed" value="true" />
++      <created>1778709671393</created>
++      <option name="number" value="00030" />
++      <option name="presentableId" value="LOCAL-00030" />
++      <option name="project" value="LOCAL" />
++      <updated>1778709671393</updated>
++    </task>
++    <task id="LOCAL-00031" summary="sistemazione del path del dataset per l'allenamento">
++      <option name="closed" value="true" />
++      <created>1778749184537</created>
++      <option name="number" value="00031" />
++      <option name="presentableId" value="LOCAL-00031" />
++      <option name="project" value="LOCAL" />
++      <updated>1778749184538</updated>
++    </task>
++    <task id="LOCAL-00032" summary="Prova con diversi worker">
++      <option name="closed" value="true" />
++      <created>1778752957370</created>
++      <option name="number" value="00032" />
++      <option name="presentableId" value="LOCAL-00032" />
++      <option name="project" value="LOCAL" />
++      <updated>1778752957370</updated>
++    </task>
++    <task id="LOCAL-00033" summary="multi-workers">
++      <option name="closed" value="true" />
++      <created>1778755211744</created>
++      <option name="number" value="00033" />
++      <option name="presentableId" value="LOCAL-00033" />
++      <option name="project" value="LOCAL" />
++      <updated>1778755211744</updated>
++    </task>
++    <option name="localTasksCounter" value="34" />
+     <servers />
+   </component>
+   <component name="TypeScriptGeneratedFilesManager">
+     <option name="version" value="3" />
+   </component>
+   <component name="VcsManagerConfiguration">
+-    <MESSAGE value="First commit" />
+-    <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
+-    <MESSAGE value="refactoring worker.py e paths.py" />
+-    <MESSAGE value="aggiunto commento" />
+-    <MESSAGE value="ristrutturato master" />
+-    <option name="LAST_COMMIT_MESSAGE" value="ristrutturato master" />
++    <MESSAGE value="Implementazione esplicita dei metodi di worker_state.py e introduzione di tree_artifact_mapper.py per mapping" />
++    <MESSAGE value="Fase 1 delle correzioni, Heartbeat implementato" />
++    <MESSAGE value="Fase 2 e 4 delle correzioni: 2)Riallineare WorkerService come facciata RPC pura Obiettivo e 4) Rendere ShardTrainer retry-safe e progress-aware Obiettivo" />
++    <MESSAGE value="Push pre modifiche" />
++    <MESSAGE value="Correzione errori notati in 22/04" />
++    <MESSAGE value="modifiche minime lato worker" />
++    <MESSAGE value="Risoluzione di ultimo problema proposto in data 22/4/2026 e gestione edge cases per di shard_trainer.train" />
++    <MESSAGE value="Risoluzione di worker_progress_store.py e aggiornamento firma shard_predictor.py" />
++    <MESSAGE value="Risoluzione step 3 e 5 per testing" />
++    <MESSAGE value="modifica file io_utils.py" />
++    <MESSAGE value="inserimento codice per l'inizializione di master e workers" />
++    <MESSAGE value="Creazione di training_debug_cli.py per provare le funzionalità del sistema" />
++    <MESSAGE value="introduzione run_worker.py" />
++    <MESSAGE value="sistemazione dockers" />
++    <MESSAGE value="sistemazione dockers worker" />
++    <MESSAGE value="sistemazione porta dockers worker" />
++    <MESSAGE value="docker worker pt3: run_worker.py" />
++    <MESSAGE value="docker worker e master" />
++    <MESSAGE value="docker worker" />
++    <MESSAGE value="docker run_worker" />
++    <MESSAGE value="prova" />
++    <MESSAGE value="Modifica del path per la scrittura corretta nel file system efs invece della root principale della root principale del sistema. Raffinamento di worker_config.py per rispecchiare meglio il passaggio a docker" />
++    <MESSAGE value="sistemazione del path del dataset per l'allenamento" />
++    <MESSAGE value="Prova con diversi worker" />
++    <MESSAGE value="multi-workers" />
++    <option name="LAST_COMMIT_MESSAGE" value="multi-workers" />
++  </component>
++  <component name="com.intellij.coverage.CoverageDataManagerImpl">
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$submit_training_classification.coverage" NAME="submit_training_classification Coverage Results" MODIFIED="1778516164593" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$boh.coverage" NAME="boh Coverage Results" MODIFIED="1778516100125" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$training_debug_cli.coverage" NAME="training_debug_cli Coverage Results" MODIFIED="1778709418112" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$Start_Master_Worker.coverage" NAME="Start_Master_Worker Coverage Results" MODIFIED="1778687068268" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+   </component>
+   <component name="github-copilot-workspace">
+     <instructionFileLocations>
