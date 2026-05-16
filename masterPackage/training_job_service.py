@@ -36,7 +36,7 @@ class TrainingJobService:
         validation_coordinator,
         model_selector,
         model_manifest_builder,
-        test_evaluator,
+        test_evaluator = None,
     ) -> None:
         self.leadership_guard = leadership_guard
         self.job_repository = job_repository
@@ -335,7 +335,7 @@ class TrainingJobService:
         model_id = generate_model_id()
 
         test_metrics = None
-        if prepared_dataset.n_test > 0:
+        if self.test_evaluator is not None and prepared_dataset.n_test > 0:
             test_result = self.test_evaluator.evaluate_model(
                 model_id=model_id,
                 experiment_id=experiment_record.experiment_id,
