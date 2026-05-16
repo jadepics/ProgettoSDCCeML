@@ -17,8 +17,6 @@ from sklearn.metrics import (
 
 from common.contracts import TreeArtifactMetadata, ValidationMetrics
 
-
-@dataclass(slots=True)
 @dataclass(slots=True)
 class TestEvaluationResult:
     metrics: ValidationMetrics
@@ -344,7 +342,7 @@ class TestEvaluator:
             evaluated_rows=n_samples,
             model_id=model_id,
         )
-    
+
     def _resolve_class_labels(
         self,
         y_true: np.ndarray,
