@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Union
 
 import grpc
 
@@ -9,9 +9,9 @@ import rf_v2_pb2_grpc as pbgrpc
 
 def main(
     PrivateIp_Port: str,
-    dataset_path: str | Path,
+    dataset_path: Union[str, Path],
     dataset_scenario: str = "baseline_original",
-    leakage_columns: Optional[list[str]] = None,
+    leakage_columns: Optional[List[str]] = None,
 ):
     if leakage_columns is None:
         leakage_columns = []
