@@ -58,11 +58,28 @@ class TrainingRequest:
     test_ratio: float
     global_random_seed: int
     bootstrap: bool
+    dataset_scenario: str = "baseline_original"
+    leakage_columns: Optional[list[str]] = None
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+#introduco per baseline no leakage
+@dataclass(slots=True)
+class DatasetPreparationMetadata:
+    dataset_scenario: str = "baseline_original"
+    dropped_columns: list[str] = field(default_factory=list)
+    requested_leakage_columns: Optional[list[str]] = None
+    missing_requested_leakage_columns: list[str] = field(default_factory=list)
+    original_column_count: int = 0
+    final_column_count: int = 0
+    original_row_count: int = 0
+    final_row_count: int = 0
+    scenario_report_uri: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 @dataclass(slots=True)
 class DatasetSchema:
@@ -92,10 +109,12 @@ class PreparedDataset:
     n_train: int
     n_validation: int
     n_test: int
+    preparation_metadata: DatasetPreparationMetadata = field(
+        default_factory=DatasetPreparationMetadata
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
 
 @dataclass(slots=True)
 class TrainingShard:
@@ -253,6 +272,9 @@ class ModelManifest:
     tree_artifacts: list[TreeArtifactMetadata]
     validation_metrics: ValidationMetrics
     test_metrics: Optional[dict[str, Any]]
+    preparation_metadata: DatasetPreparationMetadata = field(
+        default_factory=DatasetPreparationMetadata
+    )
     created_at: float = field(default_factory=time.time)
     status: ModelStatus = ModelStatus.TRAINING
 
@@ -261,6 +283,7 @@ class ModelManifest:
         payload["status"] = self.status.value
         payload["tree_artifacts"] = [item.to_dict() for item in self.tree_artifacts]
         payload["validation_metrics"] = self.validation_metrics.to_dict()
+        payload["preparation_metadata"] = self.preparation_metadata.to_dict()
         return payload
 
 

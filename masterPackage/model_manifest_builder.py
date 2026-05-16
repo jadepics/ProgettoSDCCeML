@@ -88,5 +88,6 @@ class ModelManifestBuilder:
             tree_artifacts=completed_artifacts,
             validation_metrics=validation_metrics,
             test_metrics=test_metrics,
+            preparation_metadata=prepared_dataset.preparation_metadata,
             status=status,
         )

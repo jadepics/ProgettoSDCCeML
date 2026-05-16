@@ -33,35 +33,68 @@ MASTER_ADDRESS = "172.31.37.47:50051"
 ARTIFACT_ROOT = Path("/mnt/efs/gp_artifacts").resolve()
 dataset_path = Path(ARTIFACT_ROOT / "datasets" / "diabetes_dataset.csv").resolve()
 
+
+DATASET_SCENARIO_ORIGINAL = "baseline_original"
+DATASET_SCENARIO_NO_LEAKAGE = "baseline_no_leakage"
+DEFAULT_LEAKAGE_COLUMNS = ["diabetes_stage"]
+
 GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024
 
 GRPC_OPTIONS = [
     ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
     ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
 ]
+
+
+# =========================================================
+# SUBMIT TRAINING
+# =========================================================
+
 # =========================================================
 # SUBMIT TRAINING
 # =========================================================
 
 def submit_training():
 
-    print("CHOOSE BETWEEN CLASSIFICATION AND REGRESSION")
-    print("1 -> CLASSIFICATION")
-    print("2 -> REGRESSION")
-    print("3 -> GO BACK")
+    print("CHOOSE TRAINING TYPE")
+    print("1 -> CLASSIFICATION - BASELINE ORIGINAL")
+    print("2 -> CLASSIFICATION - NO LEAKAGE DATASET")
+    print("3 -> REGRESSION")
+    print("4 -> GO BACK")
 
     choice = input(
         "\nSelect option: "
     ).strip()
 
     if choice == "1":
-        submit_training_classification.main(MASTER_ADDRESS,dataset_path)
+        submit_training_classification.main(
+            MASTER_ADDRESS,
+            dataset_path,
+            dataset_scenario="baseline_original",
+            leakage_columns=[],
+        )
 
     elif choice == "2":
-        submit_training_regression.main(MASTER_ADDRESS,dataset_path)
+        submit_training_classification.main(
+            MASTER_ADDRESS,
+            dataset_path,
+            dataset_scenario="baseline_no_leakage",
+            leakage_columns=["diabetes_stage"],
+        )
 
-    elif choice == '3':
+    elif choice == "3":
+        submit_training_regression.main(
+            MASTER_ADDRESS,
+            dataset_path,
+        )
+
+    elif choice == "4":
         return
+
+    else:
+        print()
+        print("[ERROR] Invalid option")
+        print()
 
 
 def submit_training_launcher():
@@ -72,7 +105,6 @@ def submit_training_launcher():
     print("===================================")
 
     submit_training()
-
 
 # =========================================================
 # JOB STATUS

@@ -53,6 +53,10 @@ GRPC_OPTIONS = [
     ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
 ]
 
+SUPPORTED_DATASET_SCENARIOS = {
+    "baseline_original",
+    "baseline_no_leakage",
+}
 # ============================================================
 # Utility
 # ============================================================
@@ -395,6 +399,19 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         if request.validation_ratio + request.test_ratio >= 1.0:
             return "validation_ratio + test_ratio must be < 1.0"
 
+        dataset_scenario = self._extract_dataset_scenario(request)
+        if dataset_scenario not in SUPPORTED_DATASET_SCENARIOS:
+            return (
+                f"dataset_scenario must be one of "
+                f"{sorted(SUPPORTED_DATASET_SCENARIOS)}"
+            )
+
+        leakage_columns = self._extract_leakage_columns(request)
+        if leakage_columns is not None:
+            target_column = request.target_column.strip()
+            if target_column in leakage_columns:
+                return "leakage_columns cannot contain the target_column"
+
         return None
 
     def _failed_submit_inference_response(self, message: str) -> rf_pb2.SubmitInferenceResponse:
@@ -436,6 +453,9 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         if not criterion_candidates:
             criterion_candidates = ["gini"] if task_type == "classification" else ["squared_error"]
 
+        dataset_scenario = self._extract_dataset_scenario(request)
+        leakage_columns = self._extract_leakage_columns(request)
+
         return TrainingRequest(
             job_id=job_id,
             dataset_uri=request.dataset_url,
@@ -456,7 +476,63 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             test_ratio=request.test_ratio,
             global_random_seed=request.global_random_seed,
             bootstrap=request.bootstrap,
+            dataset_scenario=dataset_scenario,
+            leakage_columns=leakage_columns,
         )
+
+    def _extract_dataset_scenario(self, request) -> str:
+        """
+        Estrae lo scenario dataset dalla request gRPC, se presente.
+
+        Compatibilità:
+        - se il proto è stato esteso con dataset_scenario, usa quello;
+        - altrimenti usa la variabile d'ambiente DATASET_SCENARIO;
+        - se nessuno dei due è presente, usa baseline_original.
+        """
+        raw_value = getattr(request, "dataset_scenario", "")
+
+        if raw_value is None or not str(raw_value).strip():
+            raw_value = os.getenv("DATASET_SCENARIO", "baseline_original")
+
+        scenario = str(raw_value).strip().lower()
+
+        if not scenario:
+            return "baseline_original"
+
+        return scenario
+
+    def _extract_leakage_columns(self, request) -> list[str] | None:
+        """
+        Estrae le colonne sospette di leakage.
+
+        Compatibilità:
+        - se il proto ha repeated string leakage_columns, usa quello;
+        - se il proto non lo ha, usa la variabile d'ambiente LEAKAGE_COLUMNS;
+        - LEAKAGE_COLUMNS può essere una stringa comma-separated:
+          LEAKAGE_COLUMNS=diabetes_stage,altra_colonna
+        """
+        raw_columns = getattr(request, "leakage_columns", None)
+
+        columns: list[str] = []
+
+        if raw_columns is not None:
+            if isinstance(raw_columns, str):
+                columns = raw_columns.split(",")
+            else:
+                columns = list(raw_columns)
+
+        if not columns:
+            env_value = os.getenv("LEAKAGE_COLUMNS", "").strip()
+            if env_value:
+                columns = env_value.split(",")
+
+        normalized_columns: list[str] = []
+        for column in columns:
+            normalized = str(column).strip()
+            if normalized and normalized not in normalized_columns:
+                normalized_columns.append(normalized)
+
+        return normalized_columns or None
 
     def _parse_max_features_candidate(self, raw_value: str):
         value = raw_value.strip()

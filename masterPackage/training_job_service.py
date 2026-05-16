@@ -105,6 +105,8 @@ class TrainingJobService:
                 validation_ratio=training_request.validation_ratio,
                 test_ratio=training_request.test_ratio,
                 random_seed=training_request.global_random_seed,
+                dataset_scenario=training_request.dataset_scenario,
+                leakage_columns=training_request.leakage_columns,
             )
             self.job_repository.attach_prepared_dataset(job_id, prepared_dataset)
 

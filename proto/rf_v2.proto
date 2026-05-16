@@ -54,6 +54,9 @@ message SubmitTrainingRequest {
   repeated int32 min_samples_split_candidates = 11;
   repeated int32 min_samples_leaf_candidates = 12;
   repeated string criterion_candidates = 13;
+
+  string dataset_scenario = 100;
+  repeated string leakage_columns = 101;
 }
 
 message SubmitTrainingResponse {
