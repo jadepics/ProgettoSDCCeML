@@ -1,0 +1,445 @@
+from __future__ import annotations
+
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Optional, Protocol, Sequence, Any
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    mean_squared_error,
+    r2_score,
+)
+
+from common.contracts import TreeArtifactMetadata, ValidationMetrics
+
+
+@dataclass(slots=True)
+@dataclass(slots=True)
+class TestEvaluationResult:
+    metrics: ValidationMetrics
+
+    predicted_labels: list[str] | None
+    predicted_values: list[float] | None
+
+    evaluated_rows: int
+    model_id: str
+
+class WorkerLike(Protocol):
+    worker_id: str
+    host: str
+    port: int
+
+
+class WorkerRegistryLike(Protocol):
+    def alive_workers(self) -> list[WorkerLike]:
+        ...
+
+    def get_retry_candidate(
+        self,
+        exclude_worker_id: str | None = None,
+    ) -> Optional[WorkerLike]:
+        ...
+
+
+class TestEvaluator:
+    """
+    Responsabilità:
+    - leggere il validation split persistito
+    - distribuire gli alberi ai worker vivi
+    - raccogliere predizioni parziali
+    - aggregare il risultato finale
+    - produrre ValidationMetrics
+
+    Nota:
+    questa versione usa i tree artifact già addestrati.
+
+    Per classificazione supporta due formati di risposta dal worker:
+    1) formato corretto/atteso:
+       matrice (n_samples, n_classes) con voti parziali
+    2) fallback temporaneo:
+       matrice (n_samples, 1) con classe predetta localmente dal worker
+       -> utile finché il lato worker non viene riallineato del tutto
+    """
+
+    def __init__(
+        self,
+        leadership_guard,
+        worker_registry: WorkerRegistryLike,
+        worker_client,
+        max_parallel_requests: int | None = None,
+    ) -> None:
+        self.leadership_guard = leadership_guard
+        self.worker_registry = worker_registry
+        self.worker_client = worker_client
+        self.max_parallel_requests = max_parallel_requests
+
+    def evaluate_model(
+            self,
+            model_id: str,
+            experiment_id: str,
+            task_type: str,
+            test_features_uri: str,
+            test_labels_uri: str,
+            tree_artifacts: list[TreeArtifactMetadata],
+            class_labels: Sequence[str] | None = None,
+    ) -> TestEvaluationResult:
+        self.leadership_guard.require_leader()
+
+        if not tree_artifacts:
+            raise ValueError(
+                f"Model '{model_id}' has no tree artifacts for test evaluation"
+            )
+
+        X_test = self._read_parquet_dataframe(test_features_uri).to_numpy(dtype=float)
+        y_test = self._read_target_vector(test_labels_uri)
+
+        if X_test.ndim != 2:
+            raise ValueError("Test features must be a 2D matrix")
+        if X_test.shape[0] == 0:
+            raise ValueError("Test split is empty")
+        if y_test.shape[0] != X_test.shape[0]:
+            raise ValueError(
+                "Test features/labels size mismatch: "
+                f"{X_test.shape[0]} rows vs {y_test.shape[0]} labels"
+            )
+
+        alive_workers = self.worker_registry.alive_workers()
+        if not alive_workers:
+            raise RuntimeError("No alive workers available for test evaluation")
+
+        tree_uris = [artifact.artifact_uri for artifact in tree_artifacts]
+        assignments = self._assign_tree_uris_to_workers(
+            workers=alive_workers,
+            tree_uris=tree_uris,
+        )
+        if not assignments:
+            raise RuntimeError("No test assignments could be built")
+
+        responses = self._collect_prediction_responses(
+            model_id=model_id,
+            experiment_id=experiment_id,
+            task_type=task_type,
+            features=X_test,
+            class_labels=class_labels,
+            assignments=assignments,
+        )
+
+        if task_type == "classification":
+            return self._build_classification_result(
+                model_id=model_id,
+                experiment_id=experiment_id,
+                y_true=y_test,
+                responses=responses,
+                class_labels=class_labels,
+                n_features=X_test.shape[1],
+            )
+
+        if task_type == "regression":
+            return self._build_regression_result(
+                model_id=model_id,
+                experiment_id=experiment_id,
+                y_true=y_test,
+                responses=responses,
+                tree_count=len(tree_artifacts),
+                n_features=X_test.shape[1],
+            )
+
+        raise ValueError(f"Unsupported task_type '{task_type}'")
+
+    def _collect_prediction_responses(
+            self,
+            model_id: str,
+            experiment_id: str,
+            task_type: str,
+            features: np.ndarray,
+            class_labels: Sequence[str] | None,
+            assignments: list[tuple[WorkerLike, list[str]]],
+    ) -> list:
+        responses = []
+        max_workers = self.max_parallel_requests or len(assignments)
+        max_workers = min(max_workers, len(assignments))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {}
+
+            for worker, uri_shard in assignments:
+                future = pool.submit(
+                    self.worker_client.predict_shard,
+                    worker.host,
+                    worker.port,
+                    model_id,
+                    experiment_id,
+                    task_type,
+                    features,
+                    uri_shard,
+                    class_labels,
+                )
+                future_map[future] = (worker, uri_shard)
+
+            for future in as_completed(future_map):
+                worker, uri_shard = future_map[future]
+                result = future.result()
+
+                if not result.success:
+                    retry_worker = self.worker_registry.get_retry_candidate(
+                        exclude_worker_id=worker.worker_id
+                    )
+                    if retry_worker is not None:
+                        result = self.worker_client.predict_shard(
+                            retry_worker.host,
+                            retry_worker.port,
+                            model_id,
+                            experiment_id,
+                            task_type,
+                            features,
+                            uri_shard,
+                            class_labels,
+                        )
+
+                if not result.success:
+                    raise RuntimeError(
+                        f"Test shard failed on worker {worker.worker_id}: "
+                        f"{result.error_message}"
+                    )
+
+                responses.append(result)
+
+        return responses
+
+    def _build_classification_result(
+            self,
+            model_id: str,
+            experiment_id: str,
+            y_true: np.ndarray,
+            responses: list,
+            class_labels: Sequence[str] | None,
+            n_features: int,
+    ) -> TestEvaluationResult:
+        resolved_class_labels = self._resolve_class_labels(y_true, class_labels)
+        n_samples = y_true.shape[0]
+        n_classes = len(resolved_class_labels)
+
+        aggregated_votes = np.zeros((n_samples, n_classes), dtype=float)
+
+        for response in responses:
+            values = response.values
+
+            if values.shape == aggregated_votes.shape:
+                aggregated_votes += values
+                continue
+
+            if values.shape == (n_samples, 1):
+                predicted_indices = np.rint(values[:, 0]).astype(int)
+                if np.any(predicted_indices < 0) or np.any(predicted_indices >= n_classes):
+                    raise ValueError(
+                        "Invalid classification shard response values: "
+                        f"indices out of range for {n_classes} classes"
+                    )
+                aggregated_votes[np.arange(n_samples), predicted_indices] += 1.0
+                continue
+
+            raise ValueError(
+                "Invalid classification shard response shape: "
+                f"expected {(n_samples, n_classes)} or {(n_samples, 1)}, got {values.shape}"
+            )
+
+        final_indices = np.argmax(aggregated_votes, axis=1)
+        predicted_labels = [resolved_class_labels[index] for index in final_indices]
+
+        if self._is_integer_encoded_labels(y_true, n_classes):
+            y_true_for_metrics = y_true.astype(int)
+            y_pred_for_metrics = final_indices.astype(int)
+            report = classification_report(
+                y_true_for_metrics,
+                y_pred_for_metrics,
+                output_dict=True,
+                zero_division=0,
+            )
+            confusion = confusion_matrix(
+                y_true_for_metrics,
+                y_pred_for_metrics,
+            ).tolist()
+            accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
+        else:
+            y_true_for_metrics = [str(item) for item in y_true.tolist()]
+            y_pred_for_metrics = predicted_labels
+            report = classification_report(
+                y_true_for_metrics,
+                y_pred_for_metrics,
+                output_dict=True,
+                zero_division=0,
+            )
+            confusion = confusion_matrix(
+                y_true_for_metrics,
+                y_pred_for_metrics,
+            ).tolist()
+            accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
+
+        metrics = ValidationMetrics(
+            experiment_id=experiment_id,
+            accuracy=accuracy,
+            classification_report=report,
+            confusion_matrix=confusion,
+            feature_importances=[0.0] * n_features,
+            evaluated_at=time.time(),
+        )
+
+        return TestEvaluationResult(
+            metrics=metrics,
+            predicted_labels=predicted_labels,
+            predicted_values=None,
+            evaluated_rows=n_samples,
+            model_id=model_id,
+        )
+
+    def _build_regression_result(
+            self,
+            model_id: str,
+            experiment_id: str,
+            y_true: np.ndarray,
+            responses: list,
+            tree_count: int,
+            n_features: int,
+    ) -> TestEvaluationResult:
+        n_samples = y_true.shape[0]
+        aggregated_sum = np.zeros((n_samples, 1), dtype=float)
+
+        for response in responses:
+            values = response.values
+            if values.shape != aggregated_sum.shape:
+                raise ValueError(
+                    "Invalid regression shard response shape: "
+                    f"expected {aggregated_sum.shape}, got {values.shape}"
+                )
+            aggregated_sum += values
+
+        predicted_values = (aggregated_sum[:, 0] / tree_count).tolist()
+
+        mse = float(mean_squared_error(y_true, predicted_values))
+        rmse = float(np.sqrt(mse))
+        r2 = float(r2_score(y_true, predicted_values))
+
+        metrics = ValidationMetrics(
+            experiment_id=experiment_id,
+            accuracy=0.0,
+            classification_report={
+                "mse": mse,
+                "rmse": rmse,
+                "r2": r2,
+            },
+            confusion_matrix=[],
+            feature_importances=[0.0] * n_features,
+            evaluated_at=time.time(),
+        )
+
+        return TestEvaluationResult(
+            metrics=metrics,
+            predicted_labels=None,
+            predicted_values=predicted_values,
+            evaluated_rows=n_samples,
+            model_id=model_id,
+        )
+    
+    def _resolve_class_labels(
+        self,
+        y_true: np.ndarray,
+        class_labels: Sequence[str] | None,
+    ) -> list[str]:
+        if class_labels:
+            return [str(label) for label in class_labels]
+
+        if self._is_integer_encoded_labels(y_true):
+            max_label = int(np.max(y_true))
+            return [str(index) for index in range(max_label + 1)]
+
+        raise ValueError(
+            "class_labels are required for classification when validation labels "
+            "are not integer-encoded"
+        )
+
+    def _is_integer_encoded_labels(
+        self,
+        y_true: np.ndarray,
+        n_classes: int | None = None,
+    ) -> bool:
+        if y_true.ndim != 1:
+            return False
+
+        if not np.issubdtype(y_true.dtype, np.number):
+            return False
+
+        rounded = np.rint(y_true).astype(int)
+        if not np.allclose(y_true, rounded):
+            return False
+
+        if np.any(rounded < 0):
+            return False
+
+        if n_classes is not None and np.any(rounded >= n_classes):
+            return False
+
+        return True
+
+    def _read_target_vector(self, uri: str) -> np.ndarray:
+        df = self._read_parquet_dataframe(uri)
+
+        if df.shape[1] != 1:
+            raise ValueError(
+                f"Expected a single target column in '{uri}', found {df.shape[1]}"
+            )
+
+        return df.iloc[:, 0].to_numpy()
+
+    def _assign_tree_uris_to_workers(
+        self,
+        workers: list[WorkerLike],
+        tree_uris: list[str],
+    ) -> list[tuple[WorkerLike, list[str]]]:
+        if not workers or not tree_uris:
+            return []
+
+        ordered_workers = sorted(workers, key=lambda worker: worker.worker_id)
+        shard_count = min(len(ordered_workers), len(tree_uris))
+        buckets: list[list[str]] = [[] for _ in range(shard_count)]
+
+        for index, uri in enumerate(tree_uris):
+            buckets[index % shard_count].append(uri)
+
+        assignments: list[tuple[WorkerLike, list[str]]] = []
+        for worker, bucket in zip(ordered_workers[:shard_count], buckets):
+            if bucket:
+                assignments.append((worker, bucket))
+
+        return assignments
+
+    def _read_parquet_dataframe(self, uri: str) -> pd.DataFrame:
+        path = self._normalize_uri(uri)
+        return pd.read_parquet(path)
+
+    def _normalize_uri(self, uri: str) -> str:
+        import os
+        from urllib.parse import urlparse, unquote
+        from urllib.request import url2pathname
+
+        parsed = urlparse(uri)
+
+        if parsed.scheme == "":
+            return uri
+
+        if parsed.scheme != "file":
+            return uri
+
+        path = url2pathname(unquote(parsed.path))
+
+        if os.name == "nt":
+            if parsed.netloc:
+                path = f"//{parsed.netloc}{path}"
+            elif path.startswith("/") and len(path) >= 3 and path[2] == ":":
+                path = path[1:]
+
+        return path

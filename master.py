@@ -12,7 +12,9 @@ import numpy as np
 
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
+from masterPackage import test_evaluator
 
+from masterPackage.test_evaluator import TestEvaluator
 from masterPackage.data.data_preparation_service import DataPreparationService
 from masterPackage.data.dataset_loader import DatasetLoader
 from masterPackage.data.dataset_validator import DatasetValidator
@@ -251,6 +253,12 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             worker_heartbeat_monitor=self.worker_heartbeat_monitor,
         )
 
+        self.test_evaluator = TestEvaluator(
+            leadership_guard=self.leadership_guard,
+            worker_registry=self.registry,
+            worker_client=self.worker_client,
+        )
+
         self.training_job_service = TrainingJobService(
             leadership_guard=self.leadership_guard,
             job_repository=self.job_repository,
@@ -261,6 +269,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             validation_coordinator=self.validation_coordinator,
             model_selector=self.model_selector,
             model_manifest_builder=self.model_manifest_builder,
+            test_evaluator=test_evaluator,
         )
     # --------------------------------------------------------
     # RPC: worker lifecycle

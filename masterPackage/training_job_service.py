@@ -36,6 +36,7 @@ class TrainingJobService:
         validation_coordinator,
         model_selector,
         model_manifest_builder,
+        test_evaluator,
     ) -> None:
         self.leadership_guard = leadership_guard
         self.job_repository = job_repository
@@ -46,6 +47,7 @@ class TrainingJobService:
         self.validation_coordinator = validation_coordinator
         self.model_selector = model_selector
         self.model_manifest_builder = model_manifest_builder
+        self.test_evaluator=test_evaluator
 
     # --------------------------------------------------------
     # public API
@@ -332,6 +334,19 @@ class TrainingJobService:
 
         model_id = generate_model_id()
 
+        test_metrics = None
+        if prepared_dataset.n_test > 0:
+            test_result = self.test_evaluator.evaluate_model(
+                model_id=model_id,
+                experiment_id=experiment_record.experiment_id,
+                task_type=job_record.training_request.task_type,
+                test_features_uri=prepared_dataset.test_features_uri,
+                test_labels_uri=prepared_dataset.test_labels_uri,
+                tree_artifacts=tree_artifacts,
+                class_labels=prepared_dataset.class_labels,
+            )
+            test_metrics = test_result.metrics.to_dict()
+
         return self.model_manifest_builder.build(
             model_id=model_id,
             job_id=job_record.job_id,
@@ -341,9 +356,9 @@ class TrainingJobService:
             prepared_dataset=prepared_dataset,
             tree_artifacts=tree_artifacts,
             validation_metrics=experiment_record.validation_metrics,
-            test_metrics=None,
+            test_metrics=test_metrics,
             status=ModelStatus.READY,
-        )
+        )   
 
     # --------------------------------------------------------
     # failure handling

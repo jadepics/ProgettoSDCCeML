@@ -625,6 +625,19 @@ def submit_inference(
             print("expected_values_from_split:")
             print(y_values)
 
+            if response.predicted_labels:
+                correct = sum(
+                    1
+                    for pred, true in zip(response.predicted_labels, y_values)
+                    if str(pred) == str(true)
+                )
+
+                accuracy = correct / len(y_values)
+
+                print()
+                print("local_accuracy:")
+                print(round(accuracy, 4))
+
     print()
 
 
