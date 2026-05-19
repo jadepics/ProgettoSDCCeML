@@ -151,7 +151,7 @@ class WorkerClient:
                     seed=artifact.seed,
                     artifact_uri=artifact.artifact_uri,
                     status=TreeStatus.COMPLETED if response.success else TreeStatus.FAILED,
-                    training_time_seconds=0.0,
+                    training_time_seconds=artifact.training_time_seconds,
                 )
             )
 

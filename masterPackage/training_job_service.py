@@ -347,7 +347,7 @@ class TrainingJobService:
             )
             test_metrics = test_result.metrics.to_dict()
 
-        return self.model_manifest_builder.build(
+        return self.model_manifest_builder .build(
             model_id=model_id,
             job_id=job_record.job_id,
             experiment_id=experiment_record.experiment_id,
