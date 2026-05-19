@@ -7,9 +7,14 @@
     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="ristrutturato master">
+    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="fix test evaluator">
+      <change beforePath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/common/contracts.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/contracts.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/masterPackage/data/data_preparation_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/masterPackage/data/data_preparation_service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/training_debug_cli.py" beforeDir="false" afterPath="$PROJECT_DIR$/training_debug_cli.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -56,6 +61,7 @@
   <component name="PropertiesComponent">{
   &quot;keyToString&quot;: {
     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.Start_Master_Worker.executor&quot;: &quot;Run&quot;,
     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
@@ -82,6 +88,35 @@
     <key name="MoveFile.RECENT_KEYS">
       <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\worker" />
     </key>
+  </component>
+  <component name="RunManager">
+    <configuration name="Start_Master_Worker" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="ProgSDCC&amp;ML" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/Start_Master_Worker.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <recent_temporary>
+      <list>
+        <item itemvalue="Python.Start_Master_Worker" />
+      </list>
+    </recent_temporary>
   </component>
   <component name="SharedIndexes">
     <attachedChunks>
@@ -145,7 +180,151 @@
       <option name="project" value="LOCAL" />
       <updated>1774886067552</updated>
     </task>
-    <option name="localTasksCounter" value="6" />
+    <task id="LOCAL-00006" summary="nuovi moduli master per toglierlo da versione monolitico">
+      <option name="closed" value="true" />
+      <created>1775141397577</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1775141397577</updated>
+    </task>
+    <task id="LOCAL-00007" summary="snellito master">
+      <option name="closed" value="true" />
+      <created>1775162782981</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1775162782981</updated>
+    </task>
+    <task id="LOCAL-00008" summary="resi coerenti: TrainingJobService&#10;TrainingOrchestrator&#10;JobRepository&#10;TaskLedger&#10;ModelRepository">
+      <option name="closed" value="true" />
+      <created>1775828892586</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1775828892586</updated>
+    </task>
+    <task id="LOCAL-00009" summary="aggiustato taskLedger">
+      <option name="closed" value="true" />
+      <created>1775902855575</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1775902855575</updated>
+    </task>
+    <task id="LOCAL-00010" summary="aggiunte nuove classi per gestione del retry di training">
+      <option name="closed" value="true" />
+      <created>1775922615845</created>
+      <option name="number" value="00010" />
+      <option name="presentableId" value="LOCAL-00010" />
+      <option name="project" value="LOCAL" />
+      <updated>1775922615845</updated>
+    </task>
+    <task id="LOCAL-00011" summary="iniziata fase di recovery safe">
+      <option name="closed" value="true" />
+      <created>1775986225737</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1775986225737</updated>
+    </task>
+    <task id="LOCAL-00012" summary="sistemato recovery, pronto per iniziare consenso">
+      <option name="closed" value="true" />
+      <created>1776198481945</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1776198481945</updated>
+    </task>
+    <task id="LOCAL-00013" summary="sistemata coerenza e fault tolerance lato master">
+      <option name="closed" value="true" />
+      <created>1778151758584</created>
+      <option name="number" value="00013" />
+      <option name="presentableId" value="LOCAL-00013" />
+      <option name="project" value="LOCAL" />
+      <updated>1778151758584</updated>
+    </task>
+    <task id="LOCAL-00014" summary="ancora modifiche di coerenza">
+      <option name="closed" value="true" />
+      <created>1778250295911</created>
+      <option name="number" value="00014" />
+      <option name="presentableId" value="LOCAL-00014" />
+      <option name="project" value="LOCAL" />
+      <updated>1778250295911</updated>
+    </task>
+    <task id="LOCAL-00015" summary="ancora modifiche di coerenza">
+      <option name="closed" value="true" />
+      <created>1778322008249</created>
+      <option name="number" value="00015" />
+      <option name="presentableId" value="LOCAL-00015" />
+      <option name="project" value="LOCAL" />
+      <updated>1778322008249</updated>
+    </task>
+    <task id="LOCAL-00016" summary="non falliscono i training">
+      <option name="closed" value="true" />
+      <created>1778325421991</created>
+      <option name="number" value="00016" />
+      <option name="presentableId" value="LOCAL-00016" />
+      <option name="project" value="LOCAL" />
+      <updated>1778325421991</updated>
+    </task>
+    <task id="LOCAL-00017" summary="non distribuiva il train, ora ok">
+      <option name="closed" value="true" />
+      <created>1778340670416</created>
+      <option name="number" value="00017" />
+      <option name="presentableId" value="LOCAL-00017" />
+      <option name="project" value="LOCAL" />
+      <updated>1778340670416</updated>
+    </task>
+    <task id="LOCAL-00018" summary="nuova classe per submit training regressione">
+      <option name="closed" value="true" />
+      <created>1778343692878</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1778343692878</updated>
+    </task>
+    <task id="LOCAL-00019" summary="aggiunta inferenza e resa usabile da cli">
+      <option name="closed" value="true" />
+      <created>1778774743502</created>
+      <option name="number" value="00019" />
+      <option name="presentableId" value="LOCAL-00019" />
+      <option name="project" value="LOCAL" />
+      <updated>1778774743503</updated>
+    </task>
+    <task id="LOCAL-00020" summary="aggiunta inferenza e resa usabile da cli fix">
+      <option name="closed" value="true" />
+      <created>1778776306527</created>
+      <option name="number" value="00020" />
+      <option name="presentableId" value="LOCAL-00020" />
+      <option name="project" value="LOCAL" />
+      <updated>1778776306527</updated>
+    </task>
+    <task id="LOCAL-00021" summary="aggiunto dataset no leak">
+      <option name="closed" value="true" />
+      <created>1778929646828</created>
+      <option name="number" value="00021" />
+      <option name="presentableId" value="LOCAL-00021" />
+      <option name="project" value="LOCAL" />
+      <updated>1778929646828</updated>
+    </task>
+    <task id="LOCAL-00022" summary="aggiunto dataset no leak, fix">
+      <option name="closed" value="true" />
+      <created>1778944393739</created>
+      <option name="number" value="00022" />
+      <option name="presentableId" value="LOCAL-00022" />
+      <option name="project" value="LOCAL" />
+      <updated>1778944393739</updated>
+    </task>
+    <task id="LOCAL-00023" summary="fix test evaluator">
+      <option name="closed" value="true" />
+      <created>1778949531622</created>
+      <option name="number" value="00023" />
+      <option name="presentableId" value="LOCAL-00023" />
+      <option name="project" value="LOCAL" />
+      <updated>1778949531622</updated>
+    </task>
+    <option name="localTasksCounter" value="24" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -157,7 +336,24 @@
     <MESSAGE value="refactoring worker.py e paths.py" />
     <MESSAGE value="aggiunto commento" />
     <MESSAGE value="ristrutturato master" />
-    <option name="LAST_COMMIT_MESSAGE" value="ristrutturato master" />
+    <MESSAGE value="nuovi moduli master per toglierlo da versione monolitico" />
+    <MESSAGE value="snellito master" />
+    <MESSAGE value="resi coerenti: TrainingJobService&#10;TrainingOrchestrator&#10;JobRepository&#10;TaskLedger&#10;ModelRepository" />
+    <MESSAGE value="aggiustato taskLedger" />
+    <MESSAGE value="aggiunte nuove classi per gestione del retry di training" />
+    <MESSAGE value="iniziata fase di recovery safe" />
+    <MESSAGE value="sistemato recovery, pronto per iniziare consenso" />
+    <MESSAGE value="sistemata coerenza e fault tolerance lato master" />
+    <MESSAGE value="ancora modifiche di coerenza" />
+    <MESSAGE value="non falliscono i training" />
+    <MESSAGE value="non distribuiva il train, ora ok" />
+    <MESSAGE value="nuova classe per submit training regressione" />
+    <MESSAGE value="aggiunta inferenza e resa usabile da cli" />
+    <MESSAGE value="aggiunta inferenza e resa usabile da cli fix" />
+    <MESSAGE value="aggiunto dataset no leak" />
+    <MESSAGE value="aggiunto dataset no leak, fix" />
+    <MESSAGE value="fix test evaluator" />
+    <option name="LAST_COMMIT_MESSAGE" value="fix test evaluator" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

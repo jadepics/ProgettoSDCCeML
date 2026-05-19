@@ -58,6 +58,10 @@ GRPC_OPTIONS = [
 SUPPORTED_DATASET_SCENARIOS = {
     "baseline_original",
     "baseline_no_leakage",
+    "no_diagnostic_features",
+    "no_diagnostic_extended",
+    "clinical_only",
+    "glucose_only",
 }
 # ============================================================
 # Utility

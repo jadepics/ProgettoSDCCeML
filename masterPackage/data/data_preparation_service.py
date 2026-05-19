@@ -23,9 +23,10 @@ class DataPreparationService:
     - restituire il PreparedDataset finale
 
     Nota:
-    la rimozione delle feature sospette di leakage deve avvenire prima
-    dell'encoding categorico, altrimenti colonne come diabetes_stage vengono
-    trasformate in dummy column e diventano più difficili da tracciare.
+    gli scenari vengono applicati prima dell'encoding categorico. All interno di contracts
+    abbiamo definito il keep ed il drop per le feature, gli scenari sono le diverse feature
+    che abbiamo scelto di togliere per avere diverse visioni del modello come lavora e vedere
+    come le metriche variano al variare della feature selection.
     """
 
     DEFAULT_LEAKAGE_COLUMNS_BY_TARGET: dict[str, list[str]] = {
@@ -34,9 +35,54 @@ class DataPreparationService:
         ],
     }
 
+    DROP_COLUMNS_BY_SCENARIO: dict[str, list[str]] = {
+        "baseline_no_leakage": [
+            "diabetes_stage",
+        ],
+        "no_diagnostic_features": [
+            "diabetes_stage",
+            "diabetes_risk_score",
+            "hba1c",
+            "glucose_fasting",
+            "glucose_postprandial",
+        ],
+        "no_diagnostic_extended": [
+            "diabetes_stage",
+            "diabetes_risk_score",
+            "hba1c",
+            "glucose_fasting",
+            "glucose_postprandial",
+            "insulin_level",
+        ],
+    }
+
+    KEEP_COLUMNS_BY_SCENARIO: dict[str, list[str]] = {
+        "clinical_only": [
+            "family_history_diabetes",
+            "hypertension_history",
+            "cardiovascular_history",
+            "bmi",
+            "waist_to_hip_ratio",
+            "systolic_bp",
+            "diastolic_bp",
+            "heart_rate",
+            "cholesterol_total",
+            "hdl_cholesterol",
+            "ldl_cholesterol",
+            "triglycerides",
+            "insulin_level",
+        ],
+        "glucose_only": [
+            "hba1c",
+            "glucose_fasting",
+            "glucose_postprandial",
+        ],
+    }
+
     SUPPORTED_DATASET_SCENARIOS = {
         "baseline_original",
-        "baseline_no_leakage",
+        *DROP_COLUMNS_BY_SCENARIO.keys(),
+        *KEEP_COLUMNS_BY_SCENARIO.keys(),
     }
 
     def __init__(
@@ -63,18 +109,6 @@ class DataPreparationService:
         dataset_scenario: str = "baseline_original",
         leakage_columns: list[str] | None = None,
     ) -> PreparedDataset:
-        """
-        Esegue l'intera pipeline dati del master e restituisce il PreparedDataset.
-
-        Flusso:
-        1. load del dataset sorgente
-        2. applicazione scenario dataset
-        3. encoding delle feature categoriche
-        4. validazione e costruzione DatasetSchema
-        5. split deterministico
-        6. persistenza schema + scenario report + split
-        7. costruzione PreparedDataset
-        """
         df = self.dataset_loader.load(dataset_uri)
 
         df, scenario_report = self._apply_dataset_scenario(
@@ -104,26 +138,20 @@ class DataPreparationService:
         )
 
         self._persist_schema(job_id, schema.to_dict())
-        self._persist_dataset_scenario_report(job_id, scenario_report)
 
         scenario_report_uri = self._persist_dataset_scenario_report(
-            job_id,
-            scenario_report,
+            job_id=job_id,
+            scenario_report=scenario_report,
         )
 
-        preparation_metadata = DatasetPreparationMetadata(
-            dataset_scenario=scenario_report["dataset_scenario"],
-            dropped_columns=scenario_report["dropped_columns"],
-            requested_leakage_columns=scenario_report["requested_leakage_columns"],
-            missing_requested_leakage_columns=scenario_report["missing_requested_leakage_columns"],
-            original_column_count=scenario_report["original_column_count"],
-            final_column_count=scenario_report["final_column_count"],
-            original_row_count=scenario_report["original_row_count"],
-            final_row_count=scenario_report["final_row_count"],
+        preparation_metadata = self._build_preparation_metadata(
+            scenario_report=scenario_report,
             scenario_report_uri=scenario_report_uri,
         )
+
         uris = self._persist_splits(job_id, target_column, splits)
-        prepared_dataset = PreparedDataset(
+
+        return PreparedDataset(
             dataset_id=f"{job_id}_prepared_dataset",
             schema=schema,
             train_features_uri=uris["train_features_uri"],
@@ -139,8 +167,6 @@ class DataPreparationService:
             n_test=len(splits.test_features),
             preparation_metadata=preparation_metadata,
         )
-
-        return prepared_dataset
 
     def _apply_dataset_scenario(
         self,
@@ -158,38 +184,87 @@ class DataPreparationService:
         if target_column not in df.columns:
             raise ValueError(f"Target column '{target_column}' not found")
 
+        scenario_type = "none"
+        requested_drop_columns: list[str] | None = None
         dropped_columns: list[str] = []
+        missing_requested_drop_columns: list[str] = []
 
-        if scenario == "baseline_no_leakage":
-            candidate_columns = self._resolve_leakage_columns(
+        requested_keep_columns: list[str] | None = None
+        kept_columns: list[str] = []
+        missing_requested_keep_columns: list[str] = []
+
+        requested_leakage_columns = leakage_columns
+
+        if scenario == "baseline_original":
+            scenario_type = "none"
+
+        elif scenario == "baseline_no_leakage":
+            scenario_type = "drop_columns"
+
+            requested_drop_columns = self._resolve_leakage_columns(
                 target_column=target_column,
                 leakage_columns=leakage_columns,
             )
 
-            dropped_columns = [
-                column
-                for column in candidate_columns
-                if column in df.columns and column != target_column
-            ]
+            df, dropped_columns, missing_requested_drop_columns = self._drop_columns(
+                df=df,
+                target_column=target_column,
+                requested_columns=requested_drop_columns,
+            )
 
-            if dropped_columns:
-                df = df.drop(columns=dropped_columns)
+        elif scenario in self.DROP_COLUMNS_BY_SCENARIO:
+            scenario_type = "drop_columns"
+
+            requested_drop_columns = self.DROP_COLUMNS_BY_SCENARIO[scenario]
+
+            df, dropped_columns, missing_requested_drop_columns = self._drop_columns(
+                df=df,
+                target_column=target_column,
+                requested_columns=requested_drop_columns,
+            )
+
+        elif scenario in self.KEEP_COLUMNS_BY_SCENARIO:
+            scenario_type = "keep_columns"
+
+            requested_keep_columns = self.KEEP_COLUMNS_BY_SCENARIO[scenario]
+
+            df, kept_columns, missing_requested_keep_columns = self._keep_columns(
+                df=df,
+                target_column=target_column,
+                requested_columns=requested_keep_columns,
+            )
+
+        else:
+            raise ValueError(f"Unsupported dataset_scenario '{scenario}'")
+
+        final_columns = list(df.columns)
 
         report = {
             "job_dataset_uri": dataset_uri,
             "dataset_scenario": scenario,
+            "scenario_type": scenario_type,
             "target_column": target_column,
+
             "original_row_count": original_row_count,
             "final_row_count": len(df),
             "original_column_count": len(original_columns),
-            "final_column_count": len(df.columns),
+            "final_column_count": len(final_columns),
+
             "original_columns": original_columns,
-            "final_columns": list(df.columns),
-            "requested_leakage_columns": leakage_columns,
+            "final_columns": final_columns,
+
+            "requested_drop_columns": requested_drop_columns,
             "dropped_columns": dropped_columns,
+            "missing_requested_drop_columns": missing_requested_drop_columns,
+
+            "requested_keep_columns": requested_keep_columns,
+            "kept_columns": kept_columns,
+            "missing_requested_keep_columns": missing_requested_keep_columns,
+
+            "requested_leakage_columns": requested_leakage_columns,
             "missing_requested_leakage_columns": self._missing_requested_columns(
                 df_columns_before=original_columns,
-                requested_columns=leakage_columns,
+                requested_columns=requested_leakage_columns,
             ),
         }
 
@@ -219,6 +294,60 @@ class DataPreparationService:
 
         return self.DEFAULT_LEAKAGE_COLUMNS_BY_TARGET.get(target_column, [])
 
+    def _drop_columns(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        requested_columns: list[str],
+    ) -> tuple[pd.DataFrame, list[str], list[str]]:
+        requested_columns = list(dict.fromkeys(requested_columns))
+
+        dropped_columns = [
+            column
+            for column in requested_columns
+            if column in df.columns and column != target_column
+        ]
+
+        missing_columns = self._missing_requested_columns(
+            df_columns_before=list(df.columns),
+            requested_columns=requested_columns,
+        )
+
+        if dropped_columns:
+            df = df.drop(columns=dropped_columns)
+
+        return df, dropped_columns, missing_columns
+
+    def _keep_columns(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        requested_columns: list[str],
+    ) -> tuple[pd.DataFrame, list[str], list[str]]:
+        requested_columns = list(dict.fromkeys(requested_columns))
+
+        kept_columns = [
+            column
+            for column in requested_columns
+            if column in df.columns and column != target_column
+        ]
+
+        missing_columns = self._missing_requested_columns(
+            df_columns_before=list(df.columns),
+            requested_columns=requested_columns,
+        )
+
+        if not kept_columns:
+            raise ValueError(
+                "Dataset scenario requested keep_columns, but none of the requested "
+                "feature columns exist in the dataset"
+            )
+
+        final_columns = kept_columns + [target_column]
+        df = df[final_columns].copy()
+
+        return df, kept_columns, missing_columns
+
     def _missing_requested_columns(
         self,
         df_columns_before: list[str],
@@ -234,6 +363,34 @@ class DataPreparationService:
             if column not in existing
         ]
 
+    def _build_preparation_metadata(
+        self,
+        scenario_report: dict[str, Any],
+        scenario_report_uri: str,
+    ) -> DatasetPreparationMetadata:
+        return DatasetPreparationMetadata(
+            dataset_scenario=scenario_report["dataset_scenario"],
+            scenario_type=scenario_report["scenario_type"],
+
+            requested_drop_columns=scenario_report["requested_drop_columns"],
+            dropped_columns=scenario_report["dropped_columns"],
+            missing_requested_drop_columns=scenario_report["missing_requested_drop_columns"],
+
+            requested_keep_columns=scenario_report["requested_keep_columns"],
+            kept_columns=scenario_report["kept_columns"],
+            missing_requested_keep_columns=scenario_report["missing_requested_keep_columns"],
+
+            requested_leakage_columns=scenario_report["requested_leakage_columns"],
+            missing_requested_leakage_columns=scenario_report["missing_requested_leakage_columns"],
+
+            original_column_count=scenario_report["original_column_count"],
+            final_column_count=scenario_report["final_column_count"],
+            original_row_count=scenario_report["original_row_count"],
+            final_row_count=scenario_report["final_row_count"],
+
+            scenario_report_uri=scenario_report_uri,
+        )
+
     def _persist_schema(self, job_id: str, schema_payload: dict) -> None:
         path = self.artifact_store.layout.dataset_schema_path(job_id)
         self.artifact_store.write_json(path, schema_payload)
@@ -242,7 +399,7 @@ class DataPreparationService:
         self,
         job_id: str,
         scenario_report: dict[str, Any],
-    ) -> None:
+    ) -> str:
         schema_path = self.artifact_store.layout.dataset_schema_path(job_id)
         report_path = schema_path.parent / "dataset_scenario_report.json"
         self.artifact_store.write_json(report_path, scenario_report)

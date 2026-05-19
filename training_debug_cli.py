@@ -46,9 +46,6 @@ GRPC_OPTIONS = [
 ]
 
 
-# =========================================================
-# SUBMIT TRAINING
-# =========================================================
 
 # =========================================================
 # SUBMIT TRAINING
@@ -58,9 +55,13 @@ def submit_training():
 
     print("CHOOSE TRAINING TYPE")
     print("1 -> CLASSIFICATION - BASELINE ORIGINAL")
-    print("2 -> CLASSIFICATION - NO LEAKAGE DATASET")
-    print("3 -> REGRESSION")
-    print("4 -> GO BACK")
+    print("2 -> CLASSIFICATION - BASELINE NO LEAKAGE")
+    print("3 -> CLASSIFICATION - NO DIAGNOSTIC FEATURES")
+    print("4 -> CLASSIFICATION - NO DIAGNOSTIC EXTENDED")
+    print("5 -> CLASSIFICATION - CLINICAL ONLY")
+    print("6 -> CLASSIFICATION - GLUCOSE ONLY")
+    print("7 -> REGRESSION")
+    print("8 -> GO BACK")
 
     choice = input(
         "\nSelect option: "
@@ -83,19 +84,50 @@ def submit_training():
         )
 
     elif choice == "3":
+        submit_training_classification.main(
+            MASTER_ADDRESS,
+            dataset_path,
+            dataset_scenario="no_diagnostic_features",
+            leakage_columns=[],
+        )
+
+    elif choice == "4":
+        submit_training_classification.main(
+            MASTER_ADDRESS,
+            dataset_path,
+            dataset_scenario="no_diagnostic_extended",
+            leakage_columns=[],
+        )
+
+    elif choice == "5":
+        submit_training_classification.main(
+            MASTER_ADDRESS,
+            dataset_path,
+            dataset_scenario="clinical_only",
+            leakage_columns=[],
+        )
+
+    elif choice == "6":
+        submit_training_classification.main(
+            MASTER_ADDRESS,
+            dataset_path,
+            dataset_scenario="glucose_only",
+            leakage_columns=[],
+        )
+
+    elif choice == "7":
         submit_training_regression.main(
             MASTER_ADDRESS,
             dataset_path,
         )
 
-    elif choice == "4":
+    elif choice == "8":
         return
 
     else:
         print()
         print("[ERROR] Invalid option")
         print()
-
 
 def submit_training_launcher():
 

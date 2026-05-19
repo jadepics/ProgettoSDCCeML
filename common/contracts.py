@@ -65,17 +65,28 @@ class TrainingRequest:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-#introduco per baseline no leakage
+#introduco per baseline no leakage, estendo per dati da tenere keep e rimuovere drop
 @dataclass(slots=True)
 class DatasetPreparationMetadata:
     dataset_scenario: str = "baseline_original"
+    scenario_type: str = "none"
+
+    requested_drop_columns: Optional[list[str]] = None
     dropped_columns: list[str] = field(default_factory=list)
+    missing_requested_drop_columns: list[str] = field(default_factory=list)
+
+    requested_keep_columns: Optional[list[str]] = None
+    kept_columns: list[str] = field(default_factory=list)
+    missing_requested_keep_columns: list[str] = field(default_factory=list)
+
     requested_leakage_columns: Optional[list[str]] = None
     missing_requested_leakage_columns: list[str] = field(default_factory=list)
+
     original_column_count: int = 0
     final_column_count: int = 0
     original_row_count: int = 0
     final_row_count: int = 0
+
     scenario_report_uri: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
