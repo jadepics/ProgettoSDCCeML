@@ -124,6 +124,11 @@ class TrainingOrchestrator:
             return final_artifacts
 
         alive_workers = self._alive_workers_for_scheduling()
+        print(
+            "[TrainingOrchestrator] alive_workers:",
+            [f"{w.worker_id}@{w.host}:{w.port}" for w in alive_workers],
+            flush=True,
+        )
         if not alive_workers:
             stale_ids = self._stale_worker_ids()
             if stale_ids:
@@ -132,7 +137,22 @@ class TrainingOrchestrator:
                     f"Stale workers detected: {stale_ids}"
                 )
             raise RuntimeError("No alive workers available during scheduling")
-        if self.recovery_planner is not None:
+        attempts = self.task_ledger.list_attempts_by_experiment(
+            job_id=job_id,
+            experiment_id=experiment_id,
+        )
+
+        expected_tree_ids = [
+            generate_tree_id(experiment_id, tree_index)
+            for tree_index in range(forest_config.n_estimators)
+        ]
+
+        is_initial_full_training_plan = (
+                not attempts
+                and set(missing_tree_ids) == set(expected_tree_ids)
+        )
+
+        if self.recovery_planner is not None and not is_initial_full_training_plan:
             recovery_plan = self.recovery_planner.build_plan(
                 job_id=job_id,
                 experiment_id=experiment_id,
