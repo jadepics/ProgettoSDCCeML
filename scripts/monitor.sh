@@ -73,8 +73,8 @@ do
 
     echo "" >> "$LOG_FILE"
     echo "[LAST KERNEL MESSAGES]" >> "$LOG_FILE"
-    dmesg | tail -30 >> "$LOG_FILE"
-
+    journalctl -k -n 30 >> "$LOG_FILE" 2>/dev/null
+    
     echo "" >> "$LOG_FILE"
     echo "[PROCESS COUNT]" >> "$LOG_FILE"
     ps aux | wc -l >> "$LOG_FILE"
