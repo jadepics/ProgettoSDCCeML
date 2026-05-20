@@ -1,0 +1,1056 @@
+Index: masterPackage/validation_coordinator.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nimport time\r\nfrom concurrent.futures import ThreadPoolExecutor, as_completed\r\nfrom dataclasses import dataclass\r\nfrom typing import Optional, Protocol, Sequence\r\n\r\nimport numpy as np\r\nimport pandas as pd\r\nfrom sklearn.metrics import (\r\n    accuracy_score,\r\n    classification_report,\r\n    confusion_matrix,\r\n    mean_squared_error,\r\n    r2_score,\r\n)\r\n\r\nfrom common.contracts import TreeArtifactMetadata, ValidationMetrics\r\n\r\n\r\n@dataclass(slots=True)\r\nclass ValidationResult:\r\n    metrics: ValidationMetrics\r\n    predicted_labels: list[str] | None\r\n    predicted_values: list[float] | None\r\n\r\n\r\nclass WorkerLike(Protocol):\r\n    worker_id: str\r\n    host: str\r\n    port: int\r\n\r\n\r\nclass WorkerRegistryLike(Protocol):\r\n    def alive_workers(self) -> list[WorkerLike]:\r\n        ...\r\n\r\n    def get_retry_candidate(\r\n        self,\r\n        exclude_worker_id: str | None = None,\r\n    ) -> Optional[WorkerLike]:\r\n        ...\r\n\r\n\r\nclass ValidationCoordinator:\r\n    \"\"\"\r\n    Responsabilità:\r\n    - leggere il validation split persistito\r\n    - distribuire gli alberi ai worker vivi\r\n    - raccogliere predizioni parziali\r\n    - aggregare il risultato finale\r\n    - produrre ValidationMetrics\r\n\r\n    Nota:\r\n    questa versione usa i tree artifact già addestrati.\r\n\r\n    Per classificazione supporta due formati di risposta dal worker:\r\n    1) formato corretto/atteso:\r\n       matrice (n_samples, n_classes) con voti parziali\r\n    2) fallback temporaneo:\r\n       matrice (n_samples, 1) con classe predetta localmente dal worker\r\n       -> utile finché il lato worker non viene riallineato del tutto\r\n    \"\"\"\r\n\r\n    def __init__(\r\n        self,\r\n        leadership_guard,\r\n        worker_registry: WorkerRegistryLike,\r\n        worker_client,\r\n        max_parallel_requests: int | None = None,\r\n    ) -> None:\r\n        self.leadership_guard = leadership_guard\r\n        self.worker_registry = worker_registry\r\n        self.worker_client = worker_client\r\n        self.max_parallel_requests = max_parallel_requests\r\n\r\n    def validate_experiment(\r\n        self,\r\n        experiment_id: str,\r\n        task_type: str,\r\n        validation_features_uri: str,\r\n        validation_labels_uri: str,\r\n        tree_artifacts: list[TreeArtifactMetadata],\r\n        class_labels: Sequence[str] | None = None,\r\n    ) -> ValidationResult:\r\n        self.leadership_guard.require_leader()\r\n\r\n        if not tree_artifacts:\r\n            raise ValueError(\r\n                f\"Experiment '{experiment_id}' has no tree artifacts for validation\"\r\n            )\r\n\r\n        X_val = self._read_parquet_dataframe(validation_features_uri).to_numpy(dtype=float)\r\n        y_val = self._read_target_vector(validation_labels_uri)\r\n\r\n        if X_val.ndim != 2:\r\n            raise ValueError(\"Validation features must be a 2D matrix\")\r\n        if X_val.shape[0] == 0:\r\n            raise ValueError(\"Validation split is empty\")\r\n        if y_val.shape[0] != X_val.shape[0]:\r\n            raise ValueError(\r\n                \"Validation features/labels size mismatch: \"\r\n                f\"{X_val.shape[0]} rows vs {y_val.shape[0]} labels\"\r\n            )\r\n\r\n        alive_workers = self.worker_registry.alive_workers()\r\n        if not alive_workers:\r\n            raise RuntimeError(\"No alive workers available for validation\")\r\n\r\n        tree_uris = [artifact.artifact_uri for artifact in tree_artifacts]\r\n        assignments = self._assign_tree_uris_to_workers(\r\n            workers=alive_workers,\r\n            tree_uris=tree_uris,\r\n        )\r\n        if not assignments:\r\n            raise RuntimeError(\"No validation assignments could be built\")\r\n\r\n        responses = self._collect_prediction_responses(\r\n            experiment_id=experiment_id,\r\n            task_type=task_type,\r\n            features=X_val,\r\n            class_labels=class_labels,\r\n            assignments=assignments,\r\n        )\r\n\r\n        if task_type == \"classification\":\r\n            return self._build_classification_result(\r\n                experiment_id=experiment_id,\r\n                y_true=y_val,\r\n                responses=responses,\r\n                class_labels=class_labels,\r\n                n_features=X_val.shape[1],\r\n            )\r\n\r\n        if task_type == \"regression\":\r\n            return self._build_regression_result(\r\n                experiment_id=experiment_id,\r\n                y_true=y_val,\r\n                responses=responses,\r\n                tree_count=len(tree_artifacts),\r\n                n_features=X_val.shape[1],\r\n            )\r\n\r\n        raise ValueError(f\"Unsupported task_type '{task_type}'\")\r\n\r\n    def _collect_prediction_responses(\r\n        self,\r\n        experiment_id: str,\r\n        task_type: str,\r\n        features: np.ndarray,\r\n        class_labels: Sequence[str] | None,\r\n        assignments: list[tuple[WorkerLike, list[str]]],\r\n    ) -> list:\r\n        responses = []\r\n        max_workers = self.max_parallel_requests or len(assignments)\r\n        max_workers = min(max_workers, len(assignments))\r\n\r\n        with ThreadPoolExecutor(max_workers=max_workers) as pool:\r\n            future_map = {}\r\n\r\n            for worker, uri_shard in assignments:\r\n                future = pool.submit(\r\n                    self.worker_client.predict_shard,\r\n                    worker.host,\r\n                    worker.port,\r\n                    experiment_id,   # model_id temporaneo per validation\r\n                    experiment_id,\r\n                    task_type,\r\n                    features,\r\n                    uri_shard,\r\n                    class_labels,\r\n                )\r\n                future_map[future] = (worker, uri_shard)\r\n\r\n            for future in as_completed(future_map):\r\n                worker, uri_shard = future_map[future]\r\n                result = future.result()\r\n\r\n                if not result.success:\r\n                    retry_worker = self.worker_registry.get_retry_candidate(\r\n                        exclude_worker_id=worker.worker_id\r\n                    )\r\n                    if retry_worker is not None:\r\n                        result = self.worker_client.predict_shard(\r\n                            retry_worker.host,\r\n                            retry_worker.port,\r\n                            experiment_id,   # model_id temporaneo per validation\r\n                            experiment_id,\r\n                            task_type,\r\n                            features,\r\n                            uri_shard,\r\n                            class_labels,\r\n                        )\r\n\r\n                if not result.success:\r\n                    raise RuntimeError(\r\n                        f\"Validation shard failed on worker {worker.worker_id}: \"\r\n                        f\"{result.error_message}\"\r\n                    )\r\n\r\n                responses.append(result)\r\n\r\n        return responses\r\n\r\n    def _build_classification_result(\r\n        self,\r\n        experiment_id: str,\r\n        y_true: np.ndarray,\r\n        responses: list,\r\n        class_labels: Sequence[str] | None,\r\n        n_features: int,\r\n    ) -> ValidationResult:\r\n        resolved_class_labels = self._resolve_class_labels(y_true, class_labels)\r\n        n_samples = y_true.shape[0]\r\n        n_classes = len(resolved_class_labels)\r\n\r\n        aggregated_votes = np.zeros((n_samples, n_classes), dtype=float)\r\n\r\n        for response in responses:\r\n            values = response.values\r\n\r\n            # formato corretto atteso: voti parziali per classe\r\n            if values.shape == aggregated_votes.shape:\r\n                aggregated_votes += values\r\n                continue\r\n\r\n            # fallback temporaneo: classe locale già decisa dal worker\r\n            if values.shape == (n_samples, 1):\r\n                predicted_indices = np.rint(values[:, 0]).astype(int)\r\n                if np.any(predicted_indices < 0) or np.any(predicted_indices >= n_classes):\r\n                    raise ValueError(\r\n                        \"Invalid classification shard response values: \"\r\n                        f\"indices out of range for {n_classes} classes\"\r\n                    )\r\n                aggregated_votes[np.arange(n_samples), predicted_indices] += 1.0\r\n                continue\r\n\r\n            raise ValueError(\r\n                \"Invalid classification shard response shape: \"\r\n                f\"expected {(n_samples, n_classes)} or {(n_samples, 1)}, got {values.shape}\"\r\n            )\r\n\r\n        final_indices = np.argmax(aggregated_votes, axis=1)\r\n        predicted_labels = [resolved_class_labels[index] for index in final_indices]\r\n\r\n        if self._is_integer_encoded_labels(y_true, n_classes):\r\n            y_true_for_metrics = y_true.astype(int)\r\n            y_pred_for_metrics = final_indices.astype(int)\r\n\r\n            report = classification_report(\r\n                y_true_for_metrics,\r\n                y_pred_for_metrics,\r\n                output_dict=True,\r\n                zero_division=0,\r\n            )\r\n            confusion = confusion_matrix(\r\n                y_true_for_metrics,\r\n                y_pred_for_metrics,\r\n            ).tolist()\r\n            accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))\r\n        else:\r\n            y_true_for_metrics = [str(item) for item in y_true.tolist()]\r\n            y_pred_for_metrics = predicted_labels\r\n\r\n            report = classification_report(\r\n                y_true_for_metrics,\r\n                y_pred_for_metrics,\r\n                output_dict=True,\r\n                zero_division=0,\r\n            )\r\n            confusion = confusion_matrix(\r\n                y_true_for_metrics,\r\n                y_pred_for_metrics,\r\n            ).tolist()\r\n            accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))\r\n\r\n        metrics = ValidationMetrics(\r\n            experiment_id=experiment_id,\r\n            accuracy=accuracy,\r\n            classification_report=report,\r\n            confusion_matrix=confusion,\r\n            feature_importances=[0.0] * n_features,\r\n            evaluated_at=time.time(),\r\n        )\r\n\r\n        return ValidationResult(\r\n            metrics=metrics,\r\n            predicted_labels=predicted_labels,\r\n            predicted_values=None,\r\n        )\r\n\r\n    def _build_regression_result(\r\n        self,\r\n        experiment_id: str,\r\n        y_true: np.ndarray,\r\n        responses: list,\r\n        tree_count: int,\r\n        n_features: int,\r\n    ) -> ValidationResult:\r\n        n_samples = y_true.shape[0]\r\n        aggregated_sum = np.zeros((n_samples, 1), dtype=float)\r\n\r\n        for response in responses:\r\n            values = response.values\r\n            if values.shape != aggregated_sum.shape:\r\n                raise ValueError(\r\n                    \"Invalid regression shard response shape: \"\r\n                    f\"expected {aggregated_sum.shape}, got {values.shape}\"\r\n                )\r\n            aggregated_sum += values\r\n\r\n        predicted_values = (aggregated_sum[:, 0] / tree_count).tolist()\r\n\r\n        mse = float(mean_squared_error(y_true, predicted_values))\r\n        rmse = float(np.sqrt(mse))\r\n        r2 = float(r2_score(y_true, predicted_values))\r\n\r\n        metrics = ValidationMetrics(\r\n            experiment_id=experiment_id,\r\n            accuracy=0.0,\r\n            classification_report={\r\n                \"mse\": mse,\r\n                \"rmse\": rmse,\r\n                \"r2\": r2,\r\n            },\r\n            confusion_matrix=[],\r\n            feature_importances=[0.0] * n_features,\r\n            evaluated_at=time.time(),\r\n        )\r\n\r\n        return ValidationResult(\r\n            metrics=metrics,\r\n            predicted_labels=None,\r\n            predicted_values=predicted_values,\r\n        )\r\n\r\n    def _resolve_class_labels(\r\n        self,\r\n        y_true: np.ndarray,\r\n        class_labels: Sequence[str] | None,\r\n    ) -> list[str]:\r\n        if class_labels:\r\n            return [str(label) for label in class_labels]\r\n\r\n        if self._is_integer_encoded_labels(y_true):\r\n            max_label = int(np.max(y_true))\r\n            return [str(index) for index in range(max_label + 1)]\r\n\r\n        raise ValueError(\r\n            \"class_labels are required for classification when validation labels \"\r\n            \"are not integer-encoded\"\r\n        )\r\n\r\n    def _is_integer_encoded_labels(\r\n        self,\r\n        y_true: np.ndarray,\r\n        n_classes: int | None = None,\r\n    ) -> bool:\r\n        if y_true.ndim != 1:\r\n            return False\r\n\r\n        if not np.issubdtype(y_true.dtype, np.number):\r\n            return False\r\n\r\n        rounded = np.rint(y_true).astype(int)\r\n        if not np.allclose(y_true, rounded):\r\n            return False\r\n\r\n        if np.any(rounded < 0):\r\n            return False\r\n\r\n        if n_classes is not None and np.any(rounded >= n_classes):\r\n            return False\r\n\r\n        return True\r\n\r\n    def _read_target_vector(self, uri: str) -> np.ndarray:\r\n        df = self._read_parquet_dataframe(uri)\r\n\r\n        if df.shape[1] != 1:\r\n            raise ValueError(\r\n                f\"Expected a single target column in '{uri}', found {df.shape[1]}\"\r\n            )\r\n\r\n        return df.iloc[:, 0].to_numpy()\r\n\r\n    def _assign_tree_uris_to_workers(\r\n        self,\r\n        workers: list[WorkerLike],\r\n        tree_uris: list[str],\r\n    ) -> list[tuple[WorkerLike, list[str]]]:\r\n        if not workers or not tree_uris:\r\n            return []\r\n\r\n        ordered_workers = sorted(workers, key=lambda worker: worker.worker_id)\r\n        shard_count = min(len(ordered_workers), len(tree_uris))\r\n        buckets: list[list[str]] = [[] for _ in range(shard_count)]\r\n\r\n        for index, uri in enumerate(tree_uris):\r\n            buckets[index % shard_count].append(uri)\r\n\r\n        assignments: list[tuple[WorkerLike, list[str]]] = []\r\n        for worker, bucket in zip(ordered_workers[:shard_count], buckets):\r\n            if bucket:\r\n                assignments.append((worker, bucket))\r\n\r\n        return assignments\r\n\r\n    def _read_parquet_dataframe(self, uri: str) -> pd.DataFrame:\r\n        path = self._normalize_uri(uri)\r\n        return pd.read_parquet(path)\r\n\r\n    def _normalize_uri(self, uri: str) -> str:\r\n        import os\r\n        from urllib.parse import urlparse, unquote\r\n        from urllib.request import url2pathname\r\n\r\n        parsed = urlparse(uri)\r\n\r\n        if parsed.scheme == \"\":\r\n            return uri\r\n\r\n        if parsed.scheme != \"file\":\r\n            return uri\r\n\r\n        path = url2pathname(unquote(parsed.path))\r\n\r\n        if os.name == \"nt\":\r\n            if parsed.netloc:\r\n                path = f\"//{parsed.netloc}{path}\"\r\n            elif path.startswith(\"/\") and len(path) >= 3 and path[2] == \":\":\r\n                path = path[1:]\r\n\r\n        return path
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/masterPackage/validation_coordinator.py b/masterPackage/validation_coordinator.py
+--- a/masterPackage/validation_coordinator.py	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/masterPackage/validation_coordinator.py	(date 1779197003175)
+@@ -279,7 +279,7 @@
+             accuracy=accuracy,
+             classification_report=report,
+             confusion_matrix=confusion,
+-            feature_importances=[0.0] * n_features,
++            feature_importances= n_features,
+             evaluated_at=time.time(),
+         )
+ 
+@@ -431,4 +431,31 @@
+             elif path.startswith("/") and len(path) >= 3 and path[2] == ":":
+                 path = path[1:]
+ 
+-        return path
+\ No newline at end of file
++        return path
++
++    def _aggregate_feature_importances(
++            self,
++            tree_artifacts: Sequence[TreeArtifactMetadata],
++            n_features: int,
++    ) -> list[float]:
++        vectors: list[np.ndarray] = []
++
++        for artifact in tree_artifacts:
++            raw = getattr(artifact, "feature_importances", None)
++            if not raw:
++                continue
++
++            vec = np.asarray(raw, dtype=float).ravel()
++
++            if vec.size != n_features:
++                padded = np.zeros(n_features, dtype=float)
++                limit = min(n_features, vec.size)
++                padded[:limit] = vec[:limit]
++                vec = padded
++
++            vectors.append(vec)
++
++        if not vectors:
++            return [0.0] * n_features
++
++        return np.mean(np.vstack(vectors), axis=0).tolist()
+\ No newline at end of file
+Index: masterPackage/worker_client.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nfrom dataclasses import dataclass\r\nfrom typing import Sequence\r\n\r\nimport grpc\r\nimport numpy as np\r\n\r\nimport rf_v2_pb2 as rf_pb2\r\nimport rf_v2_pb2_grpc as rf_pb2_grpc\r\n\r\nfrom common.contracts import (\r\n    ShardTrainingResult,\r\n    TrainingShard,\r\n    TreeArtifactMetadata,\r\n)\r\nfrom common.enums import TreeStatus\r\n\r\nGRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB\r\n\r\nGRPC_OPTIONS = [\r\n    (\"grpc.max_send_message_length\", GRPC_MAX_MESSAGE_LENGTH),\r\n    (\"grpc.max_receive_message_length\", GRPC_MAX_MESSAGE_LENGTH),\r\n]\r\n\r\n@dataclass(slots=True)\r\nclass PredictionShardResult:\r\n    worker_id: str\r\n    success: bool\r\n    error_message: str | None\r\n    values: np.ndarray\r\n\r\n\r\nclass WorkerClient:\r\n    \"\"\"\r\n    Responsabilità:\r\n    - incapsulare le chiamate RPC master -> worker\r\n    - costruire i protobuf request a partire dai contratti del dominio\r\n    - trasformare le protobuf response in oggetti Python del progetto\r\n\r\n    Nota:\r\n    questa classe NON decide scheduling, retry o orchestration.\r\n    Quella logica deve stare nel TrainingOrchestrator / InferenceCoordinator.\r\n    \"\"\"\r\n\r\n    def __init__(\r\n        self,\r\n        timeout_train_seconds: float = 600.0,\r\n        timeout_predict_seconds: float = 120.0,\r\n    ) -> None:\r\n        self.timeout_train_seconds = timeout_train_seconds\r\n        self.timeout_predict_seconds = timeout_predict_seconds\r\n\r\n    def train_shard(\r\n        self,\r\n        worker_host: str,\r\n        worker_port: int,\r\n        shard: TrainingShard,\r\n    ) -> ShardTrainingResult:\r\n        request = self._build_train_shard_request(shard)\r\n        response = self._call_train_shard(\r\n            worker_host=worker_host,\r\n            worker_port=worker_port,\r\n            request=request,\r\n        )\r\n        return self._build_train_shard_result_from_response(\r\n            job_id=shard.job_id,\r\n            experiment_id=shard.experiment_id,\r\n            task_id=shard.task_id,\r\n            response=response,\r\n        )\r\n\r\n    def predict_shard(\r\n        self,\r\n        worker_host: str,\r\n        worker_port: int,\r\n        model_id: str,\r\n        experiment_id: str,\r\n        task_type: str,\r\n        features: np.ndarray,\r\n        tree_artifact_uris: Sequence[str],\r\n        class_labels: Sequence[str] | None = None,\r\n    ) -> PredictionShardResult:\r\n        request = self._build_predict_shard_request(\r\n            model_id=model_id,\r\n            experiment_id=experiment_id,\r\n            task_type=task_type,\r\n            features=features,\r\n            tree_artifact_uris=tree_artifact_uris,\r\n            class_labels=class_labels or [],\r\n        )\r\n        response = self._call_predict_shard(\r\n            worker_host=worker_host,\r\n            worker_port=worker_port,\r\n            request=request,\r\n        )\r\n        return self._build_prediction_result_from_response(response)\r\n\r\n    def _build_train_shard_request(\r\n        self,\r\n        shard: TrainingShard,\r\n    ) -> rf_pb2.TrainShardRequest:\r\n        fc = shard.forest_config\r\n\r\n        max_depth = 0 if fc.max_depth is None else fc.max_depth\r\n        max_features = \"none\" if fc.max_features is None else str(fc.max_features)\r\n        lease_expires_at_unix_ms = int(shard.lease_expires_at_ts * 1000)\r\n\r\n        return rf_pb2.TrainShardRequest(\r\n            task_id=shard.task_id,\r\n            attempt_id=shard.attempt_id,\r\n            job_id=shard.job_id,\r\n            experiment_id=shard.experiment_id,\r\n            assigned_worker_id=shard.assigned_worker_id,\r\n            tree_start_index=shard.tree_start_index,\r\n            tree_count=shard.tree_count,\r\n            task_type=fc.task_type,\r\n            n_estimators=fc.n_estimators,\r\n            max_depth=max_depth,\r\n            max_features=max_features,\r\n            min_samples_split=fc.min_samples_split,\r\n            min_samples_leaf=fc.min_samples_leaf,\r\n            criterion=fc.criterion,\r\n            bootstrap=fc.bootstrap,\r\n            global_random_seed=fc.global_random_seed,\r\n            train_features_uri=shard.train_features_uri,\r\n            train_labels_uri=shard.train_labels_uri,\r\n            artifact_output_dir=shard.artifact_output_dir,\r\n            seed_base=shard.seed_base,\r\n            lease_expires_at_unix_ms=lease_expires_at_unix_ms,\r\n        )\r\n\r\n    def _build_train_shard_result_from_response(\r\n        self,\r\n        job_id: str,\r\n        experiment_id: str,\r\n        task_id: str,\r\n        response: rf_pb2.TrainShardResponse,\r\n    ) -> ShardTrainingResult:\r\n        tree_artifacts: list[TreeArtifactMetadata] = []\r\n\r\n        for artifact in response.artifacts:\r\n            tree_artifacts.append(\r\n                TreeArtifactMetadata(\r\n                    tree_id=artifact.tree_id,\r\n                    job_id=job_id,\r\n                    experiment_id=experiment_id,\r\n                    task_id=task_id,\r\n                    tree_index=artifact.tree_index,\r\n                    worker_id=artifact.worker_id,\r\n                    seed=artifact.seed,\r\n                    artifact_uri=artifact.artifact_uri,\r\n                    status=TreeStatus.COMPLETED if response.success else TreeStatus.FAILED,\r\n                    training_time_seconds=artifact.training_time_seconds,\r\n                )\r\n            )\r\n\r\n        return ShardTrainingResult(\r\n            task_id=response.task_id,\r\n            attempt_id=response.attempt_id,\r\n            worker_id=response.worker_id,\r\n            completed_tree_ids=list(response.completed_tree_ids),\r\n            failed_tree_ids=list(response.failed_tree_ids),\r\n            success=response.success,\r\n            error_message=response.error if response.error else None,\r\n            tree_artifacts=tree_artifacts,\r\n            completed_tree_count=len(response.completed_tree_ids),\r\n            failed_tree_count=len(response.failed_tree_ids),\r\n            elapsed_time_seconds=response.elapsed_time_seconds,\r\n        )\r\n\r\n    def _build_predict_shard_request(\r\n        self,\r\n        model_id: str,\r\n        experiment_id: str,\r\n        task_type: str,\r\n        features: np.ndarray,\r\n        tree_artifact_uris: Sequence[str],\r\n        class_labels: Sequence[str],\r\n    ) -> rf_pb2.PredictShardRequest:\r\n        matrix = self._matrix_to_proto(features)\r\n\r\n        return rf_pb2.PredictShardRequest(\r\n            model_id=model_id,\r\n            experiment_id=experiment_id,\r\n            task_type=task_type,\r\n            features=matrix,\r\n            tree_artifact_uris=list(tree_artifact_uris),\r\n            class_labels=list(class_labels),\r\n        )\r\n\r\n    def _build_prediction_result_from_response(\r\n        self,\r\n        response: rf_pb2.PredictShardResponse,\r\n    ) -> PredictionShardResult:\r\n        if response.n_rows < 0 or response.n_cols < 0:\r\n            raise ValueError(\"Invalid prediction response shape\")\r\n\r\n        expected_size = response.n_rows * response.n_cols\r\n        if len(response.values) != expected_size:\r\n            raise ValueError(\r\n                f\"PredictShardResponse shape mismatch: expected {expected_size} values, \"\r\n                f\"got {len(response.values)}\"\r\n            )\r\n\r\n        values = np.asarray(response.values, dtype=float).reshape(\r\n            response.n_rows,\r\n            response.n_cols,\r\n        )\r\n\r\n        return PredictionShardResult(\r\n            worker_id=response.worker_id,\r\n            success=response.success,\r\n            error_message=response.error if response.error else None,\r\n            values=values,\r\n        )\r\n\r\n    def _call_train_shard(\r\n        self,\r\n        worker_host: str,\r\n        worker_port: int,\r\n        request: rf_pb2.TrainShardRequest,\r\n    ) -> rf_pb2.TrainShardResponse:\r\n        address = f\"{worker_host}:{worker_port}\"\r\n        with grpc.insecure_channel(address, options=GRPC_OPTIONS) as channel:\r\n            stub = rf_pb2_grpc.WorkerServiceStub(channel)\r\n            return stub.TrainShard(request, timeout=self.timeout_train_seconds)\r\n\r\n    def _call_predict_shard(\r\n        self,\r\n        worker_host: str,\r\n        worker_port: int,\r\n        request: rf_pb2.PredictShardRequest,\r\n    ) -> rf_pb2.PredictShardResponse:\r\n        address = f\"{worker_host}:{worker_port}\"\r\n        with grpc.insecure_channel(address, options=GRPC_OPTIONS) as channel:\r\n            stub = rf_pb2_grpc.WorkerServiceStub(channel)\r\n            return stub.PredictShard(request, timeout=self.timeout_predict_seconds)\r\n\r\n    def _matrix_to_proto(self, arr: np.ndarray) -> rf_pb2.DenseMatrix:\r\n        arr = np.asarray(arr, dtype=float)\r\n        if arr.ndim != 2:\r\n            raise ValueError(\"Expected a 2D feature matrix\")\r\n\r\n        return rf_pb2.DenseMatrix(\r\n            values=arr.ravel().tolist(),\r\n            n_rows=arr.shape[0],\r\n            n_cols=arr.shape[1],\r\n        )
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/masterPackage/worker_client.py b/masterPackage/worker_client.py
+--- a/masterPackage/worker_client.py	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/masterPackage/worker_client.py	(date 1779195806098)
+@@ -152,6 +152,7 @@
+                     artifact_uri=artifact.artifact_uri,
+                     status=TreeStatus.COMPLETED if response.success else TreeStatus.FAILED,
+                     training_time_seconds=artifact.training_time_seconds,
++                    feature_importances=list(artifact.feature_importances),
+                 )
+             )
+ 
+Index: worker/mappers/tree_artifact_mapper.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import rf_v2_pb2 as rf_pb2\r\nfrom common.contracts import TreeArtifactMetadata\r\n\r\n\r\ndef to_proto_tree_artifact(a: TreeArtifactMetadata) -> rf_pb2.TrainedTreeArtifact:\r\n    return rf_pb2.TrainedTreeArtifact(\r\n        tree_id=a.tree_id,\r\n        experiment_id=a.experiment_id,\r\n        tree_index=a.tree_index,\r\n        artifact_uri=a.artifact_uri,\r\n        worker_id=a.worker_id,\r\n        seed=a.seed,\r\n        training_time_seconds=a.training_time_seconds,\r\n    )
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/mappers/tree_artifact_mapper.py b/worker/mappers/tree_artifact_mapper.py
+--- a/worker/mappers/tree_artifact_mapper.py	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/worker/mappers/tree_artifact_mapper.py	(date 1779195699234)
+@@ -11,4 +11,5 @@
+         worker_id=a.worker_id,
+         seed=a.seed,
+         training_time_seconds=a.training_time_seconds,
++        feature_importances=list(a.feature_importances),
+     )
+\ No newline at end of file
+Index: masterPackage/test_evaluator.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nimport time\r\nfrom concurrent.futures import ThreadPoolExecutor, as_completed\r\nfrom dataclasses import dataclass\r\nfrom typing import Optional, Protocol, Sequence, Any\r\n\r\nimport numpy as np\r\nimport pandas as pd\r\nfrom sklearn.metrics import (\r\n    accuracy_score,\r\n    classification_report,\r\n    confusion_matrix,\r\n    mean_squared_error,\r\n    r2_score,\r\n)\r\n\r\nfrom common.contracts import TreeArtifactMetadata, ValidationMetrics\r\n\r\n@dataclass(slots=True)\r\nclass TestEvaluationResult:\r\n    metrics: ValidationMetrics\r\n\r\n    predicted_labels: list[str] | None\r\n    predicted_values: list[float] | None\r\n\r\n    evaluated_rows: int\r\n    model_id: str\r\n\r\nclass WorkerLike(Protocol):\r\n    worker_id: str\r\n    host: str\r\n    port: int\r\n\r\n\r\nclass WorkerRegistryLike(Protocol):\r\n    def alive_workers(self) -> list[WorkerLike]:\r\n        ...\r\n\r\n    def get_retry_candidate(\r\n        self,\r\n        exclude_worker_id: str | None = None,\r\n    ) -> Optional[WorkerLike]:\r\n        ...\r\n\r\n\r\nclass TestEvaluator:\r\n    \"\"\"\r\n    Responsabilità:\r\n    - leggere il validation split persistito\r\n    - distribuire gli alberi ai worker vivi\r\n    - raccogliere predizioni parziali\r\n    - aggregare il risultato finale\r\n    - produrre ValidationMetrics\r\n\r\n    Nota:\r\n    questa versione usa i tree artifact già addestrati.\r\n\r\n    Per classificazione supporta due formati di risposta dal worker:\r\n    1) formato corretto/atteso:\r\n       matrice (n_samples, n_classes) con voti parziali\r\n    2) fallback temporaneo:\r\n       matrice (n_samples, 1) con classe predetta localmente dal worker\r\n       -> utile finché il lato worker non viene riallineato del tutto\r\n    \"\"\"\r\n\r\n    def __init__(\r\n        self,\r\n        leadership_guard,\r\n        worker_registry: WorkerRegistryLike,\r\n        worker_client,\r\n        max_parallel_requests: int | None = None,\r\n    ) -> None:\r\n        self.leadership_guard = leadership_guard\r\n        self.worker_registry = worker_registry\r\n        self.worker_client = worker_client\r\n        self.max_parallel_requests = max_parallel_requests\r\n\r\n    def evaluate_model(\r\n            self,\r\n            model_id: str,\r\n            experiment_id: str,\r\n            task_type: str,\r\n            test_features_uri: str,\r\n            test_labels_uri: str,\r\n            tree_artifacts: list[TreeArtifactMetadata],\r\n            class_labels: Sequence[str] | None = None,\r\n    ) -> TestEvaluationResult:\r\n        self.leadership_guard.require_leader()\r\n\r\n        if not tree_artifacts:\r\n            raise ValueError(\r\n                f\"Model '{model_id}' has no tree artifacts for test evaluation\"\r\n            )\r\n\r\n        X_test = self._read_parquet_dataframe(test_features_uri).to_numpy(dtype=float)\r\n        y_test = self._read_target_vector(test_labels_uri)\r\n\r\n        if X_test.ndim != 2:\r\n            raise ValueError(\"Test features must be a 2D matrix\")\r\n        if X_test.shape[0] == 0:\r\n            raise ValueError(\"Test split is empty\")\r\n        if y_test.shape[0] != X_test.shape[0]:\r\n            raise ValueError(\r\n                \"Test features/labels size mismatch: \"\r\n                f\"{X_test.shape[0]} rows vs {y_test.shape[0]} labels\"\r\n            )\r\n\r\n        alive_workers = self.worker_registry.alive_workers()\r\n        if not alive_workers:\r\n            raise RuntimeError(\"No alive workers available for test evaluation\")\r\n\r\n        tree_uris = [artifact.artifact_uri for artifact in tree_artifacts]\r\n        assignments = self._assign_tree_uris_to_workers(\r\n            workers=alive_workers,\r\n            tree_uris=tree_uris,\r\n        )\r\n        if not assignments:\r\n            raise RuntimeError(\"No test assignments could be built\")\r\n\r\n        responses = self._collect_prediction_responses(\r\n            model_id=model_id,\r\n            experiment_id=experiment_id,\r\n            task_type=task_type,\r\n            features=X_test,\r\n            class_labels=class_labels,\r\n            assignments=assignments,\r\n        )\r\n\r\n        if task_type == \"classification\":\r\n            return self._build_classification_result(\r\n                model_id=model_id,\r\n                experiment_id=experiment_id,\r\n                y_true=y_test,\r\n                responses=responses,\r\n                class_labels=class_labels,\r\n                n_features=X_test.shape[1],\r\n            )\r\n\r\n        if task_type == \"regression\":\r\n            return self._build_regression_result(\r\n                model_id=model_id,\r\n                experiment_id=experiment_id,\r\n                y_true=y_test,\r\n                responses=responses,\r\n                tree_count=len(tree_artifacts),\r\n                n_features=X_test.shape[1],\r\n            )\r\n\r\n        raise ValueError(f\"Unsupported task_type '{task_type}'\")\r\n\r\n    def _collect_prediction_responses(\r\n            self,\r\n            model_id: str,\r\n            experiment_id: str,\r\n            task_type: str,\r\n            features: np.ndarray,\r\n            class_labels: Sequence[str] | None,\r\n            assignments: list[tuple[WorkerLike, list[str]]],\r\n    ) -> list:\r\n        responses = []\r\n        max_workers = self.max_parallel_requests or len(assignments)\r\n        max_workers = min(max_workers, len(assignments))\r\n\r\n        with ThreadPoolExecutor(max_workers=max_workers) as pool:\r\n            future_map = {}\r\n\r\n            for worker, uri_shard in assignments:\r\n                future = pool.submit(\r\n                    self.worker_client.predict_shard,\r\n                    worker.host,\r\n                    worker.port,\r\n                    model_id,\r\n                    experiment_id,\r\n                    task_type,\r\n                    features,\r\n                    uri_shard,\r\n                    class_labels,\r\n                )\r\n                future_map[future] = (worker, uri_shard)\r\n\r\n            for future in as_completed(future_map):\r\n                worker, uri_shard = future_map[future]\r\n                result = future.result()\r\n\r\n                if not result.success:\r\n                    retry_worker = self.worker_registry.get_retry_candidate(\r\n                        exclude_worker_id=worker.worker_id\r\n                    )\r\n                    if retry_worker is not None:\r\n                        result = self.worker_client.predict_shard(\r\n                            retry_worker.host,\r\n                            retry_worker.port,\r\n                            model_id,\r\n                            experiment_id,\r\n                            task_type,\r\n                            features,\r\n                            uri_shard,\r\n                            class_labels,\r\n                        )\r\n\r\n                if not result.success:\r\n                    raise RuntimeError(\r\n                        f\"Test shard failed on worker {worker.worker_id}: \"\r\n                        f\"{result.error_message}\"\r\n                    )\r\n\r\n                responses.append(result)\r\n\r\n        return responses\r\n\r\n    def _build_classification_result(\r\n            self,\r\n            model_id: str,\r\n            experiment_id: str,\r\n            y_true: np.ndarray,\r\n            responses: list,\r\n            class_labels: Sequence[str] | None,\r\n            n_features: int,\r\n    ) -> TestEvaluationResult:\r\n        resolved_class_labels = self._resolve_class_labels(y_true, class_labels)\r\n        n_samples = y_true.shape[0]\r\n        n_classes = len(resolved_class_labels)\r\n\r\n        aggregated_votes = np.zeros((n_samples, n_classes), dtype=float)\r\n\r\n        for response in responses:\r\n            values = response.values\r\n\r\n            if values.shape == aggregated_votes.shape:\r\n                aggregated_votes += values\r\n                continue\r\n\r\n            if values.shape == (n_samples, 1):\r\n                predicted_indices = np.rint(values[:, 0]).astype(int)\r\n                if np.any(predicted_indices < 0) or np.any(predicted_indices >= n_classes):\r\n                    raise ValueError(\r\n                        \"Invalid classification shard response values: \"\r\n                        f\"indices out of range for {n_classes} classes\"\r\n                    )\r\n                aggregated_votes[np.arange(n_samples), predicted_indices] += 1.0\r\n                continue\r\n\r\n            raise ValueError(\r\n                \"Invalid classification shard response shape: \"\r\n                f\"expected {(n_samples, n_classes)} or {(n_samples, 1)}, got {values.shape}\"\r\n            )\r\n\r\n        final_indices = np.argmax(aggregated_votes, axis=1)\r\n        predicted_labels = [resolved_class_labels[index] for index in final_indices]\r\n\r\n        if self._is_integer_encoded_labels(y_true, n_classes):\r\n            y_true_for_metrics = y_true.astype(int)\r\n            y_pred_for_metrics = final_indices.astype(int)\r\n            report = classification_report(\r\n                y_true_for_metrics,\r\n                y_pred_for_metrics,\r\n                output_dict=True,\r\n                zero_division=0,\r\n            )\r\n            confusion = confusion_matrix(\r\n                y_true_for_metrics,\r\n                y_pred_for_metrics,\r\n            ).tolist()\r\n            accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))\r\n        else:\r\n            y_true_for_metrics = [str(item) for item in y_true.tolist()]\r\n            y_pred_for_metrics = predicted_labels\r\n            report = classification_report(\r\n                y_true_for_metrics,\r\n                y_pred_for_metrics,\r\n                output_dict=True,\r\n                zero_division=0,\r\n            )\r\n            confusion = confusion_matrix(\r\n                y_true_for_metrics,\r\n                y_pred_for_metrics,\r\n            ).tolist()\r\n            accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))\r\n\r\n        metrics = ValidationMetrics(\r\n            experiment_id=experiment_id,\r\n            accuracy=accuracy,\r\n            classification_report=report,\r\n            confusion_matrix=confusion,\r\n            feature_importances=[0.0] * n_features,\r\n            evaluated_at=time.time(),\r\n        )\r\n\r\n        return TestEvaluationResult(\r\n            metrics=metrics,\r\n            predicted_labels=predicted_labels,\r\n            predicted_values=None,\r\n            evaluated_rows=n_samples,\r\n            model_id=model_id,\r\n        )\r\n\r\n    def _build_regression_result(\r\n            self,\r\n            model_id: str,\r\n            experiment_id: str,\r\n            y_true: np.ndarray,\r\n            responses: list,\r\n            tree_count: int,\r\n            n_features: int,\r\n    ) -> TestEvaluationResult:\r\n        n_samples = y_true.shape[0]\r\n        aggregated_sum = np.zeros((n_samples, 1), dtype=float)\r\n\r\n        for response in responses:\r\n            values = response.values\r\n            if values.shape != aggregated_sum.shape:\r\n                raise ValueError(\r\n                    \"Invalid regression shard response shape: \"\r\n                    f\"expected {aggregated_sum.shape}, got {values.shape}\"\r\n                )\r\n            aggregated_sum += values\r\n\r\n        predicted_values = (aggregated_sum[:, 0] / tree_count).tolist()\r\n\r\n        mse = float(mean_squared_error(y_true, predicted_values))\r\n        rmse = float(np.sqrt(mse))\r\n        r2 = float(r2_score(y_true, predicted_values))\r\n\r\n        metrics = ValidationMetrics(\r\n            experiment_id=experiment_id,\r\n            accuracy=0.0,\r\n            classification_report={\r\n                \"mse\": mse,\r\n                \"rmse\": rmse,\r\n                \"r2\": r2,\r\n            },\r\n            confusion_matrix=[],\r\n            feature_importances=[0.0] * n_features,\r\n            evaluated_at=time.time(),\r\n        )\r\n\r\n        return TestEvaluationResult(\r\n            metrics=metrics,\r\n            predicted_labels=None,\r\n            predicted_values=predicted_values,\r\n            evaluated_rows=n_samples,\r\n            model_id=model_id,\r\n        )\r\n\r\n    def _resolve_class_labels(\r\n        self,\r\n        y_true: np.ndarray,\r\n        class_labels: Sequence[str] | None,\r\n    ) -> list[str]:\r\n        if class_labels:\r\n            return [str(label) for label in class_labels]\r\n\r\n        if self._is_integer_encoded_labels(y_true):\r\n            max_label = int(np.max(y_true))\r\n            return [str(index) for index in range(max_label + 1)]\r\n\r\n        raise ValueError(\r\n            \"class_labels are required for classification when validation labels \"\r\n            \"are not integer-encoded\"\r\n        )\r\n\r\n    def _is_integer_encoded_labels(\r\n        self,\r\n        y_true: np.ndarray,\r\n        n_classes: int | None = None,\r\n    ) -> bool:\r\n        if y_true.ndim != 1:\r\n            return False\r\n\r\n        if not np.issubdtype(y_true.dtype, np.number):\r\n            return False\r\n\r\n        rounded = np.rint(y_true).astype(int)\r\n        if not np.allclose(y_true, rounded):\r\n            return False\r\n\r\n        if np.any(rounded < 0):\r\n            return False\r\n\r\n        if n_classes is not None and np.any(rounded >= n_classes):\r\n            return False\r\n\r\n        return True\r\n\r\n    def _read_target_vector(self, uri: str) -> np.ndarray:\r\n        df = self._read_parquet_dataframe(uri)\r\n\r\n        if df.shape[1] != 1:\r\n            raise ValueError(\r\n                f\"Expected a single target column in '{uri}', found {df.shape[1]}\"\r\n            )\r\n\r\n        return df.iloc[:, 0].to_numpy()\r\n\r\n    def _assign_tree_uris_to_workers(\r\n        self,\r\n        workers: list[WorkerLike],\r\n        tree_uris: list[str],\r\n    ) -> list[tuple[WorkerLike, list[str]]]:\r\n        if not workers or not tree_uris:\r\n            return []\r\n\r\n        ordered_workers = sorted(workers, key=lambda worker: worker.worker_id)\r\n        shard_count = min(len(ordered_workers), len(tree_uris))\r\n        buckets: list[list[str]] = [[] for _ in range(shard_count)]\r\n\r\n        for index, uri in enumerate(tree_uris):\r\n            buckets[index % shard_count].append(uri)\r\n\r\n        assignments: list[tuple[WorkerLike, list[str]]] = []\r\n        for worker, bucket in zip(ordered_workers[:shard_count], buckets):\r\n            if bucket:\r\n                assignments.append((worker, bucket))\r\n\r\n        return assignments\r\n\r\n    def _read_parquet_dataframe(self, uri: str) -> pd.DataFrame:\r\n        path = self._normalize_uri(uri)\r\n        return pd.read_parquet(path)\r\n\r\n    def _normalize_uri(self, uri: str) -> str:\r\n        import os\r\n        from urllib.parse import urlparse, unquote\r\n        from urllib.request import url2pathname\r\n\r\n        parsed = urlparse(uri)\r\n\r\n        if parsed.scheme == \"\":\r\n            return uri\r\n\r\n        if parsed.scheme != \"file\":\r\n            return uri\r\n\r\n        path = url2pathname(unquote(parsed.path))\r\n\r\n        if os.name == \"nt\":\r\n            if parsed.netloc:\r\n                path = f\"//{parsed.netloc}{path}\"\r\n            elif path.startswith(\"/\") and len(path) >= 3 and path[2] == \":\":\r\n                path = path[1:]\r\n\r\n        return path
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/masterPackage/test_evaluator.py b/masterPackage/test_evaluator.py
+--- a/masterPackage/test_evaluator.py	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/masterPackage/test_evaluator.py	(date 1779197751595)
+@@ -440,4 +440,31 @@
+             elif path.startswith("/") and len(path) >= 3 and path[2] == ":":
+                 path = path[1:]
+ 
+-        return path
+\ No newline at end of file
++        return path
++
++    def _aggregate_feature_importances(
++            self,
++            tree_artifacts: Sequence[TreeArtifactMetadata],
++            n_features: int,
++    ) -> list[float]:
++        vectors: list[np.ndarray] = []
++
++        for artifact in tree_artifacts:
++            raw = getattr(artifact, "feature_importances", None)
++            if not raw:
++                continue
++
++            vec = np.asarray(raw, dtype=float).ravel()
++
++            if vec.size != n_features:
++                padded = np.zeros(n_features, dtype=float)
++                limit = min(n_features, vec.size)
++                padded[:limit] = vec[:limit]
++                vec = padded
++
++            vectors.append(vec)
++
++        if not vectors:
++            return [0.0] * n_features
++
++        return np.mean(np.vstack(vectors), axis=0).tolist()
+\ No newline at end of file
+Index: worker/training/tree_artifact_writer.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\n\r\nfrom common.ids import generate_tree_id\r\nfrom common.contracts import TreeArtifactMetadata\r\nfrom common.enums import TreeStatus\r\nfrom worker.storage.artifact_store import ArtifactStore\r\nfrom worker.storage.paths import (\r\n    tree_artifact_path,\r\n    tree_metadata_path,\r\n)\r\n\r\n\r\nclass TreeArtifactWriter:\r\n    \"\"\"\r\n    Responsabile del salvataggio degli alberi (artifact) e dei relativi metadata.\r\n\r\n    Garantisce:\r\n    - path deterministici\r\n    - idempotenza storage\r\n    - consistenza tra artifact e metadata\r\n    \"\"\"\r\n\r\n    def __init__(self, artifact_store: ArtifactStore, worker_id: str):\r\n        self.store: ArtifactStore = artifact_store\r\n        self.worker_id: str = worker_id\r\n\r\n    def write_tree(\r\n        self,\r\n        model: object,\r\n        job_id: str,\r\n        experiment_id: str,\r\n        task_id: str,\r\n        tree_index: int,\r\n        seed: int,\r\n        training_time_seconds: float,\r\n    ) -> TreeArtifactMetadata:\r\n        \"\"\"\r\n        model: object\r\n        job_id: str\r\n        experiment_id: str\r\n        task_id: str\r\n        tree_index: int\r\n        seed: int\r\n        training_time_seconds: float\r\n\r\n        return: TreeArtifactMetadata\r\n\r\n        Idempotente:\r\n        - metadata esiste → ritorna\r\n        - artifact esiste ma metadata no → ricostruisce\r\n        - niente esiste → scrive tutto\r\n        \"\"\"\r\n\r\n        # --------------------------------------------------\r\n        # 1. Path deterministici\r\n        # --------------------------------------------------\r\n        artifact_key: str = tree_artifact_path(\r\n            job_id=job_id,\r\n            experiment_id=experiment_id,\r\n            tree_index=tree_index,\r\n        )\r\n\r\n        metadata_key: str = tree_metadata_path(\r\n            job_id=job_id,\r\n            experiment_id=experiment_id,\r\n            tree_index=tree_index,\r\n        )\r\n\r\n        tree_id = generate_tree_id(experiment_id, tree_index)\r\n\r\n        # --------------------------------------------------\r\n        # 2. FAST PATH → metadata già esiste\r\n        # (più veloce + evita load modello inutile)\r\n        # --------------------------------------------------\r\n        if self.store.exists(metadata_key):\r\n            data = self.store.load_json(metadata_key)\r\n            return TreeArtifactMetadata.from_dict(data)\r\n\r\n        # --------------------------------------------------\r\n        # 3. Scrittura artifact (idempotente)\r\n        # --------------------------------------------------\r\n        created: bool = self.store.save_tree_artifact_if_not_exists(\r\n            artifact_key,\r\n            model\r\n        )\r\n\r\n        # --------------------------------------------------\r\n        # 4. COSTRUZIONE METADATA (sempre)\r\n        # --------------------------------------------------\r\n        metadata = TreeArtifactMetadata(\r\n            tree_id=tree_id,\r\n            job_id=job_id,\r\n            experiment_id=experiment_id,\r\n            task_id=task_id,\r\n            tree_index=tree_index,\r\n            worker_id=self.worker_id,\r\n            seed=seed,\r\n            artifact_uri=artifact_key,\r\n            status=TreeStatus.COMPLETED,\r\n            training_time_seconds=training_time_seconds,\r\n        )\r\n\r\n        # --------------------------------------------------\r\n        # 5. Scrittura metadata ATOMICA (sempre)\r\n        # --------------------------------------------------\r\n        # ⚠\uFE0F FIX CRITICO:\r\n        # prima usavi save_json nel caso crash → NON atomico\r\n        # ora sempre atomico\r\n        self.store.save_json_atomic(\r\n            metadata_key,\r\n            metadata.to_dict()\r\n        )\r\n\r\n        return metadata
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/worker/training/tree_artifact_writer.py b/worker/training/tree_artifact_writer.py
+--- a/worker/training/tree_artifact_writer.py	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/worker/training/tree_artifact_writer.py	(date 1779195594299)
+@@ -86,7 +86,12 @@
+         )
+ 
+         # --------------------------------------------------
+-        # 4. COSTRUZIONE METADATA (sempre)
++        # 4. Feature importances dal modello addestrato
++        # --------------------------------------------------
++        feature_importances = self._extract_feature_importances(model)
++
++        # --------------------------------------------------
++        # 5. COSTRUZIONE METADATA (sempre)
+         # --------------------------------------------------
+         metadata = TreeArtifactMetadata(
+             tree_id=tree_id,
+@@ -99,17 +104,26 @@
+             artifact_uri=artifact_key,
+             status=TreeStatus.COMPLETED,
+             training_time_seconds=training_time_seconds,
++            feature_importances=feature_importances,
+         )
+ 
+         # --------------------------------------------------
+-        # 5. Scrittura metadata ATOMICA (sempre)
++        # 6. Scrittura metadata ATOMICA (sempre)
+         # --------------------------------------------------
+-        # ⚠️ FIX CRITICO:
+-        # prima usavi save_json nel caso crash → NON atomico
+-        # ora sempre atomico
+         self.store.save_json_atomic(
+             metadata_key,
+             metadata.to_dict()
+         )
+ 
+-        return metadata
+\ No newline at end of file
++        return metadata
++
++    @staticmethod
++    def _extract_feature_importances(model: object) -> list[float]:
++        importances = getattr(model, "feature_importances_", None)
++        if importances is None:
++            return []
++
++        if hasattr(importances, "tolist"):
++            importances = importances.tolist()
++
++        return [float(value) for value in importances]
+\ No newline at end of file
+Index: proto/rf_v2.proto
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>syntax = \"proto3\";\r\n\r\npackage distributedrf;\r\n\r\nenum JobStatus {\r\n  JOB_STATUS_UNSPECIFIED = 0;\r\n  PENDING = 1;\r\n  RUNNING = 2;\r\n  VALIDATING = 3;\r\n  COMPLETED = 4;\r\n  FAILED = 5;\r\n}\r\n\r\nmessage DenseMatrix {\r\n  repeated double values = 1;\r\n  int32 n_rows = 2;\r\n  int32 n_cols = 3;\r\n}\r\n\r\nmessage RegisterWorkerRequest {\r\n  string worker_id = 1;\r\n  string host = 2;\r\n  int32 port = 3;\r\n}\r\n\r\nmessage RegisterWorkerResponse {\r\n  bool accepted = 1;\r\n  string message = 2;\r\n}\r\n\r\nmessage HeartbeatRequest {\r\n  string worker_id = 1;\r\n  int32 running_tasks = 2;\r\n  repeated string active_task_ids = 3;\r\n}\r\n\r\nmessage HeartbeatResponse {\r\n  bool ok = 1;\r\n}\r\n\r\nmessage SubmitTrainingRequest {\r\n  string dataset_url = 1;\r\n  string target_column = 2;\r\n  string task_type = 3;     // classification | regression\r\n  int32 n_estimators_total = 4;\r\n  double validation_ratio = 5;\r\n  double test_ratio = 6;\r\n  bool bootstrap = 7;\r\n  int32 global_random_seed = 8;\r\n\r\n  // JSON or repeated fields can later replace this simplified bootstrap version.\r\n  repeated int32 max_depth_candidates = 9;\r\n  repeated string max_features_candidates = 10;\r\n  repeated int32 min_samples_split_candidates = 11;\r\n  repeated int32 min_samples_leaf_candidates = 12;\r\n  repeated string criterion_candidates = 13;\r\n\r\n  string dataset_scenario = 100;\r\n  repeated string leakage_columns = 101;\r\n}\r\n\r\nmessage SubmitTrainingResponse {\r\n  string job_id = 1;\r\n  JobStatus status = 2;\r\n  string message = 3;\r\n}\r\nmessage SubmitInferenceRequest {\r\n  string model_id = 1;\r\n  DenseMatrix features = 2;\r\n}\r\n\r\nmessage SubmitInferenceResponse {\r\n  bool success = 1;\r\n  string error = 2;\r\n  string task_type = 3;\r\n\r\n  repeated string predicted_labels = 4;\r\n  repeated double predicted_values = 5;\r\n}\r\n\r\nmessage TrainedTreeArtifact {\r\n  string tree_id = 1;\r\n  string experiment_id = 2;\r\n  int32 tree_index = 3;\r\n  string artifact_uri = 4;\r\n  string worker_id = 5;\r\n  int32 seed = 6;\r\n  double training_time_seconds = 7;\r\n} //non c e training_time seconds vedi se serve\r\n\r\nmessage TrainShardRequest {\r\n  string task_id = 1;\r\n  int32 attempt_id = 2;\r\n  string job_id = 3;\r\n  string experiment_id = 4;\r\n  string assigned_worker_id = 5;\r\n\r\n  int32 tree_start_index = 6;\r\n  int32 tree_count = 7;\r\n\r\n  string task_type = 8;\r\n  int32 n_estimators = 9;\r\n  int32 max_depth = 10;\r\n  string max_features = 11;\r\n  int32 min_samples_split = 12;\r\n  int32 min_samples_leaf = 13;\r\n  string criterion = 14;\r\n  bool bootstrap = 15;\r\n  int32 global_random_seed = 16;\r\n\r\n  string train_features_uri = 17;\r\n  string train_labels_uri = 18;\r\n  string artifact_output_dir = 19;\r\n  int32 seed_base = 20;\r\n  int64 lease_expires_at_unix_ms = 21;\r\n}\r\n\r\nmessage TrainShardResponse {\r\n  string task_id = 1;\r\n  int32 attempt_id = 2;\r\n  string worker_id = 3;\r\n  bool success = 4;\r\n  string error = 5;\r\n  repeated TrainedTreeArtifact artifacts = 6;\r\n  repeated string completed_tree_ids = 7;\r\n  repeated string failed_tree_ids = 8;\r\n  double elapsed_time_seconds = 9;\r\n}\r\n\r\nmessage PredictShardRequest {\r\n  string model_id = 1;\r\n  string experiment_id = 2;\r\n  string task_type = 3;\r\n  DenseMatrix features = 4;\r\n  repeated string tree_artifact_uris = 5;\r\n  repeated string class_labels = 6;\r\n}\r\n\r\nmessage PredictShardResponse {\r\n  string worker_id = 1;\r\n  bool success = 2;\r\n  string error = 3;\r\n  repeated double values = 4;\r\n  int32 n_rows = 5;\r\n  int32 n_cols = 6;\r\n}\r\n\r\nservice CoordinatorService {\r\n  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);\r\n  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);\r\n  rpc SubmitTraining(SubmitTrainingRequest) returns (SubmitTrainingResponse);\r\n  rpc SubmitInference(SubmitInferenceRequest) returns (SubmitInferenceResponse);\r\n}\r\n\r\nservice WorkerService {\r\n  rpc TrainShard(TrainShardRequest) returns (TrainShardResponse);\r\n  rpc PredictShard(PredictShardRequest) returns (PredictShardResponse);\r\n}\r\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/proto/rf_v2.proto b/proto/rf_v2.proto
+--- a/proto/rf_v2.proto	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/proto/rf_v2.proto	(date 1779195671090)
+@@ -86,6 +86,7 @@
+   string worker_id = 5;
+   int32 seed = 6;
+   double training_time_seconds = 7;
++  repeated double feature_importances = 8;
+ } //non c e training_time seconds vedi se serve
+ 
+ message TrainShardRequest {
+Index: common/repositories.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nimport json\r\nimport threading\r\nimport time\r\nfrom pathlib import Path\r\nfrom typing import Any, Optional\r\n\r\nfrom .contracts import (\r\n    DatasetSchema,\r\n    ExperimentRecord,\r\n    ForestConfiguration,\r\n    HyperparameterSpace,\r\n    ModelManifest,\r\n    PreparedDataset,\r\n    TaskRecord,\r\n    TrainingJobRecord,\r\n    TrainingRequest,\r\n    ValidationMetrics,\r\n    WorkerProgressSnapshot, TreeArtifactMetadata,\r\n)\r\nfrom .enums import ExperimentStatus, JobStatus, ModelStatus,TaskStatus, TreeStatus\r\nfrom .storage_layout import StorageLayout\r\nfrom typing import Any, Optional\r\nfrom common.contracts import ModelManifest\r\n\r\n\r\nclass JsonFileStore:\r\n    \"\"\"Small atomic JSON store suitable for the first project milestone.\r\n\r\n    The purpose is not performance; it is deterministic persistence and recoverability.\r\n    \"\"\"\r\n\r\n    def __init__(self) -> None:\r\n        self._lock = threading.Lock()\r\n\r\n    def write_json(self, path: str | Path, payload: dict[str, Any]) -> None:\r\n        path = Path(path)\r\n        path.parent.mkdir(parents=True, exist_ok=True)\r\n        temp_path = path.with_suffix(path.suffix + \".tmp\")\r\n        with self._lock:\r\n            with temp_path.open(\"w\", encoding=\"utf-8\") as handle:\r\n                json.dump(payload, handle, indent=2, sort_keys=True)\r\n            temp_path.replace(path)\r\n\r\n    def read_json(self, path: str | Path) -> dict[str, Any]:\r\n        path = Path(path)\r\n        with path.open(\"r\", encoding=\"utf-8\") as handle:\r\n            return json.load(handle)\r\n\r\n    def exists(self, path: str | Path) -> bool:\r\n        return Path(path).exists()\r\n\r\n\r\nclass SharedArtifactStore:\r\n    def __init__(self, root: str | Path, json_store: Optional[JsonFileStore] = None):\r\n        self.layout = StorageLayout(root)\r\n        self.json_store = json_store or JsonFileStore()\r\n        Path(root).mkdir(parents=True, exist_ok=True)\r\n\r\n    def write_json(self, path: str | Path, payload: dict[str, Any]) -> None:\r\n        self.json_store.write_json(path, payload)\r\n\r\n    def read_json(self, path: str | Path) -> dict[str, Any]:\r\n        return self.json_store.read_json(path)\r\n\r\n    def exists(self, path: str | Path) -> bool:\r\n        return self.json_store.exists(path)\r\n\r\n\r\ndef _job_status_from_raw(value: str | JobStatus) -> JobStatus:\r\n    if isinstance(value, JobStatus):\r\n        return value\r\n    return JobStatus(value)\r\n\r\n\r\ndef _experiment_status_from_raw(value: str | ExperimentStatus) -> ExperimentStatus:\r\n    if isinstance(value, ExperimentStatus):\r\n        return value\r\n    return ExperimentStatus(value)\r\n\r\n\r\ndef _hyperparameter_space_from_dict(payload: dict[str, Any]) -> HyperparameterSpace:\r\n    return HyperparameterSpace(\r\n        n_estimators_candidates=payload[\"n_estimators_candidates\"],\r\n        max_depth_candidates=payload[\"max_depth_candidates\"],\r\n        max_features_candidates=payload[\"max_features_candidates\"],\r\n        min_samples_split_candidates=payload[\"min_samples_split_candidates\"],\r\n        min_samples_leaf_candidates=payload[\"min_samples_leaf_candidates\"],\r\n        criterion_candidates=payload[\"criterion_candidates\"],\r\n        bootstrap=payload[\"bootstrap\"],\r\n        global_random_seed=payload[\"global_random_seed\"],\r\n    )\r\n\r\n\r\ndef _training_request_from_dict(payload: dict[str, Any]) -> TrainingRequest:\r\n    return TrainingRequest(\r\n        job_id=payload[\"job_id\"],\r\n        dataset_uri=payload[\"dataset_uri\"],\r\n        target_column=payload[\"target_column\"],\r\n        task_type=payload[\"task_type\"],\r\n        hyperparameter_space=_hyperparameter_space_from_dict(payload[\"hyperparameter_space\"]),\r\n        n_estimators_total=payload[\"n_estimators_total\"],\r\n        validation_ratio=payload[\"validation_ratio\"],\r\n        test_ratio=payload[\"test_ratio\"],\r\n        global_random_seed=payload[\"global_random_seed\"],\r\n        bootstrap=payload[\"bootstrap\"],\r\n        created_at=payload.get(\"created_at\", 0.0),\r\n    )\r\n\r\n\r\ndef _dataset_schema_from_dict(payload: dict[str, Any]) -> DatasetSchema:\r\n    return DatasetSchema(\r\n        dataset_uri=payload[\"dataset_uri\"],\r\n        target_column=payload[\"target_column\"],\r\n        feature_names=payload[\"feature_names\"],\r\n        task_type=payload[\"task_type\"],\r\n        label_mapping=payload.get(\"label_mapping\"),\r\n        preprocessing_uri=payload.get(\"preprocessing_uri\"),\r\n    )\r\n\r\n\r\ndef _prepared_dataset_from_dict(payload: dict[str, Any]) -> PreparedDataset:\r\n    return PreparedDataset(\r\n        dataset_id=payload[\"dataset_id\"],\r\n        schema=_dataset_schema_from_dict(payload[\"schema\"]),\r\n        train_features_uri=payload[\"train_features_uri\"],\r\n        train_labels_uri=payload[\"train_labels_uri\"],\r\n        validation_features_uri=payload[\"validation_features_uri\"],\r\n        validation_labels_uri=payload[\"validation_labels_uri\"],\r\n        test_features_uri=payload[\"test_features_uri\"],\r\n        test_labels_uri=payload[\"test_labels_uri\"],\r\n        class_labels=payload.get(\"class_labels\"),\r\n        n_features=payload[\"n_features\"],\r\n        n_train=payload[\"n_train\"],\r\n        n_validation=payload[\"n_validation\"],\r\n        n_test=payload[\"n_test\"],\r\n    )\r\n\r\n\r\ndef _forest_configuration_from_dict(payload: dict[str, Any]) -> ForestConfiguration:\r\n    return ForestConfiguration(\r\n        experiment_id=payload[\"experiment_id\"],\r\n        task_type=payload[\"task_type\"],\r\n        n_estimators=payload[\"n_estimators\"],\r\n        max_depth=payload.get(\"max_depth\"),\r\n        max_features=payload.get(\"max_features\"),\r\n        min_samples_split=payload[\"min_samples_split\"],\r\n        min_samples_leaf=payload[\"min_samples_leaf\"],\r\n        criterion=payload[\"criterion\"],\r\n        bootstrap=payload[\"bootstrap\"],\r\n        global_random_seed=payload[\"global_random_seed\"],\r\n    )\r\n\r\n\r\ndef _validation_metrics_from_dict(payload: dict[str, Any]) -> ValidationMetrics:\r\n    return ValidationMetrics(\r\n        experiment_id=payload[\"experiment_id\"],\r\n        accuracy=payload[\"accuracy\"],\r\n        classification_report=payload[\"classification_report\"],\r\n        confusion_matrix=payload[\"confusion_matrix\"],\r\n        feature_importances=payload[\"feature_importances\"],\r\n        evaluated_at=payload.get(\"evaluated_at\", 0.0),\r\n    )\r\n\r\n\r\ndef _experiment_record_from_dict(payload: dict[str, Any]) -> ExperimentRecord:\r\n    validation_metrics_payload = payload.get(\"validation_metrics\")\r\n    validation_metrics = None\r\n    if validation_metrics_payload is not None:\r\n        validation_metrics = _validation_metrics_from_dict(validation_metrics_payload)\r\n\r\n    return ExperimentRecord(\r\n        experiment_id=payload[\"experiment_id\"],\r\n        forest_config=_forest_configuration_from_dict(payload[\"forest_config\"]),\r\n        status=_experiment_status_from_raw(payload[\"status\"]),\r\n        assigned_workers=payload[\"assigned_workers\"],\r\n        expected_tree_count=payload[\"expected_tree_count\"],\r\n        completed_tree_count=payload[\"completed_tree_count\"],\r\n        validation_metrics=validation_metrics,\r\n    )\r\n\r\n\r\ndef _training_job_record_from_dict(payload: dict[str, Any]) -> TrainingJobRecord:\r\n    prepared_dataset_payload = payload.get(\"prepared_dataset\")\r\n    prepared_dataset = None\r\n    if prepared_dataset_payload is not None:\r\n        prepared_dataset = _prepared_dataset_from_dict(prepared_dataset_payload)\r\n\r\n    return TrainingJobRecord(\r\n        job_id=payload[\"job_id\"],\r\n        status=_job_status_from_raw(payload[\"status\"]),\r\n        training_request=_training_request_from_dict(payload[\"training_request\"]),\r\n        prepared_dataset=prepared_dataset,\r\n        experiment_ids=payload.get(\"experiment_ids\", []),\r\n        selected_experiment_id=payload.get(\"selected_experiment_id\"),\r\n        model_id=payload.get(\"model_id\"),\r\n        message=payload.get(\"message\", \"\"),\r\n        created_at=payload.get(\"created_at\", 0.0),\r\n        updated_at=payload.get(\"updated_at\", 0.0),\r\n    )\r\n\r\n\r\nclass JobRepository:\r\n    def __init__(self, artifact_store: SharedArtifactStore):\r\n        self.artifact_store = artifact_store\r\n\r\n    # --------------------------------------------------------\r\n    # basic persistence\r\n    # --------------------------------------------------------\r\n\r\n    def save(self, record: TrainingJobRecord) -> None:\r\n        record.updated_at = time.time()\r\n        path = self.artifact_store.layout.job_record_path(record.job_id)\r\n        self.artifact_store.write_json(path, record.to_dict())\r\n\r\n    def exists(self, job_id: str) -> bool:\r\n        path = self.artifact_store.layout.job_record_path(job_id)\r\n        return self.artifact_store.exists(path)\r\n\r\n    def load_raw(self, job_id: str) -> Optional[dict[str, Any]]:\r\n        path = self.artifact_store.layout.job_record_path(job_id)\r\n        if not self.artifact_store.exists(path):\r\n            return None\r\n        return self.artifact_store.read_json(path)\r\n\r\n    def load(self, job_id: str) -> Optional[TrainingJobRecord]:\r\n        payload = self.load_raw(job_id)\r\n        if payload is None:\r\n            return None\r\n        return _training_job_record_from_dict(payload)\r\n\r\n    def list_jobs(self) -> list[TrainingJobRecord]:\r\n        jobs_root = self.artifact_store.layout.root / \"jobs\"\r\n        if not jobs_root.exists():\r\n            return []\r\n\r\n        records: list[TrainingJobRecord] = []\r\n\r\n        for job_dir in jobs_root.iterdir():\r\n            if not job_dir.is_dir():\r\n                continue\r\n\r\n            job_id = job_dir.name\r\n            record = self.load(job_id)\r\n            if record is not None:\r\n                records.append(record)\r\n\r\n        records.sort(key=lambda item: item.created_at)\r\n        return records\r\n\r\n    # --------------------------------------------------------\r\n    # internal update helper\r\n    # --------------------------------------------------------\r\n\r\n    def _update_job(\r\n        self,\r\n        job_id: str,\r\n        *,\r\n        status: Optional[JobStatus] = None,\r\n        message: Optional[str] = None,\r\n        prepared_dataset: Optional[PreparedDataset] = None,\r\n        selected_experiment_id: Optional[str] = None,\r\n        model_id: Optional[str] = None,\r\n        append_experiment_id: Optional[str] = None,\r\n    ) -> TrainingJobRecord:\r\n        record = self.load(job_id)\r\n        if record is None:\r\n            raise ValueError(f\"Job '{job_id}' not found\")\r\n\r\n        if status is not None:\r\n            record.status = status\r\n\r\n        if message is not None:\r\n            record.message = message\r\n\r\n        if prepared_dataset is not None:\r\n            record.prepared_dataset = prepared_dataset\r\n\r\n        if selected_experiment_id is not None:\r\n            record.selected_experiment_id = selected_experiment_id\r\n\r\n        if model_id is not None:\r\n            record.model_id = model_id\r\n\r\n        if append_experiment_id is not None and append_experiment_id not in record.experiment_ids:\r\n            record.experiment_ids.append(append_experiment_id)\r\n\r\n        self.save(record)\r\n        return record\r\n\r\n    # --------------------------------------------------------\r\n    # experiment persistence\r\n    # --------------------------------------------------------\r\n\r\n    def save_experiment(self, job_id: str, record: ExperimentRecord) -> None:\r\n        path = self.artifact_store.layout.experiment_record_path(job_id, record.experiment_id)\r\n        self.artifact_store.write_json(path, record.to_dict())\r\n\r\n        self._update_job(\r\n            job_id,\r\n            append_experiment_id=record.experiment_id,\r\n        )\r\n\r\n    def load_experiment_raw(self, job_id: str, experiment_id: str) -> Optional[dict[str, Any]]:\r\n        path = self.artifact_store.layout.experiment_record_path(job_id, experiment_id)\r\n        if not self.artifact_store.exists(path):\r\n            return None\r\n        return self.artifact_store.read_json(path)\r\n\r\n    def load_experiment(self, job_id: str, experiment_id: str) -> Optional[ExperimentRecord]:\r\n        payload = self.load_experiment_raw(job_id, experiment_id)\r\n        if payload is None:\r\n            return None\r\n        return _experiment_record_from_dict(payload)\r\n\r\n    def list_experiments(self, job_id: str) -> list[ExperimentRecord]:\r\n        job_record = self.load(job_id)\r\n        if job_record is None:\r\n            return []\r\n\r\n        experiments: list[ExperimentRecord] = []\r\n        for experiment_id in job_record.experiment_ids:\r\n            experiment = self.load_experiment(job_id, experiment_id)\r\n            if experiment is not None:\r\n                experiments.append(experiment)\r\n\r\n        return experiments\r\n\r\n    def update_experiment_status(\r\n        self,\r\n        job_id: str,\r\n        experiment_id: str,\r\n        status: ExperimentStatus,\r\n        *,\r\n        completed_tree_count: Optional[int] = None,\r\n        assigned_workers: Optional[list[str]] = None,\r\n        validation_metrics: Optional[ValidationMetrics] = None,\r\n    ) -> ExperimentRecord:\r\n        record = self.load_experiment(job_id, experiment_id)\r\n        if record is None:\r\n            raise ValueError(\r\n                f\"Experiment '{experiment_id}' not found for job '{job_id}'\"\r\n            )\r\n\r\n        record.status = status\r\n\r\n        if completed_tree_count is not None:\r\n            record.completed_tree_count = completed_tree_count\r\n\r\n        if assigned_workers is not None:\r\n            record.assigned_workers = list(assigned_workers)\r\n\r\n        if validation_metrics is not None:\r\n            record.validation_metrics = validation_metrics\r\n\r\n        self.save_experiment(job_id, record)\r\n        return record\r\n\r\n    # --------------------------------------------------------\r\n    # explicit job state helpers\r\n    # --------------------------------------------------------\r\n\r\n    def update_job_status(\r\n        self,\r\n        job_id: str,\r\n        status: JobStatus,\r\n        message: Optional[str] = None,\r\n        selected_experiment_id: Optional[str] = None,\r\n        model_id: Optional[str] = None,\r\n    ) -> None:\r\n        self._update_job(\r\n            job_id,\r\n            status=status,\r\n            message=message,\r\n            selected_experiment_id=selected_experiment_id,\r\n            model_id=model_id,\r\n        )\r\n\r\n    def mark_pending(self, job_id: str, message: Optional[str] = None) -> TrainingJobRecord:\r\n        return self._update_job(\r\n            job_id,\r\n            status=JobStatus.PENDING,\r\n            message=message,\r\n        )\r\n\r\n    def mark_running(self, job_id: str, message: Optional[str] = None) -> TrainingJobRecord:\r\n        return self._update_job(\r\n            job_id,\r\n            status=JobStatus.RUNNING,\r\n            message=message,\r\n        )\r\n\r\n    def mark_completed(\r\n        self,\r\n        job_id: str,\r\n        *,\r\n        selected_experiment_id: Optional[str] = None,\r\n        model_id: Optional[str] = None,\r\n        message: Optional[str] = None,\r\n    ) -> TrainingJobRecord:\r\n        return self._update_job(\r\n            job_id,\r\n            status=JobStatus.COMPLETED,\r\n            message=message,\r\n            selected_experiment_id=selected_experiment_id,\r\n            model_id=model_id,\r\n        )\r\n\r\n    def mark_failed(self, job_id: str, message: str) -> TrainingJobRecord:\r\n        return self._update_job(\r\n            job_id,\r\n            status=JobStatus.FAILED,\r\n            message=message,\r\n        )\r\n\r\n    # --------------------------------------------------------\r\n    # explicit field helpers\r\n    # --------------------------------------------------------\r\n\r\n    def attach_prepared_dataset(self, job_id: str, prepared_dataset: PreparedDataset) -> TrainingJobRecord:\r\n        return self._update_job(\r\n            job_id,\r\n            prepared_dataset=prepared_dataset,\r\n        )\r\n\r\n    def add_experiment_id(self, job_id: str, experiment_id: str) -> TrainingJobRecord:\r\n        return self._update_job(\r\n            job_id,\r\n            append_experiment_id=experiment_id,\r\n        )\r\n\r\n    def set_selected_experiment(self, job_id: str, experiment_id: str) -> TrainingJobRecord:\r\n        return self._update_job(\r\n            job_id,\r\n            selected_experiment_id=experiment_id,\r\n        )\r\n\r\n    def set_model_id(self, job_id: str, model_id: str) -> TrainingJobRecord:\r\n        return self._update_job(\r\n            job_id,\r\n            model_id=model_id,\r\n        )\r\n\r\ndef _model_status_from_raw(value: str | ModelStatus) -> ModelStatus:\r\n    if isinstance(value, ModelStatus):\r\n        return value\r\n    return ModelStatus(value)\r\n\r\n\r\ndef _tree_status_from_raw(value: str | TreeStatus) -> TreeStatus:\r\n    if isinstance(value, TreeStatus):\r\n        return value\r\n    return TreeStatus(value)\r\n\r\n\r\ndef _tree_artifact_metadata_from_dict(payload: dict[str, Any]) -> TreeArtifactMetadata:\r\n    return TreeArtifactMetadata(\r\n        tree_id=payload[\"tree_id\"],\r\n        job_id=payload[\"job_id\"],\r\n        experiment_id=payload[\"experiment_id\"],\r\n        task_id=payload[\"task_id\"],\r\n        tree_index=payload[\"tree_index\"],\r\n        worker_id=payload[\"worker_id\"],\r\n        seed=payload[\"seed\"],\r\n        artifact_uri=payload[\"artifact_uri\"],\r\n        status=_tree_status_from_raw(payload[\"status\"]),\r\n        training_time_seconds=payload.get(\"training_time_seconds\", 0.0),\r\n    )\r\n\r\n\r\ndef _model_manifest_from_dict(payload: dict[str, Any]) -> ModelManifest:\r\n    return ModelManifest(\r\n        model_id=payload[\"model_id\"],\r\n        job_id=payload[\"job_id\"],\r\n        experiment_id=payload[\"experiment_id\"],\r\n        model_type=payload[\"model_type\"],\r\n        forest_config=_forest_configuration_from_dict(payload[\"forest_config\"]),\r\n        class_labels=payload.get(\"class_labels\", []),\r\n        feature_names=payload.get(\"feature_names\", []),\r\n        target_column=payload[\"target_column\"],\r\n        train_features_uri=payload[\"train_features_uri\"],\r\n        train_labels_uri=payload[\"train_labels_uri\"],\r\n        validation_features_uri=payload[\"validation_features_uri\"],\r\n        validation_labels_uri=payload[\"validation_labels_uri\"],\r\n        test_features_uri=payload[\"test_features_uri\"],\r\n        test_labels_uri=payload[\"test_labels_uri\"],\r\n        tree_artifacts=[\r\n            _tree_artifact_metadata_from_dict(item)\r\n            for item in payload.get(\"tree_artifacts\", [])\r\n        ],\r\n        validation_metrics=_validation_metrics_from_dict(payload[\"validation_metrics\"]),\r\n        test_metrics=payload.get(\"test_metrics\"),\r\n        created_at=payload.get(\"created_at\", 0.0),\r\n        status=_model_status_from_raw(payload[\"status\"]),\r\n    )\r\n\r\nclass ModelRepository:\r\n    def __init__(self, artifact_store: SharedArtifactStore):\r\n        self.artifact_store = artifact_store\r\n\r\n    # --------------------------------------------------------\r\n    # basic persistence\r\n    # --------------------------------------------------------\r\n\r\n    def save(self, manifest: ModelManifest) -> None:\r\n        path = self.artifact_store.layout.model_manifest_path(manifest.model_id)\r\n        self.artifact_store.write_json(path, manifest.to_dict())\r\n\r\n    def exists(self, model_id: str) -> bool:\r\n        path = self.artifact_store.layout.model_manifest_path(model_id)\r\n        return self.artifact_store.exists(path)\r\n\r\n    def load_raw(self, model_id: str) -> Optional[dict[str, Any]]:\r\n        path = self.artifact_store.layout.model_manifest_path(model_id)\r\n        if not self.artifact_store.exists(path):\r\n            return None\r\n        return self.artifact_store.read_json(path)\r\n\r\n    def load(self, model_id: str) -> Optional[ModelManifest]:\r\n        payload = self.load_raw(model_id)\r\n        if payload is None:\r\n            return None\r\n        return _model_manifest_from_dict(payload)\r\n\r\n    def list_models(self) -> list[ModelManifest]:\r\n        models_root = self.artifact_store.layout.root / \"models\"\r\n        if not models_root.exists():\r\n            return []\r\n\r\n        manifests: list[ModelManifest] = []\r\n\r\n        for model_dir in models_root.iterdir():\r\n            if not model_dir.is_dir():\r\n                continue\r\n\r\n            model_id = model_dir.name\r\n            manifest = self.load(model_id)\r\n            if manifest is not None:\r\n                manifests.append(manifest)\r\n\r\n        manifests.sort(key=lambda item: item.model_id)\r\n        return manifests\r\n\r\n    # --------------------------------------------------------\r\n    # status updates\r\n    # --------------------------------------------------------\r\n\r\n    def update_status(self, model_id: str, status: ModelStatus) -> ModelManifest:\r\n        manifest = self.load(model_id)\r\n        if manifest is None:\r\n            raise ValueError(f\"Model '{model_id}' not found\")\r\n\r\n        manifest.status = status\r\n        self.save(manifest)\r\n        return manifest\r\n\r\n    def mark_ready(self, model_id: str) -> ModelManifest:\r\n        return self.update_status(model_id, ModelStatus.READY)\r\n\r\n    def mark_failed(self, model_id: str) -> ModelManifest:\r\n        return self.update_status(model_id, ModelStatus.FAILED)\r\n\r\n    def mark_training(self, model_id: str) -> ModelManifest:\r\n        return self.update_status(model_id, ModelStatus.TRAINING)\r\n\r\ndef _task_status_from_raw(value: str | TaskStatus) -> TaskStatus:\r\n    if isinstance(value, TaskStatus):\r\n        return value\r\n    return TaskStatus(value)\r\n\r\n\r\ndef _task_record_from_dict(payload: dict[str, Any]) -> TaskRecord:\r\n    return TaskRecord(\r\n        task_id=payload[\"task_id\"],\r\n        attempt_id=payload[\"attempt_id\"],\r\n        job_id=payload[\"job_id\"],\r\n        experiment_id=payload[\"experiment_id\"],\r\n        worker_id=payload[\"worker_id\"],\r\n        status=_task_status_from_raw(payload[\"status\"]),\r\n        tree_ids=payload.get(\"tree_ids\", []),\r\n        completed_tree_ids=payload.get(\"completed_tree_ids\", []),\r\n        failed_tree_ids=payload.get(\"failed_tree_ids\", []),\r\n        lease_expires_at_ts=payload[\"lease_expires_at_ts\"],\r\n        updated_at=payload.get(\"updated_at\", 0.0),\r\n        error_message=payload.get(\"error_message\"),\r\n    )\r\n\r\n\r\nclass TaskLedger:\r\n    \"\"\"\r\n    Persistent task ledger grouped by logical task_id and versioned by attempt_id.\r\n    \"\"\"\r\n\r\n    def __init__(self, artifact_store: SharedArtifactStore):\r\n        self.artifact_store = artifact_store\r\n        self._lock = threading.Lock()\r\n\r\n    # --------------------------------------------------------\r\n    # internal persistence\r\n    # --------------------------------------------------------\r\n\r\n    def _empty_payload(self) -> dict[str, Any]:\r\n        return {\"tasks\": {}}\r\n\r\n    def _read_all(self, job_id: str) -> dict[str, Any]:\r\n        path = self.artifact_store.layout.task_ledger_path(job_id)\r\n        if not self.artifact_store.exists(path):\r\n            return self._empty_payload()\r\n\r\n        raw_payload = self.artifact_store.read_json(path)\r\n        return self._normalize_payload(raw_payload)\r\n\r\n    def _write_all(self, job_id: str, payload: dict[str, Any]) -> None:\r\n        path = self.artifact_store.layout.task_ledger_path(job_id)\r\n        self.artifact_store.write_json(path, payload)\r\n\r\n    def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:\r\n        \"\"\"\r\n        Normalizes the on-disk JSON so both old and new formats are accepted.\r\n\r\n        Old format:\r\n        {\r\n          \"tasks\": {\r\n            \"task-1\": { ... TaskRecord ... }\r\n          }\r\n        }\r\n\r\n        New format:\r\n        {\r\n          \"tasks\": {\r\n            \"task-1\": {\r\n              \"task_id\": \"task-1\",\r\n              \"job_id\": \"...\",\r\n              \"experiment_id\": \"...\",\r\n              \"latest_attempt_id\": 2,\r\n              \"updated_at\": ...,\r\n              \"attempts\": {\r\n                \"1\": { ... TaskRecord ... },\r\n                \"2\": { ... TaskRecord ... }\r\n              }\r\n            }\r\n          }\r\n        }\r\n        \"\"\"\r\n        tasks_payload = payload.get(\"tasks\")\r\n        if not isinstance(tasks_payload, dict):\r\n            return self._empty_payload()\r\n\r\n        normalized_tasks: dict[str, Any] = {}\r\n\r\n        for task_id, raw_value in tasks_payload.items():\r\n            if not isinstance(raw_value, dict):\r\n                continue\r\n\r\n            # New format already grouped by attempts\r\n            if \"attempts\" in raw_value:\r\n                attempts_payload = raw_value.get(\"attempts\", {})\r\n                normalized_attempts: dict[str, Any] = {}\r\n\r\n                for attempt_key, attempt_raw in attempts_payload.items():\r\n                    if not isinstance(attempt_raw, dict):\r\n                        continue\r\n\r\n                    attempt_id = attempt_raw.get(\"attempt_id\")\r\n                    if attempt_id is None:\r\n                        try:\r\n                            attempt_id = int(attempt_key)\r\n                        except Exception:\r\n                            continue\r\n\r\n                    normalized_attempts[str(int(attempt_id))] = attempt_raw\r\n\r\n                if normalized_attempts:\r\n                    latest_attempt_id = raw_value.get(\"latest_attempt_id\")\r\n                    if latest_attempt_id is None:\r\n                        latest_attempt_id = max(int(k) for k in normalized_attempts.keys())\r\n\r\n                    first_attempt_key = str(min(int(k) for k in normalized_attempts.keys()))\r\n                    first_attempt = normalized_attempts[first_attempt_key]\r\n\r\n                    normalized_tasks[task_id] = {\r\n                        \"task_id\": raw_value.get(\"task_id\", task_id),\r\n                        \"job_id\": raw_value.get(\"job_id\", first_attempt.get(\"job_id\")),\r\n                        \"experiment_id\": raw_value.get(\r\n                            \"experiment_id\",\r\n                            first_attempt.get(\"experiment_id\"),\r\n                        ),\r\n                        \"latest_attempt_id\": int(latest_attempt_id),\r\n                        \"updated_at\": raw_value.get(\"updated_at\", time.time()),\r\n                        \"attempts\": normalized_attempts,\r\n                    }\r\n                continue\r\n\r\n            # Old flat format: single TaskRecord directly under task_id\r\n            attempt_id = int(raw_value.get(\"attempt_id\", 1))\r\n            normalized_tasks[task_id] = {\r\n                \"task_id\": raw_value.get(\"task_id\", task_id),\r\n                \"job_id\": raw_value.get(\"job_id\"),\r\n                \"experiment_id\": raw_value.get(\"experiment_id\"),\r\n                \"latest_attempt_id\": attempt_id,\r\n                \"updated_at\": raw_value.get(\"updated_at\", time.time()),\r\n                \"attempts\": {\r\n                    str(attempt_id): raw_value,\r\n                },\r\n            }\r\n\r\n        return {\"tasks\": normalized_tasks}\r\n\r\n    # --------------------------------------------------------\r\n    # internal task/attempt helpers\r\n    # --------------------------------------------------------\r\n\r\n    def _ensure_task_bucket(\r\n        self,\r\n        payload: dict[str, Any],\r\n        record: TaskRecord,\r\n    ) -> dict[str, Any]:\r\n        tasks = payload.setdefault(\"tasks\", {})\r\n        bucket = tasks.get(record.task_id)\r\n\r\n        if bucket is None:\r\n            bucket = {\r\n                \"task_id\": record.task_id,\r\n                \"job_id\": record.job_id,\r\n                \"experiment_id\": record.experiment_id,\r\n                \"latest_attempt_id\": record.attempt_id,\r\n                \"updated_at\": time.time(),\r\n                \"attempts\": {},\r\n            }\r\n            tasks[record.task_id] = bucket\r\n            return bucket\r\n\r\n        if bucket.get(\"job_id\") not in {None, record.job_id}:\r\n            raise ValueError(\r\n                f\"Task '{record.task_id}' already exists for another job: \"\r\n                f\"{bucket.get('job_id')} != {record.job_id}\"\r\n            )\r\n\r\n        if bucket.get(\"experiment_id\") not in {None, record.experiment_id}:\r\n            raise ValueError(\r\n                f\"Task '{record.task_id}' already exists for another experiment: \"\r\n                f\"{bucket.get('experiment_id')} != {record.experiment_id}\"\r\n            )\r\n\r\n        bucket[\"job_id\"] = record.job_id\r\n        bucket[\"experiment_id\"] = record.experiment_id\r\n        bucket.setdefault(\"attempts\", {})\r\n        return bucket\r\n\r\n    def _resolve_attempt_id(\r\n        self,\r\n        bucket: dict[str, Any],\r\n        attempt_id: Optional[int] = None,\r\n    ) -> Optional[int]:\r\n        attempts = bucket.get(\"attempts\", {})\r\n        if not attempts:\r\n            return None\r\n\r\n        if attempt_id is not None:\r\n            if str(attempt_id) not in attempts:\r\n                return None\r\n            return int(attempt_id)\r\n\r\n        latest_attempt_id = bucket.get(\"latest_attempt_id\")\r\n        if latest_attempt_id is not None and str(latest_attempt_id) in attempts:\r\n            return int(latest_attempt_id)\r\n\r\n        return max(int(key) for key in attempts.keys())\r\n\r\n    def _find_task_bucket(\r\n        self,\r\n        task_id: str,\r\n        attempt_id: Optional[int] = None,\r\n        job_id: Optional[str] = None,\r\n    ) -> tuple[Optional[str], Optional[dict[str, Any]], Optional[int]]:\r\n        if job_id is not None:\r\n            payload = self._read_all(job_id)\r\n            bucket = payload.get(\"tasks\", {}).get(task_id)\r\n            if bucket is None:\r\n                return None, None, None\r\n            resolved_attempt_id = self._resolve_attempt_id(bucket, attempt_id)\r\n            return job_id, bucket, resolved_attempt_id\r\n\r\n        jobs_root = self.artifact_store.layout.root / \"jobs\"\r\n        if not jobs_root.exists():\r\n            return None, None, None\r\n\r\n        for job_dir in jobs_root.iterdir():\r\n            if not job_dir.is_dir():\r\n                continue\r\n\r\n            current_job_id = job_dir.name\r\n            payload = self._read_all(current_job_id)\r\n            bucket = payload.get(\"tasks\", {}).get(task_id)\r\n            if bucket is None:\r\n                continue\r\n\r\n            resolved_attempt_id = self._resolve_attempt_id(bucket, attempt_id)\r\n            return current_job_id, bucket, resolved_attempt_id\r\n\r\n        return None, None, None\r\n\r\n    def _update_attempt_raw(\r\n        self,\r\n        task_id: str,\r\n        updater,\r\n        *,\r\n        attempt_id: Optional[int] = None,\r\n        job_id: Optional[str] = None,\r\n    ) -> None:\r\n        with self._lock:\r\n            resolved_job_id, bucket, resolved_attempt_id = self._find_task_bucket(\r\n                task_id=task_id,\r\n                attempt_id=attempt_id,\r\n                job_id=job_id,\r\n            )\r\n            if resolved_job_id is None or bucket is None or resolved_attempt_id is None:\r\n                raise ValueError(\r\n                    f\"Task '{task_id}'\"\r\n                    + (f\" attempt '{attempt_id}'\" if attempt_id is not None else \"\")\r\n                    + \" not found\"\r\n                )\r\n\r\n            payload = self._read_all(resolved_job_id)\r\n            task_bucket = payload.setdefault(\"tasks\", {}).get(task_id)\r\n            if task_bucket is None:\r\n                raise ValueError(f\"Task '{task_id}' not found in job '{resolved_job_id}'\")\r\n\r\n            attempts = task_bucket.setdefault(\"attempts\", {})\r\n            attempt_key = str(resolved_attempt_id)\r\n            raw = attempts.get(attempt_key)\r\n            if raw is None:\r\n                raise ValueError(\r\n                    f\"Task '{task_id}' attempt '{resolved_attempt_id}' not found\"\r\n                )\r\n\r\n            updater(raw)\r\n\r\n            raw[\"updated_at\"] = time.time()\r\n            attempts[attempt_key] = raw\r\n            task_bucket[\"updated_at\"] = raw[\"updated_at\"]\r\n\r\n            latest_attempt_id = task_bucket.get(\"latest_attempt_id\")\r\n            if latest_attempt_id is None or int(resolved_attempt_id) >= int(latest_attempt_id):\r\n                task_bucket[\"latest_attempt_id\"] = int(resolved_attempt_id)\r\n\r\n            payload[\"tasks\"][task_id] = task_bucket\r\n            self._write_all(resolved_job_id, payload)\r\n\r\n    # --------------------------------------------------------\r\n    # public CRUD\r\n    # --------------------------------------------------------\r\n\r\n    def save(self, record: TaskRecord) -> None:\r\n        with self._lock:\r\n            payload = self._read_all(record.job_id)\r\n            bucket = self._ensure_task_bucket(payload, record)\r\n\r\n            attempts = bucket.setdefault(\"attempts\", {})\r\n            attempts[str(record.attempt_id)] = record.to_dict()\r\n\r\n            latest_attempt_id = bucket.get(\"latest_attempt_id\")\r\n            if latest_attempt_id is None or int(record.attempt_id) >= int(latest_attempt_id):\r\n                bucket[\"latest_attempt_id\"] = int(record.attempt_id)\r\n\r\n            bucket[\"updated_at\"] = time.time()\r\n            payload.setdefault(\"tasks\", {})[record.task_id] = bucket\r\n            self._write_all(record.job_id, payload)\r\n\r\n    def upsert(self, record: TaskRecord) -> None:\r\n        self.save(record)\r\n\r\n    def load_raw(\r\n        self,\r\n        job_id: str,\r\n        task_id: str,\r\n        attempt_id: Optional[int] = None,\r\n    ) -> Optional[dict[str, Any]]:\r\n        payload = self._read_all(job_id)\r\n        bucket = payload.get(\"tasks\", {}).get(task_id)\r\n        if bucket is None:\r\n            return None\r\n\r\n        resolved_attempt_id = self._resolve_attempt_id(bucket, attempt_id)\r\n        if resolved_attempt_id is None:\r\n            return None\r\n\r\n        return bucket.get(\"attempts\", {}).get(str(resolved_attempt_id))\r\n\r\n    def load(\r\n        self,\r\n        job_id: str,\r\n        task_id: str,\r\n        attempt_id: Optional[int] = None,\r\n    ) -> Optional[TaskRecord]:\r\n        raw = self.load_raw(job_id, task_id, attempt_id)\r\n        if raw is None:\r\n            return None\r\n        return _task_record_from_dict(raw)\r\n\r\n    def load_latest_attempt(self, job_id: str, task_id: str) -> Optional[TaskRecord]:\r\n        return self.load(job_id, task_id, attempt_id=None)\r\n\r\n    def load_attempt(\r\n        self,\r\n        job_id: str,\r\n        task_id: str,\r\n        attempt_id: int,\r\n    ) -> Optional[TaskRecord]:\r\n        return self.load(job_id, task_id, attempt_id=attempt_id)\r\n\r\n    def list_raw(self, job_id: str) -> list[dict[str, Any]]:\r\n        \"\"\"\r\n        Returns the latest attempt for each logical task.\r\n        This keeps behavior intuitive for existing callers.\r\n        \"\"\"\r\n        payload = self._read_all(job_id)\r\n        result: list[dict[str, Any]] = []\r\n\r\n        for task_id, bucket in payload.get(\"tasks\", {}).items():\r\n            resolved_attempt_id = self._resolve_attempt_id(bucket)\r\n            if resolved_attempt_id is None:\r\n                continue\r\n\r\n            raw = bucket.get(\"attempts\", {}).get(str(resolved_attempt_id))\r\n            if raw is not None:\r\n                result.append(raw)\r\n\r\n        return result\r\n\r\n    def list(self, job_id: str) -> list[TaskRecord]:\r\n        return [_task_record_from_dict(item) for item in self.list_raw(job_id)]\r\n\r\n    def list_attempts_raw(self, job_id: str, task_id: str) -> list[dict[str, Any]]:\r\n        payload = self._read_all(job_id)\r\n        bucket = payload.get(\"tasks\", {}).get(task_id)\r\n        if bucket is None:\r\n            return []\r\n\r\n        attempts = bucket.get(\"attempts\", {})\r\n        ordered_keys = sorted(int(key) for key in attempts.keys())\r\n        return [attempts[str(key)] for key in ordered_keys]\r\n\r\n    def list_attempts(self, job_id: str, task_id: str) -> list[TaskRecord]:\r\n        return [_task_record_from_dict(item) for item in self.list_attempts_raw(job_id, task_id)]\r\n\r\n    def list_all_attempts(self, job_id: str) -> list[TaskRecord]:\r\n        payload = self._read_all(job_id)\r\n        records: list[TaskRecord] = []\r\n\r\n        for task_id in payload.get(\"tasks\", {}).keys():\r\n            records.extend(self.list_attempts(job_id, task_id))\r\n\r\n        return records\r\n\r\n    def list_by_experiment(self, job_id: str, experiment_id: str) -> list[TaskRecord]:\r\n        \"\"\"\r\n        Returns the latest attempt per task filtered by experiment.\r\n        \"\"\"\r\n        return [\r\n            record\r\n            for record in self.list(job_id)\r\n            if record.experiment_id == experiment_id\r\n        ]\r\n\r\n    def list_attempts_by_experiment(\r\n        self,\r\n        job_id: str,\r\n        experiment_id: str,\r\n    ) -> list[TaskRecord]:\r\n        return [\r\n            record\r\n            for record in self.list_all_attempts(job_id)\r\n            if record.experiment_id == experiment_id\r\n        ]\r\n\r\n    # --------------------------------------------------------\r\n    # lease management\r\n    # --------------------------------------------------------\r\n\r\n    def update_lease(\r\n        self,\r\n        task_id: str,\r\n        lease_expires_at_ts: float,\r\n        attempt_id: Optional[int] = None,\r\n        job_id: Optional[str] = None,\r\n    ) -> None:\r\n        def _updater(raw: dict[str, Any]) -> None:\r\n            raw[\"lease_expires_at_ts\"] = lease_expires_at_ts\r\n\r\n        self._update_attempt_raw(\r\n            task_id=task_id,\r\n            updater=_updater,\r\n            attempt_id=attempt_id,\r\n            job_id=job_id,\r\n        )\r\n\r\n    def clear_lease(\r\n        self,\r\n        task_id: str,\r\n        attempt_id: Optional[int] = None,\r\n        job_id: Optional[str] = None,\r\n    ) -> None:\r\n        def _updater(raw: dict[str, Any]) -> None:\r\n            raw[\"lease_expires_at_ts\"] = None\r\n\r\n        self._update_attempt_raw(\r\n            task_id=task_id,\r\n            updater=_updater,\r\n            attempt_id=attempt_id,\r\n            job_id=job_id,\r\n        )\r\n\r\n    def list_expired_running_tasks(\r\n        self,\r\n        job_id: str,\r\n        experiment_id: Optional[str] = None,\r\n        now_ts: Optional[float] = None,\r\n    ) -> list[TaskRecord]:\r\n        effective_now = time.time() if now_ts is None else now_ts\r\n\r\n        records = self.list_all_attempts(job_id)\r\n        expired: list[TaskRecord] = []\r\n\r\n        for record in records:\r\n            if experiment_id is not None and record.experiment_id != experiment_id:\r\n                continue\r\n\r\n            if record.status != TaskStatus.RUNNING:\r\n                continue\r\n\r\n            if record.lease_expires_at_ts is None:\r\n                continue\r\n\r\n            if record.lease_expires_at_ts <= effective_now:\r\n                expired.append(record)\r\n\r\n        expired.sort(\r\n            key=lambda item: (\r\n                item.lease_expires_at_ts or 0.0,\r\n                item.updated_at,\r\n            )\r\n        )\r\n        return expired\r\n\r\n    # --------------------------------------------------------\r\n    # public state transitions\r\n    # --------------------------------------------------------\r\n\r\n    def mark_running(\r\n        self,\r\n        task_id: str,\r\n        attempt_id: Optional[int] = None,\r\n        job_id: Optional[str] = None,\r\n    ) -> None:\r\n        def _updater(raw: dict[str, Any]) -> None:\r\n            raw[\"status\"] = TaskStatus.RUNNING.value\r\n            raw[\"error_message\"] = None\r\n\r\n        self._update_attempt_raw(\r\n            task_id=task_id,\r\n            updater=_updater,\r\n            attempt_id=attempt_id,\r\n            job_id=job_id,\r\n        )\r\n\r\n    def mark_completed(\r\n        self,\r\n        task_id: str,\r\n        completed_tree_ids: list[str],\r\n        attempt_id: Optional[int] = None,\r\n        job_id: Optional[str] = None,\r\n    ) -> None:\r\n        def _updater(raw: dict[str, Any]) -> None:\r\n            existing = raw.get(\"completed_tree_ids\", [])\r\n            merged = list(dict.fromkeys(existing + list(completed_tree_ids or [])))\r\n            raw[\"completed_tree_ids\"] = merged\r\n            raw[\"failed_tree_ids\"] = []\r\n            raw[\"status\"] = TaskStatus.COMPLETED.value\r\n            raw[\"error_message\"] = None\r\n            raw[\"lease_expires_at_ts\"] = None\r\n\r\n        self._update_attempt_raw(\r\n            task_id=task_id,\r\n            updater=_updater,\r\n            attempt_id=attempt_id,\r\n            job_id=job_id,\r\n        )\r\n\r\n    def mark_partial_failure(\r\n        self,\r\n        task_id: str,\r\n        completed_tree_ids: list[str],\r\n        failed_tree_ids: list[str],\r\n        error_message: str,\r\n        attempt_id: Optional[int] = None,\r\n        job_id: Optional[str] = None,\r\n    ) -> None:\r\n        def _updater(raw: dict[str, Any]) -> None:\r\n            existing_completed = raw.get(\"completed_tree_ids\", [])\r\n            existing_failed = raw.get(\"failed_tree_ids\", [])\r\n\r\n            merged_completed = list(\r\n                dict.fromkeys(existing_completed + list(completed_tree_ids or []))\r\n            )\r\n            merged_failed = list(\r\n                dict.fromkeys(existing_failed + list(failed_tree_ids or []))\r\n            )\r\n\r\n            raw[\"completed_tree_ids\"] = merged_completed\r\n            raw[\"failed_tree_ids\"] = merged_failed\r\n            raw[\"status\"] = TaskStatus.FAILED.value\r\n            raw[\"error_message\"] = error_message\r\n\r\n        self._update_attempt_raw(\r\n            task_id=task_id,\r\n            updater=_updater,\r\n            attempt_id=attempt_id,\r\n            job_id=job_id,\r\n        )\r\n\r\n    def mark_failed(\r\n        self,\r\n        task_id: str,\r\n        error_message: str,\r\n        attempt_id: Optional[int] = None,\r\n        job_id: Optional[str] = None,\r\n    ) -> None:\r\n        def _updater(raw: dict[str, Any]) -> None:\r\n            raw[\"status\"] = TaskStatus.FAILED.value\r\n            raw[\"error_message\"] = error_message\r\n            raw[\"lease_expires_at_ts\"] = None\r\n\r\n        self._update_attempt_raw(\r\n            task_id=task_id,\r\n            updater=_updater,\r\n            attempt_id=attempt_id,\r\n            job_id=job_id,\r\n        )\r\n\r\n    # --------------------------------------------------------\r\n    # public queries / aggregation\r\n    # --------------------------------------------------------\r\n\r\n    def latest_attempt_id(self, job_id: str, task_id: str) -> Optional[int]:\r\n        payload = self._read_all(job_id)\r\n        bucket = payload.get(\"tasks\", {}).get(task_id)\r\n        if bucket is None:\r\n            return None\r\n        resolved = self._resolve_attempt_id(bucket)\r\n        return int(resolved) if resolved is not None else None\r\n\r\n    def count_completed_trees(\r\n        self,\r\n        job_id: str,\r\n        experiment_id: Optional[str] = None,\r\n    ) -> int:\r\n        return len(self.completed_tree_ids(job_id, experiment_id))\r\n\r\n    def is_task_completed(self, job_id: str, task_id: str) -> bool:\r\n        \"\"\"\r\n        A logical task is considered completed if at least one of its attempts completed.\r\n        \"\"\"\r\n        for record in self.list_attempts(job_id, task_id):\r\n            if record.status == TaskStatus.COMPLETED:\r\n                return True\r\n        return False\r\n\r\n    def completed_tree_ids(\r\n        self,\r\n        job_id: str,\r\n        experiment_id: Optional[str] = None,\r\n    ) -> list[str]:\r\n        \"\"\"\r\n        Returns unique completed tree IDs across all attempts.\r\n        This avoids double-counting the same tree on retries.\r\n        \"\"\"\r\n        all_ids: list[str] = []\r\n\r\n        for record in self.list_all_attempts(job_id):\r\n            if experiment_id is not None and record.experiment_id != experiment_id:\r\n                continue\r\n            all_ids.extend(record.completed_tree_ids)\r\n\r\n        return list(dict.fromkeys(all_ids))\r\n\r\n    def failed_tree_ids(\r\n        self,\r\n        job_id: str,\r\n        experiment_id: Optional[str] = None,\r\n    ) -> list[str]:\r\n        all_ids: list[str] = []\r\n\r\n        for record in self.list_all_attempts(job_id):\r\n            if experiment_id is not None and record.experiment_id != experiment_id:\r\n                continue\r\n            all_ids.extend(record.failed_tree_ids)\r\n\r\n        return list(dict.fromkeys(all_ids))\r\n\r\n    def missing_tree_ids(\r\n        self,\r\n        job_id: str,\r\n        experiment_id: str,\r\n        expected_tree_ids: list[str],\r\n    ) -> list[str]:\r\n        completed = set(self.completed_tree_ids(job_id, experiment_id))\r\n        return [tree_id for tree_id in expected_tree_ids if tree_id not in completed]\r\n\r\nclass WorkerProgressStore:\r\n    def __init__(self, artifact_store: SharedArtifactStore):\r\n        self.artifact_store = artifact_store\r\n\r\n    def save_snapshot(self, job_id: str, snapshot: WorkerProgressSnapshot) -> None:\r\n        path = self.artifact_store.layout.worker_progress_path(job_id, snapshot.worker_id)\r\n        self.artifact_store.write_json(path, snapshot.to_dict())\r\n\r\n    def load_snapshot_raw(self, job_id: str, worker_id: str) -> Optional[dict[str, Any]]:\r\n        path = self.artifact_store.layout.worker_progress_path(job_id, worker_id)\r\n        if not self.artifact_store.exists(path):\r\n            return None\r\n        return self.artifact_store.read_json(path)\r\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/common/repositories.py b/common/repositories.py
+--- a/common/repositories.py	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/common/repositories.py	(date 1779195197645)
+@@ -466,6 +466,7 @@
+         artifact_uri=payload["artifact_uri"],
+         status=_tree_status_from_raw(payload["status"]),
+         training_time_seconds=payload.get("training_time_seconds", 0.0),
++        feature_importances=payload.get("feature_importances", []),
+     )
+ 
+ 
+Index: common/contracts.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nimport time\r\nfrom dataclasses import asdict, dataclass, field\r\nfrom typing import Any, Optional\r\n\r\nfrom .enums import (\r\n    CommandType,\r\n    ExperimentStatus,\r\n    JobStatus,\r\n    ModelStatus,\r\n    TaskStatus,\r\n    TreeStatus,\r\n)\r\n\r\n\r\n@dataclass(slots=True)\r\nclass HyperparameterSpace:\r\n    n_estimators_candidates: list[int]\r\n    max_depth_candidates: list[Optional[int]]\r\n    max_features_candidates: list[str | float | None]\r\n    min_samples_split_candidates: list[int]\r\n    min_samples_leaf_candidates: list[int]\r\n    criterion_candidates: list[str]\r\n    bootstrap: bool = True\r\n    global_random_seed: int = 42\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return asdict(self)\r\n\r\n\r\n@dataclass(slots=True)\r\nclass ForestConfiguration:\r\n    experiment_id: str\r\n    task_type: str\r\n    n_estimators: int\r\n    max_depth: Optional[int]\r\n    max_features: str | float | None\r\n    min_samples_split: int\r\n    min_samples_leaf: int\r\n    criterion: str\r\n    bootstrap: bool\r\n    global_random_seed: int\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return asdict(self)\r\n\r\n\r\n@dataclass(slots=True)\r\nclass TrainingRequest:\r\n    job_id: str\r\n    dataset_uri: str\r\n    target_column: str\r\n    task_type: str\r\n    hyperparameter_space: HyperparameterSpace\r\n    n_estimators_total: int\r\n    validation_ratio: float\r\n    test_ratio: float\r\n    global_random_seed: int\r\n    bootstrap: bool\r\n    dataset_scenario: str = \"baseline_original\"\r\n    leakage_columns: Optional[list[str]] = None\r\n    created_at: float = field(default_factory=time.time)\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return asdict(self)\r\n\r\n#introduco per baseline no leakage\r\n@dataclass(slots=True)\r\nclass DatasetPreparationMetadata:\r\n    dataset_scenario: str = \"baseline_original\"\r\n    dropped_columns: list[str] = field(default_factory=list)\r\n    requested_leakage_columns: Optional[list[str]] = None\r\n    missing_requested_leakage_columns: list[str] = field(default_factory=list)\r\n    original_column_count: int = 0\r\n    final_column_count: int = 0\r\n    original_row_count: int = 0\r\n    final_row_count: int = 0\r\n    scenario_report_uri: Optional[str] = None\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return asdict(self)\r\n\r\n@dataclass(slots=True)\r\nclass DatasetSchema:\r\n    dataset_uri: str\r\n    target_column: str\r\n    feature_names: list[str]\r\n    task_type: str\r\n    label_mapping: Optional[dict[str, int]] = None\r\n    preprocessing_uri: Optional[str] = None\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return asdict(self)\r\n\r\n\r\n@dataclass(slots=True)\r\nclass PreparedDataset:\r\n    dataset_id: str\r\n    schema: DatasetSchema\r\n    train_features_uri: str\r\n    train_labels_uri: str\r\n    validation_features_uri: str\r\n    validation_labels_uri: str\r\n    test_features_uri: str\r\n    test_labels_uri: str\r\n    class_labels: Optional[list[str]]\r\n    n_features: int\r\n    n_train: int\r\n    n_validation: int\r\n    n_test: int\r\n    preparation_metadata: DatasetPreparationMetadata = field(\r\n        default_factory=DatasetPreparationMetadata\r\n    )\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return asdict(self)\r\n\r\n@dataclass(slots=True)\r\nclass TrainingShard:\r\n    task_id: str\r\n    attempt_id: int\r\n    job_id: str\r\n    experiment_id: str\r\n    assigned_worker_id: str\r\n    tree_start_index: int\r\n    tree_count: int\r\n    forest_config: ForestConfiguration\r\n    train_features_uri: str\r\n    train_labels_uri: str\r\n    artifact_output_dir: str\r\n    seed_base: int\r\n    lease_expires_at_ts: float\r\n\r\n    @property\r\n    def tree_end_index(self) -> int:\r\n        return self.tree_start_index + self.tree_count - 1\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return asdict(self)\r\n\r\n\r\n@dataclass(slots=True)\r\nclass TreeArtifactMetadata:\r\n    tree_id: str\r\n    job_id: str\r\n    experiment_id: str\r\n    task_id: str\r\n    tree_index: int\r\n    worker_id: str\r\n    seed: int\r\n    artifact_uri: str\r\n    status: TreeStatus\r\n    training_time_seconds: float\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        payload = asdict(self)\r\n        payload[\"status\"] = self.status.value\r\n        return payload\r\n\r\n    @staticmethod\r\n    def from_dict(data: dict) -> \"TreeArtifactMetadata\":\r\n        return TreeArtifactMetadata(\r\n            tree_id=data[\"tree_id\"],\r\n            job_id=data[\"job_id\"],\r\n            experiment_id=data[\"experiment_id\"],\r\n            task_id=data[\"task_id\"],\r\n            tree_index=data[\"tree_index\"],\r\n            worker_id=data[\"worker_id\"],\r\n            seed=data[\"seed\"],\r\n            artifact_uri=data[\"artifact_uri\"],\r\n            status=TreeStatus(data[\"status\"]),\r\n            training_time_seconds=data[\"training_time_seconds\"],\r\n        )\r\n\r\n@dataclass(slots=True)\r\nclass ShardTrainingResult:\r\n    task_id: str\r\n    attempt_id: int\r\n    worker_id: str\r\n    success: bool\r\n    tree_artifacts: list[TreeArtifactMetadata]\r\n    completed_tree_ids: list[str]\r\n    failed_tree_ids: list[str]\r\n    completed_tree_count: int\r\n    failed_tree_count: int\r\n    error_message: Optional[str]\r\n    elapsed_time_seconds: float\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return {\r\n            \"task_id\": self.task_id,\r\n            \"attempt_id\": self.attempt_id,\r\n            \"worker_id\": self.worker_id,\r\n            \"success\": self.success,\r\n            \"tree_artifacts\": [item.to_dict() for item in self.tree_artifacts],\r\n            \"completed_tree_ids\": self.completed_tree_ids,\r\n            \"failed_tree_ids\": self.failed_tree_ids,\r\n            \"completed_tree_count\": self.completed_tree_count,\r\n            \"failed_tree_count\": self.failed_tree_count,\r\n            \"error_message\": self.error_message,\r\n            \"elapsed_time_seconds\": self.elapsed_time_seconds,\r\n        }\r\n\r\n\r\n@dataclass(slots=True)\r\nclass ValidationMetrics:\r\n    experiment_id: str\r\n    accuracy: float\r\n    classification_report: dict[str, Any]\r\n    confusion_matrix: list[list[int]]\r\n    feature_importances: list[float]\r\n    evaluated_at: float = field(default_factory=time.time)\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return asdict(self)\r\n\r\n\r\n@dataclass(slots=True)\r\nclass ExperimentRecord:\r\n    experiment_id: str\r\n    forest_config: ForestConfiguration\r\n    status: ExperimentStatus\r\n    assigned_workers: list[str]\r\n    expected_tree_count: int\r\n    completed_tree_count: int\r\n    validation_metrics: Optional[ValidationMetrics] = None\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        payload = asdict(self)\r\n        payload[\"status\"] = self.status.value\r\n        if self.validation_metrics is not None:\r\n            payload[\"validation_metrics\"] = self.validation_metrics.to_dict()\r\n        return payload\r\n\r\n\r\n@dataclass(slots=True)\r\nclass TrainingJobRecord:\r\n    job_id: str\r\n    status: JobStatus\r\n    training_request: TrainingRequest\r\n    prepared_dataset: Optional[PreparedDataset]\r\n    experiment_ids: list[str]\r\n    selected_experiment_id: Optional[str]\r\n    model_id: Optional[str]\r\n    message: str\r\n    created_at: float = field(default_factory=time.time)\r\n    updated_at: float = field(default_factory=time.time)\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        payload = asdict(self)\r\n        payload[\"status\"] = self.status.value\r\n        return payload\r\n\r\n\r\n@dataclass(slots=True)\r\nclass ModelManifest:\r\n    model_id: str\r\n    job_id: str\r\n    experiment_id: str\r\n    model_type: str\r\n    forest_config: ForestConfiguration\r\n    class_labels: list[str]\r\n    feature_names: list[str]\r\n    target_column: str\r\n    train_features_uri: str\r\n    train_labels_uri: str\r\n    validation_features_uri: str\r\n    validation_labels_uri: str\r\n    test_features_uri: str\r\n    test_labels_uri: str\r\n    tree_artifacts: list[TreeArtifactMetadata]\r\n    validation_metrics: ValidationMetrics\r\n    test_metrics: Optional[dict[str, Any]]\r\n    preparation_metadata: DatasetPreparationMetadata = field(\r\n        default_factory=DatasetPreparationMetadata\r\n    )\r\n    created_at: float = field(default_factory=time.time)\r\n    status: ModelStatus = ModelStatus.TRAINING\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        payload = asdict(self)\r\n        payload[\"status\"] = self.status.value\r\n        payload[\"tree_artifacts\"] = [item.to_dict() for item in self.tree_artifacts]\r\n        payload[\"validation_metrics\"] = self.validation_metrics.to_dict()\r\n        payload[\"preparation_metadata\"] = self.preparation_metadata.to_dict()\r\n        return payload\r\n\r\n\r\n@dataclass(slots=True)\r\nclass MasterCommand:\r\n    command_id: str\r\n    job_id: str\r\n    command_type: CommandType\r\n    payload: dict[str, Any]\r\n    created_at: float = field(default_factory=time.time)\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        payload = asdict(self)\r\n        payload[\"command_type\"] = self.command_type.value\r\n        return payload\r\n\r\n\r\n@dataclass(slots=True)\r\nclass WorkerProgressSnapshot:\r\n    worker_id: str\r\n    task_id: str\r\n    experiment_id: str\r\n    completed_tree_ids: list[str]\r\n    running_tree_ids: list[str]\r\n    failed_tree_ids: list[str]\r\n    last_update_ts: float = field(default_factory=time.time)\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        return asdict(self)\r\n\r\n\r\n@dataclass(slots=True)\r\nclass TaskRecord:\r\n    task_id: str\r\n    attempt_id: int\r\n    job_id: str\r\n    experiment_id: str\r\n    worker_id: str\r\n    status: TaskStatus\r\n    tree_ids: list[str]\r\n    completed_tree_ids: list[str]\r\n    failed_tree_ids: list[str]\r\n    lease_expires_at_ts: float\r\n    updated_at: float = field(default_factory=time.time)\r\n    error_message: Optional[str] = None\r\n\r\n    def to_dict(self) -> dict[str, Any]:\r\n        payload = asdict(self)\r\n        payload[\"status\"] = self.status.value\r\n        return payload\r\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/common/contracts.py b/common/contracts.py
+--- a/common/contracts.py	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/common/contracts.py	(date 1779194316692)
+@@ -152,6 +152,7 @@
+     artifact_uri: str
+     status: TreeStatus
+     training_time_seconds: float
++    feature_importances: list[float] = field(default_factory=list)
+ 
+     def to_dict(self) -> dict[str, Any]:
+         payload = asdict(self)
+@@ -171,6 +172,7 @@
+             artifact_uri=data["artifact_uri"],
+             status=TreeStatus(data["status"]),
+             training_time_seconds=data["training_time_seconds"],
++            feature_importances=data.get("feature_importances", []),
+         )
+ 
+ @dataclass(slots=True)
+Index: rf_v2_pb2.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># -*- coding: utf-8 -*-\r\n# Generated by the protocol buffer compiler.  DO NOT EDIT!\r\n# NO CHECKED-IN PROTOBUF GENCODE\r\n# source: rf_v2.proto\r\n# Protobuf Python Version: 6.31.1\r\n\"\"\"Generated protocol buffer code.\"\"\"\r\nfrom google.protobuf import descriptor as _descriptor\r\nfrom google.protobuf import descriptor_pool as _descriptor_pool\r\nfrom google.protobuf import runtime_version as _runtime_version\r\nfrom google.protobuf import symbol_database as _symbol_database\r\nfrom google.protobuf.internal import builder as _builder\r\n_runtime_version.ValidateProtobufRuntimeVersion(\r\n    _runtime_version.Domain.PUBLIC,\r\n    6,\r\n    31,\r\n    1,\r\n    '',\r\n    'rf_v2.proto'\r\n)\r\n# @@protoc_insertion_point(imports)\r\n\r\n_sym_db = _symbol_database.Default()\r\n\r\n\r\n\r\n\r\nDESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\\n\\x0brf_v2.proto\\x12\\rdistributedrf\\\"=\\n\\x0b\\x44\\x65nseMatrix\\x12\\x0e\\n\\x06values\\x18\\x01 \\x03(\\x01\\x12\\x0e\\n\\x06n_rows\\x18\\x02 \\x01(\\x05\\x12\\x0e\\n\\x06n_cols\\x18\\x03 \\x01(\\x05\\\"F\\n\\x15RegisterWorkerRequest\\x12\\x11\\n\\tworker_id\\x18\\x01 \\x01(\\t\\x12\\x0c\\n\\x04host\\x18\\x02 \\x01(\\t\\x12\\x0c\\n\\x04port\\x18\\x03 \\x01(\\x05\\\";\\n\\x16RegisterWorkerResponse\\x12\\x10\\n\\x08\\x61\\x63\\x63\\x65pted\\x18\\x01 \\x01(\\x08\\x12\\x0f\\n\\x07message\\x18\\x02 \\x01(\\t\\\"U\\n\\x10HeartbeatRequest\\x12\\x11\\n\\tworker_id\\x18\\x01 \\x01(\\t\\x12\\x15\\n\\rrunning_tasks\\x18\\x02 \\x01(\\x05\\x12\\x17\\n\\x0f\\x61\\x63tive_task_ids\\x18\\x03 \\x03(\\t\\\"\\x1f\\n\\x11HeartbeatResponse\\x12\\n\\n\\x02ok\\x18\\x01 \\x01(\\x08\\\"\\xaa\\x03\\n\\x15SubmitTrainingRequest\\x12\\x13\\n\\x0b\\x64\\x61taset_url\\x18\\x01 \\x01(\\t\\x12\\x15\\n\\rtarget_column\\x18\\x02 \\x01(\\t\\x12\\x11\\n\\ttask_type\\x18\\x03 \\x01(\\t\\x12\\x1a\\n\\x12n_estimators_total\\x18\\x04 \\x01(\\x05\\x12\\x18\\n\\x10validation_ratio\\x18\\x05 \\x01(\\x01\\x12\\x12\\n\\ntest_ratio\\x18\\x06 \\x01(\\x01\\x12\\x11\\n\\tbootstrap\\x18\\x07 \\x01(\\x08\\x12\\x1a\\n\\x12global_random_seed\\x18\\x08 \\x01(\\x05\\x12\\x1c\\n\\x14max_depth_candidates\\x18\\t \\x03(\\x05\\x12\\x1f\\n\\x17max_features_candidates\\x18\\n \\x03(\\t\\x12$\\n\\x1cmin_samples_split_candidates\\x18\\x0b \\x03(\\x05\\x12#\\n\\x1bmin_samples_leaf_candidates\\x18\\x0c \\x03(\\x05\\x12\\x1c\\n\\x14\\x63riterion_candidates\\x18\\r \\x03(\\t\\x12\\x18\\n\\x10\\x64\\x61taset_scenario\\x18\\x64 \\x01(\\t\\x12\\x17\\n\\x0fleakage_columns\\x18\\x65 \\x03(\\t\\\"c\\n\\x16SubmitTrainingResponse\\x12\\x0e\\n\\x06job_id\\x18\\x01 \\x01(\\t\\x12(\\n\\x06status\\x18\\x02 \\x01(\\x0e\\x32\\x18.distributedrf.JobStatus\\x12\\x0f\\n\\x07message\\x18\\x03 \\x01(\\t\\\"X\\n\\x16SubmitInferenceRequest\\x12\\x10\\n\\x08model_id\\x18\\x01 \\x01(\\t\\x12,\\n\\x08\\x66\\x65\\x61tures\\x18\\x02 \\x01(\\x0b\\x32\\x1a.distributedrf.DenseMatrix\\\"\\x80\\x01\\n\\x17SubmitInferenceResponse\\x12\\x0f\\n\\x07success\\x18\\x01 \\x01(\\x08\\x12\\r\\n\\x05\\x65rror\\x18\\x02 \\x01(\\t\\x12\\x11\\n\\ttask_type\\x18\\x03 \\x01(\\t\\x12\\x18\\n\\x10predicted_labels\\x18\\x04 \\x03(\\t\\x12\\x18\\n\\x10predicted_values\\x18\\x05 \\x03(\\x01\\\"\\xa7\\x01\\n\\x13TrainedTreeArtifact\\x12\\x0f\\n\\x07tree_id\\x18\\x01 \\x01(\\t\\x12\\x15\\n\\rexperiment_id\\x18\\x02 \\x01(\\t\\x12\\x12\\n\\ntree_index\\x18\\x03 \\x01(\\x05\\x12\\x14\\n\\x0c\\x61rtifact_uri\\x18\\x04 \\x01(\\t\\x12\\x11\\n\\tworker_id\\x18\\x05 \\x01(\\t\\x12\\x0c\\n\\x04seed\\x18\\x06 \\x01(\\x05\\x12\\x1d\\n\\x15training_time_seconds\\x18\\x07 \\x01(\\x01\\\"\\xfa\\x03\\n\\x11TrainShardRequest\\x12\\x0f\\n\\x07task_id\\x18\\x01 \\x01(\\t\\x12\\x12\\n\\nattempt_id\\x18\\x02 \\x01(\\x05\\x12\\x0e\\n\\x06job_id\\x18\\x03 \\x01(\\t\\x12\\x15\\n\\rexperiment_id\\x18\\x04 \\x01(\\t\\x12\\x1a\\n\\x12\\x61ssigned_worker_id\\x18\\x05 \\x01(\\t\\x12\\x18\\n\\x10tree_start_index\\x18\\x06 \\x01(\\x05\\x12\\x12\\n\\ntree_count\\x18\\x07 \\x01(\\x05\\x12\\x11\\n\\ttask_type\\x18\\x08 \\x01(\\t\\x12\\x14\\n\\x0cn_estimators\\x18\\t \\x01(\\x05\\x12\\x11\\n\\tmax_depth\\x18\\n \\x01(\\x05\\x12\\x14\\n\\x0cmax_features\\x18\\x0b \\x01(\\t\\x12\\x19\\n\\x11min_samples_split\\x18\\x0c \\x01(\\x05\\x12\\x18\\n\\x10min_samples_leaf\\x18\\r \\x01(\\x05\\x12\\x11\\n\\tcriterion\\x18\\x0e \\x01(\\t\\x12\\x11\\n\\tbootstrap\\x18\\x0f \\x01(\\x08\\x12\\x1a\\n\\x12global_random_seed\\x18\\x10 \\x01(\\x05\\x12\\x1a\\n\\x12train_features_uri\\x18\\x11 \\x01(\\t\\x12\\x18\\n\\x10train_labels_uri\\x18\\x12 \\x01(\\t\\x12\\x1b\\n\\x13\\x61rtifact_output_dir\\x18\\x13 \\x01(\\t\\x12\\x11\\n\\tseed_base\\x18\\x14 \\x01(\\x05\\x12 \\n\\x18lease_expires_at_unix_ms\\x18\\x15 \\x01(\\x03\\\"\\xf6\\x01\\n\\x12TrainShardResponse\\x12\\x0f\\n\\x07task_id\\x18\\x01 \\x01(\\t\\x12\\x12\\n\\nattempt_id\\x18\\x02 \\x01(\\x05\\x12\\x11\\n\\tworker_id\\x18\\x03 \\x01(\\t\\x12\\x0f\\n\\x07success\\x18\\x04 \\x01(\\x08\\x12\\r\\n\\x05\\x65rror\\x18\\x05 \\x01(\\t\\x12\\x35\\n\\tartifacts\\x18\\x06 \\x03(\\x0b\\x32\\\".distributedrf.TrainedTreeArtifact\\x12\\x1a\\n\\x12\\x63ompleted_tree_ids\\x18\\x07 \\x03(\\t\\x12\\x17\\n\\x0f\\x66\\x61iled_tree_ids\\x18\\x08 \\x03(\\t\\x12\\x1c\\n\\x14\\x65lapsed_time_seconds\\x18\\t \\x01(\\x01\\\"\\xb1\\x01\\n\\x13PredictShardRequest\\x12\\x10\\n\\x08model_id\\x18\\x01 \\x01(\\t\\x12\\x15\\n\\rexperiment_id\\x18\\x02 \\x01(\\t\\x12\\x11\\n\\ttask_type\\x18\\x03 \\x01(\\t\\x12,\\n\\x08\\x66\\x65\\x61tures\\x18\\x04 \\x01(\\x0b\\x32\\x1a.distributedrf.DenseMatrix\\x12\\x1a\\n\\x12tree_artifact_uris\\x18\\x05 \\x03(\\t\\x12\\x14\\n\\x0c\\x63lass_labels\\x18\\x06 \\x03(\\t\\\"y\\n\\x14PredictShardResponse\\x12\\x11\\n\\tworker_id\\x18\\x01 \\x01(\\t\\x12\\x0f\\n\\x07success\\x18\\x02 \\x01(\\x08\\x12\\r\\n\\x05\\x65rror\\x18\\x03 \\x01(\\t\\x12\\x0e\\n\\x06values\\x18\\x04 \\x03(\\x01\\x12\\x0e\\n\\x06n_rows\\x18\\x05 \\x01(\\x05\\x12\\x0e\\n\\x06n_cols\\x18\\x06 \\x01(\\x05*l\\n\\tJobStatus\\x12\\x1a\\n\\x16JOB_STATUS_UNSPECIFIED\\x10\\x00\\x12\\x0b\\n\\x07PENDING\\x10\\x01\\x12\\x0b\\n\\x07RUNNING\\x10\\x02\\x12\\x0e\\n\\nVALIDATING\\x10\\x03\\x12\\r\\n\\tCOMPLETED\\x10\\x04\\x12\\n\\n\\x06\\x46\\x41ILED\\x10\\x05\\x32\\x84\\x03\\n\\x12\\x43oordinatorService\\x12]\\n\\x0eRegisterWorker\\x12$.distributedrf.RegisterWorkerRequest\\x1a%.distributedrf.RegisterWorkerResponse\\x12N\\n\\tHeartbeat\\x12\\x1f.distributedrf.HeartbeatRequest\\x1a .distributedrf.HeartbeatResponse\\x12]\\n\\x0eSubmitTraining\\x12$.distributedrf.SubmitTrainingRequest\\x1a%.distributedrf.SubmitTrainingResponse\\x12`\\n\\x0fSubmitInference\\x12%.distributedrf.SubmitInferenceRequest\\x1a&.distributedrf.SubmitInferenceResponse2\\xbb\\x01\\n\\rWorkerService\\x12Q\\n\\nTrainShard\\x12 .distributedrf.TrainShardRequest\\x1a!.distributedrf.TrainShardResponse\\x12W\\n\\x0cPredictShard\\x12\\\".distributedrf.PredictShardRequest\\x1a#.distributedrf.PredictShardResponseb\\x06proto3')\r\n\r\n_globals = globals()\r\n_builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)\r\n_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'rf_v2_pb2', _globals)\r\nif not _descriptor._USE_C_DESCRIPTORS:\r\n  DESCRIPTOR._loaded_options = None\r\n  _globals['_JOBSTATUS']._serialized_start=2328\r\n  _globals['_JOBSTATUS']._serialized_end=2436\r\n  _globals['_DENSEMATRIX']._serialized_start=30\r\n  _globals['_DENSEMATRIX']._serialized_end=91\r\n  _globals['_REGISTERWORKERREQUEST']._serialized_start=93\r\n  _globals['_REGISTERWORKERREQUEST']._serialized_end=163\r\n  _globals['_REGISTERWORKERRESPONSE']._serialized_start=165\r\n  _globals['_REGISTERWORKERRESPONSE']._serialized_end=224\r\n  _globals['_HEARTBEATREQUEST']._serialized_start=226\r\n  _globals['_HEARTBEATREQUEST']._serialized_end=311\r\n  _globals['_HEARTBEATRESPONSE']._serialized_start=313\r\n  _globals['_HEARTBEATRESPONSE']._serialized_end=344\r\n  _globals['_SUBMITTRAININGREQUEST']._serialized_start=347\r\n  _globals['_SUBMITTRAININGREQUEST']._serialized_end=773\r\n  _globals['_SUBMITTRAININGRESPONSE']._serialized_start=775\r\n  _globals['_SUBMITTRAININGRESPONSE']._serialized_end=874\r\n  _globals['_SUBMITINFERENCEREQUEST']._serialized_start=876\r\n  _globals['_SUBMITINFERENCEREQUEST']._serialized_end=964\r\n  _globals['_SUBMITINFERENCERESPONSE']._serialized_start=967\r\n  _globals['_SUBMITINFERENCERESPONSE']._serialized_end=1095\r\n  _globals['_TRAINEDTREEARTIFACT']._serialized_start=1098\r\n  _globals['_TRAINEDTREEARTIFACT']._serialized_end=1265\r\n  _globals['_TRAINSHARDREQUEST']._serialized_start=1268\r\n  _globals['_TRAINSHARDREQUEST']._serialized_end=1774\r\n  _globals['_TRAINSHARDRESPONSE']._serialized_start=1777\r\n  _globals['_TRAINSHARDRESPONSE']._serialized_end=2023\r\n  _globals['_PREDICTSHARDREQUEST']._serialized_start=2026\r\n  _globals['_PREDICTSHARDREQUEST']._serialized_end=2203\r\n  _globals['_PREDICTSHARDRESPONSE']._serialized_start=2205\r\n  _globals['_PREDICTSHARDRESPONSE']._serialized_end=2326\r\n  _globals['_COORDINATORSERVICE']._serialized_start=2439\r\n  _globals['_COORDINATORSERVICE']._serialized_end=2827\r\n  _globals['_WORKERSERVICE']._serialized_start=2830\r\n  _globals['_WORKERSERVICE']._serialized_end=3017\r\n# @@protoc_insertion_point(module_scope)\r\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/rf_v2_pb2.py b/rf_v2_pb2.py
+--- a/rf_v2_pb2.py	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/rf_v2_pb2.py	(date 1779196041104)
+@@ -24,15 +24,15 @@
+ 
+ 
+ 
+-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0brf_v2.proto\x12\rdistributedrf\"=\n\x0b\x44\x65nseMatrix\x12\x0e\n\x06values\x18\x01 \x03(\x01\x12\x0e\n\x06n_rows\x18\x02 \x01(\x05\x12\x0e\n\x06n_cols\x18\x03 \x01(\x05\"F\n\x15RegisterWorkerRequest\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x0c\n\x04host\x18\x02 \x01(\t\x12\x0c\n\x04port\x18\x03 \x01(\x05\";\n\x16RegisterWorkerResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"U\n\x10HeartbeatRequest\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x15\n\rrunning_tasks\x18\x02 \x01(\x05\x12\x17\n\x0f\x61\x63tive_task_ids\x18\x03 \x03(\t\"\x1f\n\x11HeartbeatResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\"\xaa\x03\n\x15SubmitTrainingRequest\x12\x13\n\x0b\x64\x61taset_url\x18\x01 \x01(\t\x12\x15\n\rtarget_column\x18\x02 \x01(\t\x12\x11\n\ttask_type\x18\x03 \x01(\t\x12\x1a\n\x12n_estimators_total\x18\x04 \x01(\x05\x12\x18\n\x10validation_ratio\x18\x05 \x01(\x01\x12\x12\n\ntest_ratio\x18\x06 \x01(\x01\x12\x11\n\tbootstrap\x18\x07 \x01(\x08\x12\x1a\n\x12global_random_seed\x18\x08 \x01(\x05\x12\x1c\n\x14max_depth_candidates\x18\t \x03(\x05\x12\x1f\n\x17max_features_candidates\x18\n \x03(\t\x12$\n\x1cmin_samples_split_candidates\x18\x0b \x03(\x05\x12#\n\x1bmin_samples_leaf_candidates\x18\x0c \x03(\x05\x12\x1c\n\x14\x63riterion_candidates\x18\r \x03(\t\x12\x18\n\x10\x64\x61taset_scenario\x18\x64 \x01(\t\x12\x17\n\x0fleakage_columns\x18\x65 \x03(\t\"c\n\x16SubmitTrainingResponse\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12(\n\x06status\x18\x02 \x01(\x0e\x32\x18.distributedrf.JobStatus\x12\x0f\n\x07message\x18\x03 \x01(\t\"X\n\x16SubmitInferenceRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12,\n\x08\x66\x65\x61tures\x18\x02 \x01(\x0b\x32\x1a.distributedrf.DenseMatrix\"\x80\x01\n\x17SubmitInferenceResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\r\n\x05\x65rror\x18\x02 \x01(\t\x12\x11\n\ttask_type\x18\x03 \x01(\t\x12\x18\n\x10predicted_labels\x18\x04 \x03(\t\x12\x18\n\x10predicted_values\x18\x05 \x03(\x01\"\xa7\x01\n\x13TrainedTreeArtifact\x12\x0f\n\x07tree_id\x18\x01 \x01(\t\x12\x15\n\rexperiment_id\x18\x02 \x01(\t\x12\x12\n\ntree_index\x18\x03 \x01(\x05\x12\x14\n\x0c\x61rtifact_uri\x18\x04 \x01(\t\x12\x11\n\tworker_id\x18\x05 \x01(\t\x12\x0c\n\x04seed\x18\x06 \x01(\x05\x12\x1d\n\x15training_time_seconds\x18\x07 \x01(\x01\"\xfa\x03\n\x11TrainShardRequest\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12\x12\n\nattempt_id\x18\x02 \x01(\x05\x12\x0e\n\x06job_id\x18\x03 \x01(\t\x12\x15\n\rexperiment_id\x18\x04 \x01(\t\x12\x1a\n\x12\x61ssigned_worker_id\x18\x05 \x01(\t\x12\x18\n\x10tree_start_index\x18\x06 \x01(\x05\x12\x12\n\ntree_count\x18\x07 \x01(\x05\x12\x11\n\ttask_type\x18\x08 \x01(\t\x12\x14\n\x0cn_estimators\x18\t \x01(\x05\x12\x11\n\tmax_depth\x18\n \x01(\x05\x12\x14\n\x0cmax_features\x18\x0b \x01(\t\x12\x19\n\x11min_samples_split\x18\x0c \x01(\x05\x12\x18\n\x10min_samples_leaf\x18\r \x01(\x05\x12\x11\n\tcriterion\x18\x0e \x01(\t\x12\x11\n\tbootstrap\x18\x0f \x01(\x08\x12\x1a\n\x12global_random_seed\x18\x10 \x01(\x05\x12\x1a\n\x12train_features_uri\x18\x11 \x01(\t\x12\x18\n\x10train_labels_uri\x18\x12 \x01(\t\x12\x1b\n\x13\x61rtifact_output_dir\x18\x13 \x01(\t\x12\x11\n\tseed_base\x18\x14 \x01(\x05\x12 \n\x18lease_expires_at_unix_ms\x18\x15 \x01(\x03\"\xf6\x01\n\x12TrainShardResponse\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12\x12\n\nattempt_id\x18\x02 \x01(\x05\x12\x11\n\tworker_id\x18\x03 \x01(\t\x12\x0f\n\x07success\x18\x04 \x01(\x08\x12\r\n\x05\x65rror\x18\x05 \x01(\t\x12\x35\n\tartifacts\x18\x06 \x03(\x0b\x32\".distributedrf.TrainedTreeArtifact\x12\x1a\n\x12\x63ompleted_tree_ids\x18\x07 \x03(\t\x12\x17\n\x0f\x66\x61iled_tree_ids\x18\x08 \x03(\t\x12\x1c\n\x14\x65lapsed_time_seconds\x18\t \x01(\x01\"\xb1\x01\n\x13PredictShardRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x15\n\rexperiment_id\x18\x02 \x01(\t\x12\x11\n\ttask_type\x18\x03 \x01(\t\x12,\n\x08\x66\x65\x61tures\x18\x04 \x01(\x0b\x32\x1a.distributedrf.DenseMatrix\x12\x1a\n\x12tree_artifact_uris\x18\x05 \x03(\t\x12\x14\n\x0c\x63lass_labels\x18\x06 \x03(\t\"y\n\x14PredictShardResponse\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x0f\n\x07success\x18\x02 \x01(\x08\x12\r\n\x05\x65rror\x18\x03 \x01(\t\x12\x0e\n\x06values\x18\x04 \x03(\x01\x12\x0e\n\x06n_rows\x18\x05 \x01(\x05\x12\x0e\n\x06n_cols\x18\x06 \x01(\x05*l\n\tJobStatus\x12\x1a\n\x16JOB_STATUS_UNSPECIFIED\x10\x00\x12\x0b\n\x07PENDING\x10\x01\x12\x0b\n\x07RUNNING\x10\x02\x12\x0e\n\nVALIDATING\x10\x03\x12\r\n\tCOMPLETED\x10\x04\x12\n\n\x06\x46\x41ILED\x10\x05\x32\x84\x03\n\x12\x43oordinatorService\x12]\n\x0eRegisterWorker\x12$.distributedrf.RegisterWorkerRequest\x1a%.distributedrf.RegisterWorkerResponse\x12N\n\tHeartbeat\x12\x1f.distributedrf.HeartbeatRequest\x1a .distributedrf.HeartbeatResponse\x12]\n\x0eSubmitTraining\x12$.distributedrf.SubmitTrainingRequest\x1a%.distributedrf.SubmitTrainingResponse\x12`\n\x0fSubmitInference\x12%.distributedrf.SubmitInferenceRequest\x1a&.distributedrf.SubmitInferenceResponse2\xbb\x01\n\rWorkerService\x12Q\n\nTrainShard\x12 .distributedrf.TrainShardRequest\x1a!.distributedrf.TrainShardResponse\x12W\n\x0cPredictShard\x12\".distributedrf.PredictShardRequest\x1a#.distributedrf.PredictShardResponseb\x06proto3')
++DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0brf_v2.proto\x12\rdistributedrf\"=\n\x0b\x44\x65nseMatrix\x12\x0e\n\x06values\x18\x01 \x03(\x01\x12\x0e\n\x06n_rows\x18\x02 \x01(\x05\x12\x0e\n\x06n_cols\x18\x03 \x01(\x05\"F\n\x15RegisterWorkerRequest\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x0c\n\x04host\x18\x02 \x01(\t\x12\x0c\n\x04port\x18\x03 \x01(\x05\";\n\x16RegisterWorkerResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"U\n\x10HeartbeatRequest\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x15\n\rrunning_tasks\x18\x02 \x01(\x05\x12\x17\n\x0f\x61\x63tive_task_ids\x18\x03 \x03(\t\"\x1f\n\x11HeartbeatResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\"\xaa\x03\n\x15SubmitTrainingRequest\x12\x13\n\x0b\x64\x61taset_url\x18\x01 \x01(\t\x12\x15\n\rtarget_column\x18\x02 \x01(\t\x12\x11\n\ttask_type\x18\x03 \x01(\t\x12\x1a\n\x12n_estimators_total\x18\x04 \x01(\x05\x12\x18\n\x10validation_ratio\x18\x05 \x01(\x01\x12\x12\n\ntest_ratio\x18\x06 \x01(\x01\x12\x11\n\tbootstrap\x18\x07 \x01(\x08\x12\x1a\n\x12global_random_seed\x18\x08 \x01(\x05\x12\x1c\n\x14max_depth_candidates\x18\t \x03(\x05\x12\x1f\n\x17max_features_candidates\x18\n \x03(\t\x12$\n\x1cmin_samples_split_candidates\x18\x0b \x03(\x05\x12#\n\x1bmin_samples_leaf_candidates\x18\x0c \x03(\x05\x12\x1c\n\x14\x63riterion_candidates\x18\r \x03(\t\x12\x18\n\x10\x64\x61taset_scenario\x18\x64 \x01(\t\x12\x17\n\x0fleakage_columns\x18\x65 \x03(\t\"c\n\x16SubmitTrainingResponse\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12(\n\x06status\x18\x02 \x01(\x0e\x32\x18.distributedrf.JobStatus\x12\x0f\n\x07message\x18\x03 \x01(\t\"X\n\x16SubmitInferenceRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12,\n\x08\x66\x65\x61tures\x18\x02 \x01(\x0b\x32\x1a.distributedrf.DenseMatrix\"\x80\x01\n\x17SubmitInferenceResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\r\n\x05\x65rror\x18\x02 \x01(\t\x12\x11\n\ttask_type\x18\x03 \x01(\t\x12\x18\n\x10predicted_labels\x18\x04 \x03(\t\x12\x18\n\x10predicted_values\x18\x05 \x03(\x01\"\xc4\x01\n\x13TrainedTreeArtifact\x12\x0f\n\x07tree_id\x18\x01 \x01(\t\x12\x15\n\rexperiment_id\x18\x02 \x01(\t\x12\x12\n\ntree_index\x18\x03 \x01(\x05\x12\x14\n\x0c\x61rtifact_uri\x18\x04 \x01(\t\x12\x11\n\tworker_id\x18\x05 \x01(\t\x12\x0c\n\x04seed\x18\x06 \x01(\x05\x12\x1d\n\x15training_time_seconds\x18\x07 \x01(\x01\x12\x1b\n\x13\x66\x65\x61ture_importances\x18\x08 \x03(\x01\"\xfa\x03\n\x11TrainShardRequest\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12\x12\n\nattempt_id\x18\x02 \x01(\x05\x12\x0e\n\x06job_id\x18\x03 \x01(\t\x12\x15\n\rexperiment_id\x18\x04 \x01(\t\x12\x1a\n\x12\x61ssigned_worker_id\x18\x05 \x01(\t\x12\x18\n\x10tree_start_index\x18\x06 \x01(\x05\x12\x12\n\ntree_count\x18\x07 \x01(\x05\x12\x11\n\ttask_type\x18\x08 \x01(\t\x12\x14\n\x0cn_estimators\x18\t \x01(\x05\x12\x11\n\tmax_depth\x18\n \x01(\x05\x12\x14\n\x0cmax_features\x18\x0b \x01(\t\x12\x19\n\x11min_samples_split\x18\x0c \x01(\x05\x12\x18\n\x10min_samples_leaf\x18\r \x01(\x05\x12\x11\n\tcriterion\x18\x0e \x01(\t\x12\x11\n\tbootstrap\x18\x0f \x01(\x08\x12\x1a\n\x12global_random_seed\x18\x10 \x01(\x05\x12\x1a\n\x12train_features_uri\x18\x11 \x01(\t\x12\x18\n\x10train_labels_uri\x18\x12 \x01(\t\x12\x1b\n\x13\x61rtifact_output_dir\x18\x13 \x01(\t\x12\x11\n\tseed_base\x18\x14 \x01(\x05\x12 \n\x18lease_expires_at_unix_ms\x18\x15 \x01(\x03\"\xf6\x01\n\x12TrainShardResponse\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12\x12\n\nattempt_id\x18\x02 \x01(\x05\x12\x11\n\tworker_id\x18\x03 \x01(\t\x12\x0f\n\x07success\x18\x04 \x01(\x08\x12\r\n\x05\x65rror\x18\x05 \x01(\t\x12\x35\n\tartifacts\x18\x06 \x03(\x0b\x32\".distributedrf.TrainedTreeArtifact\x12\x1a\n\x12\x63ompleted_tree_ids\x18\x07 \x03(\t\x12\x17\n\x0f\x66\x61iled_tree_ids\x18\x08 \x03(\t\x12\x1c\n\x14\x65lapsed_time_seconds\x18\t \x01(\x01\"\xb1\x01\n\x13PredictShardRequest\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x15\n\rexperiment_id\x18\x02 \x01(\t\x12\x11\n\ttask_type\x18\x03 \x01(\t\x12,\n\x08\x66\x65\x61tures\x18\x04 \x01(\x0b\x32\x1a.distributedrf.DenseMatrix\x12\x1a\n\x12tree_artifact_uris\x18\x05 \x03(\t\x12\x14\n\x0c\x63lass_labels\x18\x06 \x03(\t\"y\n\x14PredictShardResponse\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x0f\n\x07success\x18\x02 \x01(\x08\x12\r\n\x05\x65rror\x18\x03 \x01(\t\x12\x0e\n\x06values\x18\x04 \x03(\x01\x12\x0e\n\x06n_rows\x18\x05 \x01(\x05\x12\x0e\n\x06n_cols\x18\x06 \x01(\x05*l\n\tJobStatus\x12\x1a\n\x16JOB_STATUS_UNSPECIFIED\x10\x00\x12\x0b\n\x07PENDING\x10\x01\x12\x0b\n\x07RUNNING\x10\x02\x12\x0e\n\nVALIDATING\x10\x03\x12\r\n\tCOMPLETED\x10\x04\x12\n\n\x06\x46\x41ILED\x10\x05\x32\x84\x03\n\x12\x43oordinatorService\x12]\n\x0eRegisterWorker\x12$.distributedrf.RegisterWorkerRequest\x1a%.distributedrf.RegisterWorkerResponse\x12N\n\tHeartbeat\x12\x1f.distributedrf.HeartbeatRequest\x1a .distributedrf.HeartbeatResponse\x12]\n\x0eSubmitTraining\x12$.distributedrf.SubmitTrainingRequest\x1a%.distributedrf.SubmitTrainingResponse\x12`\n\x0fSubmitInference\x12%.distributedrf.SubmitInferenceRequest\x1a&.distributedrf.SubmitInferenceResponse2\xbb\x01\n\rWorkerService\x12Q\n\nTrainShard\x12 .distributedrf.TrainShardRequest\x1a!.distributedrf.TrainShardResponse\x12W\n\x0cPredictShard\x12\".distributedrf.PredictShardRequest\x1a#.distributedrf.PredictShardResponseb\x06proto3')
+ 
+ _globals = globals()
+ _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
+ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'rf_v2_pb2', _globals)
+ if not _descriptor._USE_C_DESCRIPTORS:
+   DESCRIPTOR._loaded_options = None
+-  _globals['_JOBSTATUS']._serialized_start=2328
+-  _globals['_JOBSTATUS']._serialized_end=2436
++  _globals['_JOBSTATUS']._serialized_start=2357
++  _globals['_JOBSTATUS']._serialized_end=2465
+   _globals['_DENSEMATRIX']._serialized_start=30
+   _globals['_DENSEMATRIX']._serialized_end=91
+   _globals['_REGISTERWORKERREQUEST']._serialized_start=93
+@@ -52,17 +52,17 @@
+   _globals['_SUBMITINFERENCERESPONSE']._serialized_start=967
+   _globals['_SUBMITINFERENCERESPONSE']._serialized_end=1095
+   _globals['_TRAINEDTREEARTIFACT']._serialized_start=1098
+-  _globals['_TRAINEDTREEARTIFACT']._serialized_end=1265
+-  _globals['_TRAINSHARDREQUEST']._serialized_start=1268
+-  _globals['_TRAINSHARDREQUEST']._serialized_end=1774
+-  _globals['_TRAINSHARDRESPONSE']._serialized_start=1777
+-  _globals['_TRAINSHARDRESPONSE']._serialized_end=2023
+-  _globals['_PREDICTSHARDREQUEST']._serialized_start=2026
+-  _globals['_PREDICTSHARDREQUEST']._serialized_end=2203
+-  _globals['_PREDICTSHARDRESPONSE']._serialized_start=2205
+-  _globals['_PREDICTSHARDRESPONSE']._serialized_end=2326
+-  _globals['_COORDINATORSERVICE']._serialized_start=2439
+-  _globals['_COORDINATORSERVICE']._serialized_end=2827
+-  _globals['_WORKERSERVICE']._serialized_start=2830
+-  _globals['_WORKERSERVICE']._serialized_end=3017
++  _globals['_TRAINEDTREEARTIFACT']._serialized_end=1294
++  _globals['_TRAINSHARDREQUEST']._serialized_start=1297
++  _globals['_TRAINSHARDREQUEST']._serialized_end=1803
++  _globals['_TRAINSHARDRESPONSE']._serialized_start=1806
++  _globals['_TRAINSHARDRESPONSE']._serialized_end=2052
++  _globals['_PREDICTSHARDREQUEST']._serialized_start=2055
++  _globals['_PREDICTSHARDREQUEST']._serialized_end=2232
++  _globals['_PREDICTSHARDRESPONSE']._serialized_start=2234
++  _globals['_PREDICTSHARDRESPONSE']._serialized_end=2355
++  _globals['_COORDINATORSERVICE']._serialized_start=2468
++  _globals['_COORDINATORSERVICE']._serialized_end=2856
++  _globals['_WORKERSERVICE']._serialized_start=2859
++  _globals['_WORKERSERVICE']._serialized_end=3046
+ # @@protoc_insertion_point(module_scope)
+Index: README.md
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>HOW TO RUN:\r\nSetup iniziale\r\n\r\nApri PowerShell nella root del progetto:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\nPoi fai un controllo veloce:\r\n\r\npython -m compileall -q master.py masterPackage common worker\r\n\r\nSe questo passa senza output, prosegui.\r\n\r\nPulisci gli artifact vecchi:\r\n\r\nRemove-Item -Recurse -Force .\\shared_artifacts -ErrorAction SilentlyContinue\r\nNew-Item -ItemType Directory -Force .\\shared_artifacts | Out-Null\r\n\r\nTerminale 1 — Avvia il master\r\n\r\nApri un primo terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\n$env:MASTER_HOST=\"0.0.0.0\"\r\n$env:MASTER_PORT=\"50051\"\r\n$env:ARTIFACT_ROOT=(Join-Path (Get-Location) \"shared_artifacts\")\r\n\r\npython master.py\r\n\r\nDevi vedere qualcosa tipo:\r\n\r\n[MASTER] listening on 0.0.0.0:50051\r\n\r\nLascia questo terminale aperto.\r\n\r\nTerminale 2 — Avvia worker 1\r\n\r\nApri un secondo terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\n$env:WORKER_ID=\"worker-1\"\r\n$env:WORKER_BIND_HOST=\"0.0.0.0\"\r\n$env:WORKER_PORT=\"50061\"\r\n$env:WORKER_ADVERTISE_HOST=\"127.0.0.1\"\r\n$env:MASTER_HOST=\"127.0.0.1\"\r\n$env:MASTER_PORT=\"50051\"\r\n$env:ARTIFACT_ROOT=(Join-Path (Get-Location) \"shared_artifacts\")\r\n\r\npython -c \"from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()\"\r\n\r\nDovresti vedere:\r\n\r\n[WorkerNode] gRPC server started on port 50061\r\n[MasterClient] Registered worker worker-1\r\n[WorkerNode] Registered as 127.0.0.1:50061\r\n\r\nLascia aperto anche questo terminale.\r\n\r\nTerminale 3 — Avvia worker 2\r\n\r\nApri un terzo terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\n$env:WORKER_ID=\"worker-2\"\r\n$env:WORKER_BIND_HOST=\"0.0.0.0\"\r\n$env:WORKER_PORT=\"50062\"\r\n$env:WORKER_ADVERTISE_HOST=\"127.0.0.1\"\r\n$env:MASTER_HOST=\"127.0.0.1\"\r\n$env:MASTER_PORT=\"50051\"\r\n$env:ARTIFACT_ROOT=(Join-Path (Get-Location) \"shared_artifacts\")\r\n\r\npython -c \"from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()\"\r\n\r\nPer una prima run puoi anche usare un solo worker, ma con due inizi già a verificare la distribuzione.\r\n\r\nTerminale 4 — Invia il training job\r\n\r\nApri un quarto terminale PowerShell:\r\n\r\ncd C:\\Users\\micci\\PycharmProjects\\PythonProject1\r\n.\\.venv\\Scripts\\Activate.ps1\r\n\r\nCrea un piccolo client temporaneo:\r\n\r\n@'\r\nfrom pathlib import Path\r\nimport grpc\r\n\r\nimport rf_v2_pb2 as pb\r\nimport rf_v2_pb2_grpc as pbgrpc\r\n\r\ndataset_path = Path(\"Dataset/diabetes_dataset.csv\").resolve()\r\n\r\nchannel = grpc.insecure_channel(\"127.0.0.1:50051\")\r\nstub = pbgrpc.CoordinatorServiceStub(channel)\r\n\r\nrequest = pb.SubmitTrainingRequest(\r\n    dataset_url=str(dataset_path),\r\n    target_column=\"diagnosed_diabetes\",\r\n    task_type=\"classification\",\r\n    n_estimators_total=4,\r\n    validation_ratio=0.2,\r\n    test_ratio=0.2,\r\n    bootstrap=True,\r\n    global_random_seed=42,\r\n    max_depth_candidates=[5],\r\n    max_features_candidates=[\"sqrt\"],\r\n    min_samples_split_candidates=[2],\r\n    min_samples_leaf_candidates=[1],\r\n    criterion_candidates=[\"gini\"],\r\n)\r\n\r\nresponse = stub.SubmitTraining(request, timeout=30)\r\n\r\nprint(\"job_id:\", response.job_id)\r\nprint(\"status:\", response.status)\r\nprint(\"message:\", response.message)\r\n'@ | Set-Content .\\submit_training.py\r\n\r\n\r\n@'\r\nfrom pathlib import Path\r\nimport grpc\r\n\r\nimport rf_v2_pb2 as pb\r\nimport rf_v2_pb2_grpc as pbgrpc\r\n\r\ndataset_path = Path(\"Dataset/diabetes_dataset.csv\").resolve()\r\n\r\nchannel = grpc.insecure_channel(\"127.0.0.1:50051\")\r\nstub = pbgrpc.CoordinatorServiceStub(channel)\r\n\r\nrequest = pb.SubmitTrainingRequest(\r\n    dataset_url=str(dataset_path),\r\n    target_column=\"diagnosed_diabetes\",\r\n    task_type=\"classification\",\r\n    n_estimators_total=4,\r\n    validation_ratio=0.2,\r\n    test_ratio=0.2,\r\n    bootstrap=True,\r\n    global_random_seed=42,\r\n    max_depth_candidates=[5],\r\n    max_features_candidates=[\"sqrt\"],\r\n    min_samples_split_candidates=[2],\r\n    min_samples_leaf_candidates=[1],\r\n    criterion_candidates=[\"gini\"],\r\n)\r\n\r\nresponse = stub.SubmitTraining(request, timeout=30)\r\n\r\nprint(\"job_id:\", response.job_id)\r\nprint(\"status:\", response.status)\r\nprint(\"message:\", response.message)\r\n'@ | Set-Content .\\submit_training_regression.py\r\n\r\nPoi lancia:\r\n\r\npython .\\submit_training.py\r\n\r\no\r\n\r\n\r\npython .\\submit_training_regression.pyDovresti ottenere una risposta tipo:\r\n\r\n\r\njob_id: job_...\r\nstatus: 1\r\nmessage: Training started\r\n\r\nLo status 1 corrisponde a PENDING, perché il training parte in thread separato lato master.\r\n\r\nPer vedere solo lo stato del job:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\n$j = Get-Content \".\\shared_artifacts\\jobs\\$job\\job_record.json\" -Raw | ConvertFrom-Json\r\n$j.status\r\n$j.message\r\n$j.selected_experiment_id\r\n$j.model_id\r\n\r\nPer vedere gli esperimenti:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\nGet-ChildItem \".\\shared_artifacts\\jobs\\$job\\experiments\" -Directory | ForEach-Object {\r\n    Get-Content \"$($_.FullName)\\experiment_record.json\" -Raw | ConvertFrom-Json |\r\n    Select-Object experiment_id,status,expected_tree_count,completed_tree_count,assigned_workers\r\n}\r\n\r\nPer contare gli alberi salvati:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\nGet-ChildItem \".\\shared_artifacts\\jobs\\$job\\experiments\" -Directory | ForEach-Object {\r\n    Write-Host \"Experiment:\" $_.Name\r\n    Get-ChildItem \"$($_.FullName)\\trees\" -Filter \"*.joblib\" -ErrorAction SilentlyContinue | Measure-Object\r\n}\r\n\r\nPer vedere le metriche di validation:\r\n\r\n$job=\"job_QUI_METTI_ID\"\r\nGet-ChildItem \".\\shared_artifacts\\jobs\\$job\\experiments\" -Directory | ForEach-Object {\r\n    $metrics = \"$($_.FullName)\\metrics\\validation_metrics.json\"\r\n    if (Test-Path $metrics) {\r\n        Get-Content $metrics -Raw | ConvertFrom-Json | Format-List\r\n    }\r\n}\r\n\r\n$job = \"JobQUI\r\n$exp = \"job__exp_000\"\r\n\r\n$er = Get-Content \".\\shared_artifacts\\jobs\\$job\\experiments\\$exp\\experiment_record.json\" -Raw | ConvertFrom-Json\r\n\r\n$er.status\r\n$er.expected_tree_count\r\n$er.completed_tree_count\r\n$er.assigned_workers\r\n$er.validation_metrics
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/README.md b/README.md
+--- a/README.md	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/README.md	(date 1779186587760)
+@@ -3,31 +3,20 @@
+ 
+ Apri PowerShell nella root del progetto:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+-Poi fai un controllo veloce:
+-
+-python -m compileall -q master.py masterPackage common worker
+-
+-Se questo passa senza output, prosegui.
+-
+ Pulisci gli artifact vecchi:
+ 
+ Remove-Item -Recurse -Force .\shared_artifacts -ErrorAction SilentlyContinue
+ New-Item -ItemType Directory -Force .\shared_artifacts | Out-Null
+ 
++
++
+ Terminale 1 — Avvia il master
+ 
+ Apri un primo terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ $env:MASTER_HOST="0.0.0.0"
+ $env:MASTER_PORT="50051"
+ $env:ARTIFACT_ROOT=(Join-Path (Get-Location) "shared_artifacts")
+-
+ python master.py
+ 
+ Devi vedere qualcosa tipo:
+@@ -36,13 +25,12 @@
+ 
+ Lascia questo terminale aperto.
+ 
++
++
+ Terminale 2 — Avvia worker 1
+ 
+ Apri un secondo terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ $env:WORKER_ID="worker-1"
+ $env:WORKER_BIND_HOST="0.0.0.0"
+ $env:WORKER_PORT="50061"
+@@ -50,7 +38,6 @@
+ $env:MASTER_HOST="127.0.0.1"
+ $env:MASTER_PORT="50051"
+ $env:ARTIFACT_ROOT=(Join-Path (Get-Location) "shared_artifacts")
+-
+ python -c "from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()"
+ 
+ Dovresti vedere:
+@@ -61,13 +48,12 @@
+ 
+ Lascia aperto anche questo terminale.
+ 
++
++
+ Terminale 3 — Avvia worker 2
+ 
+ Apri un terzo terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ $env:WORKER_ID="worker-2"
+ $env:WORKER_BIND_HOST="0.0.0.0"
+ $env:WORKER_PORT="50062"
+@@ -75,18 +61,16 @@
+ $env:MASTER_HOST="127.0.0.1"
+ $env:MASTER_PORT="50051"
+ $env:ARTIFACT_ROOT=(Join-Path (Get-Location) "shared_artifacts")
+-
+ python -c "from worker.worker_config import WorkerConfig; from worker.worker_node import WorkerNode; WorkerNode(WorkerConfig.from_env()).start()"
+ 
+ Per una prima run puoi anche usare un solo worker, ma con due inizi già a verificare la distribuzione.
+ 
++
++
+ Terminale 4 — Invia il training job
+ 
+ Apri un quarto terminale PowerShell:
+ 
+-cd C:\Users\micci\PycharmProjects\PythonProject1
+-.\.venv\Scripts\Activate.ps1
+-
+ Crea un piccolo client temporaneo:
+ 
+ @'
+@@ -124,51 +108,9 @@
+ print("message:", response.message)
+ '@ | Set-Content .\submit_training.py
+ 
+-
+-@'
+-from pathlib import Path
+-import grpc
+-
+-import rf_v2_pb2 as pb
+-import rf_v2_pb2_grpc as pbgrpc
+-
+-dataset_path = Path("Dataset/diabetes_dataset.csv").resolve()
+-
+-channel = grpc.insecure_channel("127.0.0.1:50051")
+-stub = pbgrpc.CoordinatorServiceStub(channel)
+-
+-request = pb.SubmitTrainingRequest(
+-    dataset_url=str(dataset_path),
+-    target_column="diagnosed_diabetes",
+-    task_type="classification",
+-    n_estimators_total=4,
+-    validation_ratio=0.2,
+-    test_ratio=0.2,
+-    bootstrap=True,
+-    global_random_seed=42,
+-    max_depth_candidates=[5],
+-    max_features_candidates=["sqrt"],
+-    min_samples_split_candidates=[2],
+-    min_samples_leaf_candidates=[1],
+-    criterion_candidates=["gini"],
+-)
+-
+-response = stub.SubmitTraining(request, timeout=30)
+-
+-print("job_id:", response.job_id)
+-print("status:", response.status)
+-print("message:", response.message)
+-'@ | Set-Content .\submit_training_regression.py
+-
+-Poi lancia:
+-
+ python .\submit_training.py
+ 
+-o
+-
+-
+-python .\submit_training_regression.pyDovresti ottenere una risposta tipo:
+-
++Dovresti ottenere una risposta tipo:
+ 
+ job_id: job_...
+ status: 1
+@@ -176,6 +118,8 @@
+ 
+ Lo status 1 corrisponde a PENDING, perché il training parte in thread separato lato master.
+ 
++
++
+ Per vedere solo lo stato del job:
+ 
+ $job="job_QUI_METTI_ID"
+@@ -185,6 +129,8 @@
+ $j.selected_experiment_id
+ $j.model_id
+ 
++
++
+ Per vedere gli esperimenti:
+ 
+ $job="job_QUI_METTI_ID"
+@@ -195,7 +141,7 @@
+ 
+ Per contare gli alberi salvati:
+ 
+-$job="job_QUI_METTI_ID"
++$job="job_6ad41ebc8e07423d8195eeaebe2ac057"
+ Get-ChildItem ".\shared_artifacts\jobs\$job\experiments" -Directory | ForEach-Object {
+     Write-Host "Experiment:" $_.Name
+     Get-ChildItem "$($_.FullName)\trees" -Filter "*.joblib" -ErrorAction SilentlyContinue | Measure-Object
+@@ -203,16 +149,8 @@
+ 
+ Per vedere le metriche di validation:
+ 
+-$job="job_QUI_METTI_ID"
+-Get-ChildItem ".\shared_artifacts\jobs\$job\experiments" -Directory | ForEach-Object {
+-    $metrics = "$($_.FullName)\metrics\validation_metrics.json"
+-    if (Test-Path $metrics) {
+-        Get-Content $metrics -Raw | ConvertFrom-Json | Format-List
+-    }
+-}
+-
+-$job = "JobQUI
+-$exp = "job__exp_000"
++$job = "job_6eecde96785446e4922b5f43166f03f2"
++$exp = "job_6eecde96785446e4922b5f43166f03f2_exp_000"
+ 
+ $er = Get-Content ".\shared_artifacts\jobs\$job\experiments\$exp\experiment_record.json" -Raw | ConvertFrom-Json
+ 
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"BufProjectSettings\">\r\n    <option name=\"bufCLIPath\" value=\"$ brew install bufbuild/buf/buf\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"ristrutturato master\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/master.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/master.py\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;jadepics&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\">{\r\n  &quot;selectedUrlAndAccountId&quot;: {\r\n    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,\r\n    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;\r\n  }\r\n}</component>\r\n  <component name=\"KubernetesApiPersistence\">{}</component>\r\n  <component name=\"KubernetesApiProvider\">{\r\n  &quot;isMigrated&quot;: true\r\n}</component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 8\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\">{\r\n  &quot;keyToString&quot;: {\r\n    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,\r\n    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,\r\n    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,\r\n    &quot;git-widget-placeholder&quot;: &quot;master&quot;,\r\n    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,\r\n    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,\r\n    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,\r\n    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,\r\n    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,\r\n    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;\r\n  }\r\n}</component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"CopyFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\" />\r\n    </key>\r\n    <key name=\"MoveFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\worker\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"\" />\r\n      <created>1772718028304</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1772718028304</updated>\r\n      <workItem from=\"1774557139933\" duration=\"1949000\" />\r\n      <workItem from=\"1774559557015\" duration=\"480000\" />\r\n      <workItem from=\"1774600460605\" duration=\"10626000\" />\r\n      <workItem from=\"1774694994766\" duration=\"3422000\" />\r\n      <workItem from=\"1774720403281\" duration=\"207000\" />\r\n      <workItem from=\"1774730844650\" duration=\"5746000\" />\r\n      <workItem from=\"1774964855112\" duration=\"688000\" />\r\n    </task>\r\n    <task id=\"LOCAL-00001\" summary=\"First commit\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772718604332</created>\r\n      <option name=\"number\" value=\"00001\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772718604332</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00002\" summary=\"Introduzione artifact_store, filesystem_stoere e paths\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774605271956</created>\r\n      <option name=\"number\" value=\"00002\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00002\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774605271956</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00003\" summary=\"refactoring worker.py e paths.py\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774698083683</created>\r\n      <option name=\"number\" value=\"00003\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00003\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774698083683</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00004\" summary=\"aggiunto commento\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774875188528</created>\r\n      <option name=\"number\" value=\"00004\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00004\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774875188528</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00005\" summary=\"ristrutturato master\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774886067552</created>\r\n      <option name=\"number\" value=\"00005\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00005\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774886067552</updated>\r\n    </task>\r\n    <option name=\"localTasksCounter\" value=\"6\" />\r\n    <servers />\r\n  </component>\r\n  <component name=\"TypeScriptGeneratedFilesManager\">\r\n    <option name=\"version\" value=\"3\" />\r\n  </component>\r\n  <component name=\"VcsManagerConfiguration\">\r\n    <MESSAGE value=\"First commit\" />\r\n    <MESSAGE value=\"Introduzione artifact_store, filesystem_stoere e paths\" />\r\n    <MESSAGE value=\"refactoring worker.py e paths.py\" />\r\n    <MESSAGE value=\"aggiunto commento\" />\r\n    <MESSAGE value=\"ristrutturato master\" />\r\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"ristrutturato master\" />\r\n  </component>\r\n  <component name=\"github-copilot-workspace\">\r\n    <instructionFileLocations>\r\n      <option value=\".github/instructions\" />\r\n    </instructionFileLocations>\r\n    <promptFileLocations>\r\n      <option value=\".github/prompts\" />\r\n    </promptFileLocations>\r\n  </component>\r\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision cd758750a1bce73393bc94b90c8cd13a0fa7bbe4)
++++ b/.idea/workspace.xml	(date 1779198429779)
+@@ -7,14 +7,29 @@
+     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
+   </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="ristrutturato master">
++    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="introduzione tempo di allenamento nel sistema">
+       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/common/contracts.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/contracts.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/common/repositories.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/repositories.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/masterPackage/test_evaluator.py" beforeDir="false" afterPath="$PROJECT_DIR$/masterPackage/test_evaluator.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/masterPackage/validation_coordinator.py" beforeDir="false" afterPath="$PROJECT_DIR$/masterPackage/validation_coordinator.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/masterPackage/worker_client.py" beforeDir="false" afterPath="$PROJECT_DIR$/masterPackage/worker_client.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/proto/rf_v2.proto" beforeDir="false" afterPath="$PROJECT_DIR$/proto/rf_v2.proto" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/rf_v2_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/rf_v2_pb2.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/rf_v2_pb2_grpc.py" beforeDir="false" afterPath="$PROJECT_DIR$/rf_v2_pb2_grpc.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/mappers/tree_artifact_mapper.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/mappers/tree_artifact_mapper.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/worker/training/tree_artifact_writer.py" beforeDir="false" afterPath="$PROJECT_DIR$/worker/training/tree_artifact_writer.py" afterDir="false" />
+     </list>
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+     <option name="LAST_RESOLUTION" value="IGNORE" />
++  </component>
++  <component name="CopilotPersistence">
++    <persistenceIdMap>
++      <entry key="_C:/Users/PC/Desktop/materie/ISW/Mvn/ProgettoSDCCeML" value="3AWp9QFcSCr26GObyiuq4gjJYSa" />
++    </persistenceIdMap>
+   </component>
+   <component name="FileTemplateManagerImpl">
+     <option name="RECENT_TEMPLATES">
+@@ -34,13 +49,9 @@
+ }</component>
+   <component name="GithubPullRequestsUISettings">{
+   &quot;selectedUrlAndAccountId&quot;: {
+-    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,
+-    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
++    &quot;url&quot;: &quot;https://github.com/jadepics/ProgettoSDCCeML.git&quot;,
++    &quot;accountId&quot;: &quot;64b32a3e-6402-44ac-8316-64089203d618&quot;
+   }
+-}</component>
+-  <component name="KubernetesApiPersistence">{}</component>
+-  <component name="KubernetesApiProvider">{
+-  &quot;isMigrated&quot;: true
+ }</component>
+   <component name="ProjectColorInfo">{
+   &quot;associatedIndex&quot;: 8
+@@ -56,22 +67,26 @@
+   <component name="PropertiesComponent">{
+   &quot;keyToString&quot;: {
+     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
++    &quot;Python.Start_Master_Worker.executor&quot;: &quot;Run&quot;,
++    &quot;Python.boh.executor&quot;: &quot;Run&quot;,
++    &quot;Python.submit_training_classification.executor&quot;: &quot;Run&quot;,
++    &quot;Python.training_debug_cli.executor&quot;: &quot;Run&quot;,
+     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+     &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+     &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
++    &quot;SHELLCHECK.PATH&quot;: &quot;C:\\Users\\PC\\AppData\\Roaming\\JetBrains\\PyCharm2026.1\\plugins\\Shell Script\\shellcheck.exe&quot;,
+     &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+     &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+     &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+     &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+-    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
+     &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,
+     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+     &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+-    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,
++    &quot;settings.editor.selected.configurable&quot;: &quot;settings.sync&quot;,
+     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+   }
+ }</component>
+@@ -80,13 +95,48 @@
+       <recent name="C:\Users\micci\PycharmProjects\PythonProject1\Dataset" />
+     </key>
+     <key name="MoveFile.RECENT_KEYS">
++      <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\scripts" />
++      <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML" />
+       <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\worker" />
+     </key>
+   </component>
++  <component name="RunManager">
++    <configuration name="training_debug_cli" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
++      <module name="ProgSDCC&amp;ML" />
++      <option name="ENV_FILES" value="" />
++      <option name="INTERPRETER_OPTIONS" value="" />
++      <option name="PARENT_ENVS" value="true" />
++      <envs>
++        <env name="PYTHONUNBUFFERED" value="1" />
++      </envs>
++      <option name="SDK_HOME" value="" />
++      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
++      <option name="IS_MODULE_SDK" value="true" />
++      <option name="ADD_CONTENT_ROOTS" value="true" />
++      <option name="ADD_SOURCE_ROOTS" value="true" />
++      <option name="DEBUG_JUST_MY_CODE" value="false" />
++      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
++      <option name="RUN_TOOL" value="" />
++      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/training_debug_cli.py" />
++      <option name="PARAMETERS" value="" />
++      <option name="SHOW_COMMAND_LINE" value="false" />
++      <option name="EMULATE_TERMINAL" value="false" />
++      <option name="MODULE_MODE" value="false" />
++      <option name="REDIRECT_INPUT" value="false" />
++      <option name="INPUT_FILE" value="" />
++      <method v="2" />
++    </configuration>
++    <recent_temporary>
++      <list>
++        <item itemvalue="Python.training_debug_cli" />
++      </list>
++    </recent_temporary>
++  </component>
+   <component name="SharedIndexes">
+     <attachedChunks>
+       <set>
+-        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
++        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.24374.152" />
++        <option value="bundled-python-sdk-c59985aa861c-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.24374.152" />
+       </set>
+     </attachedChunks>
+   </component>
+@@ -103,7 +153,63 @@
+       <workItem from="1774694994766" duration="3422000" />
+       <workItem from="1774720403281" duration="207000" />
+       <workItem from="1774730844650" duration="5746000" />
+-      <workItem from="1774964855112" duration="688000" />
++      <workItem from="1775288233161" duration="3626000" />
++      <workItem from="1775292566531" duration="13927000" />
++      <workItem from="1775326919099" duration="1110000" />
++      <workItem from="1775392617284" duration="708000" />
++      <workItem from="1775393448729" duration="122000" />
++      <workItem from="1775654904055" duration="483000" />
++      <workItem from="1775656481674" duration="4490000" />
++      <workItem from="1775808451484" duration="3808000" />
++      <workItem from="1775823854807" duration="5818000" />
++      <workItem from="1776069786364" duration="782000" />
++      <workItem from="1776153906549" duration="10068000" />
++      <workItem from="1776168387308" duration="6627000" />
++      <workItem from="1776242022766" duration="5812000" />
++      <workItem from="1776249159797" duration="5681000" />
++      <workItem from="1776284328231" duration="3004000" />
++      <workItem from="1776321911178" duration="373000" />
++      <workItem from="1776323207044" duration="1578000" />
++      <workItem from="1776328104086" duration="1919000" />
++      <workItem from="1776337645995" duration="10337000" />
++      <workItem from="1776362220672" duration="7630000" />
++      <workItem from="1776413459436" duration="3307000" />
++      <workItem from="1777018288438" duration="388000" />
++      <workItem from="1777019274594" duration="2480000" />
++      <workItem from="1777278724808" duration="286000" />
++      <workItem from="1777279070090" duration="6945000" />
++      <workItem from="1777380308736" duration="4031000" />
++      <workItem from="1777484104625" duration="304000" />
++      <workItem from="1777484595780" duration="6659000" />
++      <workItem from="1777533131214" duration="6713000" />
++      <workItem from="1777542703506" duration="685000" />
++      <workItem from="1777544082737" duration="476000" />
++      <workItem from="1778010992686" duration="6112000" />
++      <workItem from="1778018415390" duration="72000" />
++      <workItem from="1778137776999" duration="569000" />
++      <workItem from="1778138895859" duration="19000" />
++      <workItem from="1778147012176" duration="4982000" />
++      <workItem from="1778226721585" duration="575000" />
++      <workItem from="1778227401623" duration="4457000" />
++      <workItem from="1778233356244" duration="198000" />
++      <workItem from="1778285538991" duration="1425000" />
++      <workItem from="1778322871779" duration="3414000" />
++      <workItem from="1778330210005" duration="191000" />
++      <workItem from="1778330466239" duration="3375000" />
++      <workItem from="1778338080629" duration="6835000" />
++      <workItem from="1778345005048" duration="1836000" />
++      <workItem from="1778488611077" duration="1211000" />
++      <workItem from="1778515913944" duration="3141000" />
++      <workItem from="1778528734735" duration="3689000" />
++      <workItem from="1778595247382" duration="4200000" />
++      <workItem from="1778660520775" duration="226000" />
++      <workItem from="1778675414930" duration="9605000" />
++      <workItem from="1778701362738" duration="10269000" />
++      <workItem from="1778747100034" duration="9340000" />
++      <workItem from="1778832263659" duration="24210000" />
++      <workItem from="1779183743903" duration="748000" />
++      <workItem from="1779184860334" duration="2662000" />
++      <workItem from="1779194175123" duration="3704000" />
+     </task>
+     <task id="LOCAL-00001" summary="First commit">
+       <option name="closed" value="true" />
+@@ -137,27 +243,325 @@
+       <option name="project" value="LOCAL" />
+       <updated>1774875188528</updated>
+     </task>
+-    <task id="LOCAL-00005" summary="ristrutturato master">
++    <task id="LOCAL-00005" summary="Commit worker prima dell'introduzione del manifest per evitare master stateless">
+       <option name="closed" value="true" />
+-      <created>1774886067552</created>
++      <created>1775250185553</created>
+       <option name="number" value="00005" />
+       <option name="presentableId" value="LOCAL-00005" />
+       <option name="project" value="LOCAL" />
+-      <updated>1774886067552</updated>
++      <updated>1775250185553</updated>
++    </task>
++    <task id="LOCAL-00006" summary="Sistemati bootstrap_sampler.py e worker_service.py">
++      <option name="closed" value="true" />
++      <created>1776170087506</created>
++      <option name="number" value="00006" />
++      <option name="presentableId" value="LOCAL-00006" />
++      <option name="project" value="LOCAL" />
++      <updated>1776170087509</updated>
++    </task>
++    <task id="LOCAL-00007" summary="refactoring shard_trainer.py, decision_tree_factory.py">
++      <option name="closed" value="true" />
++      <created>1776245231565</created>
++      <option name="number" value="00007" />
++      <option name="presentableId" value="LOCAL-00007" />
++      <option name="project" value="LOCAL" />
++      <updated>1776245231565</updated>
++    </task>
++    <task id="LOCAL-00008" summary="Implementazione esplicita dei metodi di worker_state.py">
++      <option name="closed" value="true" />
++      <created>1776245958340</created>
++      <option name="number" value="00008" />
++      <option name="presentableId" value="LOCAL-00008" />
++      <option name="project" value="LOCAL" />
++      <updated>1776245958341</updated>
++    </task>
++    <task id="LOCAL-00009" summary="Implementazione esplicita dei metodi di worker_state.py e introduzione di tree_artifact_mapper.py per mapping">
++      <option name="closed" value="true" />
++      <created>1776259068456</created>
++      <option name="number" value="00009" />
++      <option name="presentableId" value="LOCAL-00009" />
++      <option name="project" value="LOCAL" />
++      <updated>1776259068457</updated>
++    </task>
++    <task id="LOCAL-00010" summary="Fase 1 delle correzioni, Heartbeat implementato">
++      <option name="closed" value="true" />
++      <created>1776287063737</created>
++      <option name="number" value="00010" />
++      <option name="presentableId" value="LOCAL-00010" />
++      <option name="project" value="LOCAL" />
++      <updated>1776287063737</updated>
++    </task>
++    <task id="LOCAL-00011" summary="Fase 2 e 4 delle correzioni: 2)Riallineare WorkerService come facciata RPC pura Obiettivo e 4) Rendere ShardTrainer retry-safe e progress-aware Obiettivo">
++      <option name="closed" value="true" />
++      <created>1776414703550</created>
++      <option name="number" value="00011" />
++      <option name="presentableId" value="LOCAL-00011" />
++      <option name="project" value="LOCAL" />
++      <updated>1776414703550</updated>
++    </task>
++    <task id="LOCAL-00012" summary="Push pre modifiche">
++      <option name="closed" value="true" />
++      <created>1777019839625</created>
++      <option name="number" value="00012" />
++      <option name="presentableId" value="LOCAL-00012" />
++      <option name="project" value="LOCAL" />
++      <updated>1777019839625</updated>
++    </task>
++    <task id="LOCAL-00013" summary="Correzione errori notati in 22/04">
++      <option name="closed" value="true" />
++      <created>1777486042664</created>
++      <option name="number" value="00013" />
++      <option name="presentableId" value="LOCAL-00013" />
++      <option name="project" value="LOCAL" />
++      <updated>1777486042664</updated>
++    </task>
++    <task id="LOCAL-00014" summary="modifiche minime lato worker">
++      <option name="closed" value="true" />
++      <created>1777544484058</created>
++      <option name="number" value="00014" />
++      <option name="presentableId" value="LOCAL-00014" />
++      <option name="project" value="LOCAL" />
++      <updated>1777544484059</updated>
++    </task>
++    <task id="LOCAL-00015" summary="Risoluzione di ultimo problema proposto in data 22/4/2026 e gestione edge cases per di shard_trainer.train">
++      <option name="closed" value="true" />
++      <created>1778018088282</created>
++      <option name="number" value="00015" />
++      <option name="presentableId" value="LOCAL-00015" />
++      <option name="project" value="LOCAL" />
++      <updated>1778018088282</updated>
++    </task>
++    <task id="LOCAL-00016" summary="Risoluzione di worker_progress_store.py e aggiornamento firma shard_predictor.py">
++      <option name="closed" value="true" />
++      <created>1778150932178</created>
++      <option name="number" value="00016" />
++      <option name="presentableId" value="LOCAL-00016" />
++      <option name="project" value="LOCAL" />
++      <updated>1778150932178</updated>
++    </task>
++    <task id="LOCAL-00017" summary="Risoluzione step 3 e 5 per testing">
++      <option name="closed" value="true" />
++      <created>1778233244420</created>
++      <option name="number" value="00017" />
++      <option name="presentableId" value="LOCAL-00017" />
++      <option name="project" value="LOCAL" />
++      <updated>1778233244420</updated>
++    </task>
++    <task id="LOCAL-00018" summary="modifica file io_utils.py">
++      <option name="closed" value="true" />
++      <created>1778323194816</created>
++      <option name="number" value="00018" />
++      <option name="presentableId" value="LOCAL-00018" />
++      <option name="project" value="LOCAL" />
++      <updated>1778323194817</updated>
++    </task>
++    <task id="LOCAL-00019" summary="inserimento codice per l'inizializione di master e workers">
++      <option name="closed" value="true" />
++      <created>1778345252376</created>
++      <option name="number" value="00019" />
++      <option name="presentableId" value="LOCAL-00019" />
++      <option name="project" value="LOCAL" />
++      <updated>1778345252376</updated>
++    </task>
++    <task id="LOCAL-00020" summary="Creazione di training_debug_cli.py per provare le funzionalità del sistema">
++      <option name="closed" value="true" />
++      <created>1778518248384</created>
++      <option name="number" value="00020" />
++      <option name="presentableId" value="LOCAL-00020" />
++      <option name="project" value="LOCAL" />
++      <updated>1778518248384</updated>
++    </task>
++    <task id="LOCAL-00021" summary="introduzione run_worker.py">
++      <option name="closed" value="true" />
++      <created>1778595422669</created>
++      <option name="number" value="00021" />
++      <option name="presentableId" value="LOCAL-00021" />
++      <option name="project" value="LOCAL" />
++      <updated>1778595422670</updated>
++    </task>
++    <task id="LOCAL-00022" summary="sistemazione dockers">
++      <option name="closed" value="true" />
++      <created>1778660655098</created>
++      <option name="number" value="00022" />
++      <option name="presentableId" value="LOCAL-00022" />
++      <option name="project" value="LOCAL" />
++      <updated>1778660655098</updated>
++    </task>
++    <task id="LOCAL-00023" summary="sistemazione dockers worker">
++      <option name="closed" value="true" />
++      <created>1778675576376</created>
++      <option name="number" value="00023" />
++      <option name="presentableId" value="LOCAL-00023" />
++      <option name="project" value="LOCAL" />
++      <updated>1778675576376</updated>
++    </task>
++    <task id="LOCAL-00024" summary="sistemazione porta dockers worker">
++      <option name="closed" value="true" />
++      <created>1778676482186</created>
++      <option name="number" value="00024" />
++      <option name="presentableId" value="LOCAL-00024" />
++      <option name="project" value="LOCAL" />
++      <updated>1778676482186</updated>
++    </task>
++    <task id="LOCAL-00025" summary="docker worker pt3: run_worker.py">
++      <option name="closed" value="true" />
++      <created>1778676756540</created>
++      <option name="number" value="00025" />
++      <option name="presentableId" value="LOCAL-00025" />
++      <option name="project" value="LOCAL" />
++      <updated>1778676756540</updated>
++    </task>
++    <task id="LOCAL-00026" summary="docker worker e master">
++      <option name="closed" value="true" />
++      <created>1778678059406</created>
++      <option name="number" value="00026" />
++      <option name="presentableId" value="LOCAL-00026" />
++      <option name="project" value="LOCAL" />
++      <updated>1778678059407</updated>
++    </task>
++    <task id="LOCAL-00027" summary="docker worker">
++      <option name="closed" value="true" />
++      <created>1778680962851</created>
++      <option name="number" value="00027" />
++      <option name="presentableId" value="LOCAL-00027" />
++      <option name="project" value="LOCAL" />
++      <updated>1778680962851</updated>
++    </task>
++    <task id="LOCAL-00028" summary="docker run_worker">
++      <option name="closed" value="true" />
++      <created>1778683711417</created>
++      <option name="number" value="00028" />
++      <option name="presentableId" value="LOCAL-00028" />
++      <option name="project" value="LOCAL" />
++      <updated>1778683711417</updated>
++    </task>
++    <task id="LOCAL-00029" summary="prova">
++      <option name="closed" value="true" />
++      <created>1778686931933</created>
++      <option name="number" value="00029" />
++      <option name="presentableId" value="LOCAL-00029" />
++      <option name="project" value="LOCAL" />
++      <updated>1778686931933</updated>
++    </task>
++    <task id="LOCAL-00030" summary="Modifica del path per la scrittura corretta nel file system efs invece della root principale della root principale del sistema. Raffinamento di worker_config.py per rispecchiare meglio il passaggio a docker">
++      <option name="closed" value="true" />
++      <created>1778709671393</created>
++      <option name="number" value="00030" />
++      <option name="presentableId" value="LOCAL-00030" />
++      <option name="project" value="LOCAL" />
++      <updated>1778709671393</updated>
++    </task>
++    <task id="LOCAL-00031" summary="sistemazione del path del dataset per l'allenamento">
++      <option name="closed" value="true" />
++      <created>1778749184537</created>
++      <option name="number" value="00031" />
++      <option name="presentableId" value="LOCAL-00031" />
++      <option name="project" value="LOCAL" />
++      <updated>1778749184538</updated>
++    </task>
++    <task id="LOCAL-00032" summary="Prova con diversi worker">
++      <option name="closed" value="true" />
++      <created>1778752957370</created>
++      <option name="number" value="00032" />
++      <option name="presentableId" value="LOCAL-00032" />
++      <option name="project" value="LOCAL" />
++      <updated>1778752957370</updated>
++    </task>
++    <task id="LOCAL-00033" summary="multi-workers">
++      <option name="closed" value="true" />
++      <created>1778755211744</created>
++      <option name="number" value="00033" />
++      <option name="presentableId" value="LOCAL-00033" />
++      <option name="project" value="LOCAL" />
++      <updated>1778755211744</updated>
++    </task>
++    <task id="LOCAL-00034" summary="Implementazione test-evaluator">
++      <option name="closed" value="true" />
++      <created>1778930049912</created>
++      <option name="number" value="00034" />
++      <option name="presentableId" value="LOCAL-00034" />
++      <option name="project" value="LOCAL" />
++      <updated>1778930049912</updated>
+     </task>
+-    <option name="localTasksCounter" value="6" />
++    <task id="LOCAL-00035" summary="implementazione script per docker di master e worker">
++      <option name="closed" value="true" />
++      <created>1778942291243</created>
++      <option name="number" value="00035" />
++      <option name="presentableId" value="LOCAL-00035" />
++      <option name="project" value="LOCAL" />
++      <updated>1778942291243</updated>
++    </task>
++    <task id="LOCAL-00036" summary="spostamento worker.sh">
++      <option name="closed" value="true" />
++      <created>1778943395909</created>
++      <option name="number" value="00036" />
++      <option name="presentableId" value="LOCAL-00036" />
++      <option name="project" value="LOCAL" />
++      <updated>1778943395909</updated>
++    </task>
++    <task id="LOCAL-00037" summary="modifica worker.sh">
++      <option name="closed" value="true" />
++      <created>1778944354622</created>
++      <option name="number" value="00037" />
++      <option name="presentableId" value="LOCAL-00037" />
++      <option name="project" value="LOCAL" />
++      <updated>1778944354622</updated>
++    </task>
++    <task id="LOCAL-00038" summary="dataclass fa scoppiare tutto">
++      <option name="closed" value="true" />
++      <created>1778946608316</created>
++      <option name="number" value="00038" />
++      <option name="presentableId" value="LOCAL-00038" />
++      <option name="project" value="LOCAL" />
++      <updated>1778946608316</updated>
++    </task>
++    <task id="LOCAL-00039" summary="introduzione tempo di allenamento nel sistema">
++      <option name="closed" value="true" />
++      <created>1779186648570</created>
++      <option name="number" value="00039" />
++      <option name="presentableId" value="LOCAL-00039" />
++      <option name="project" value="LOCAL" />
++      <updated>1779186648571</updated>
++    </task>
++    <option name="localTasksCounter" value="40" />
+     <servers />
+   </component>
+   <component name="TypeScriptGeneratedFilesManager">
+     <option name="version" value="3" />
+   </component>
+   <component name="VcsManagerConfiguration">
+-    <MESSAGE value="First commit" />
+-    <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
+-    <MESSAGE value="refactoring worker.py e paths.py" />
+-    <MESSAGE value="aggiunto commento" />
+-    <MESSAGE value="ristrutturato master" />
+-    <option name="LAST_COMMIT_MESSAGE" value="ristrutturato master" />
++    <MESSAGE value="Risoluzione di ultimo problema proposto in data 22/4/2026 e gestione edge cases per di shard_trainer.train" />
++    <MESSAGE value="Risoluzione di worker_progress_store.py e aggiornamento firma shard_predictor.py" />
++    <MESSAGE value="Risoluzione step 3 e 5 per testing" />
++    <MESSAGE value="modifica file io_utils.py" />
++    <MESSAGE value="inserimento codice per l'inizializione di master e workers" />
++    <MESSAGE value="Creazione di training_debug_cli.py per provare le funzionalità del sistema" />
++    <MESSAGE value="introduzione run_worker.py" />
++    <MESSAGE value="sistemazione dockers" />
++    <MESSAGE value="sistemazione dockers worker" />
++    <MESSAGE value="sistemazione porta dockers worker" />
++    <MESSAGE value="docker worker pt3: run_worker.py" />
++    <MESSAGE value="docker worker e master" />
++    <MESSAGE value="docker worker" />
++    <MESSAGE value="docker run_worker" />
++    <MESSAGE value="prova" />
++    <MESSAGE value="Modifica del path per la scrittura corretta nel file system efs invece della root principale della root principale del sistema. Raffinamento di worker_config.py per rispecchiare meglio il passaggio a docker" />
++    <MESSAGE value="sistemazione del path del dataset per l'allenamento" />
++    <MESSAGE value="Prova con diversi worker" />
++    <MESSAGE value="multi-workers" />
++    <MESSAGE value="Implementazione test-evaluator" />
++    <MESSAGE value="implementazione script per docker di master e worker" />
++    <MESSAGE value="spostamento worker.sh" />
++    <MESSAGE value="modifica worker.sh" />
++    <MESSAGE value="dataclass fa scoppiare tutto" />
++    <MESSAGE value="introduzione tempo di allenamento nel sistema" />
++    <option name="LAST_COMMIT_MESSAGE" value="introduzione tempo di allenamento nel sistema" />
++  </component>
++  <component name="com.intellij.coverage.CoverageDataManagerImpl">
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$submit_training_classification.coverage" NAME="submit_training_classification Coverage Results" MODIFIED="1778516164593" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$boh.coverage" NAME="boh Coverage Results" MODIFIED="1778516100125" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$training_debug_cli.coverage" NAME="training_debug_cli Coverage Results" MODIFIED="1778709418112" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$Start_Master_Worker.coverage" NAME="Start_Master_Worker Coverage Results" MODIFIED="1778687068268" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+   </component>
+   <component name="github-copilot-workspace">
+     <instructionFileLocations>
