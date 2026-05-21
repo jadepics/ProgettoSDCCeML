@@ -105,6 +105,8 @@ def _training_request_from_dict(payload: dict[str, Any]) -> TrainingRequest:
         test_ratio=payload["test_ratio"],
         global_random_seed=payload["global_random_seed"],
         bootstrap=payload["bootstrap"],
+        dataset_scenario=payload.get("dataset_scenario", "baseline_original"),
+        leakage_columns=payload.get("leakage_columns"),
         created_at=payload.get("created_at", 0.0),
     )
 

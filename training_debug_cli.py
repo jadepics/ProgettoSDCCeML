@@ -774,6 +774,7 @@ def reset_shared_artifacts(root_path: str = "./shared_artifacts") -> None:
 def reset_shared_artifacts() -> None:
     """
     Rimuove gli artifact generati dai job, lasciando intatti i dataset.
+    TODO MODIFICA CON ROOT DI EFS
     """
 
     folders_to_clean = [

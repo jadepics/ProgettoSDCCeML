@@ -16,7 +16,8 @@ from worker.training.tree_artifact_writer import TreeArtifactWriter
 from worker.progress.worker_progress_store import WorkerProgressStore
 from worker.utils.io_utils import DataLoader
 
-
+class TrainingCancelled(RuntimeError):
+    pass
 class ShardTrainer:
     """
     Core del training lato worker.
@@ -43,7 +44,7 @@ class ShardTrainer:
     # --------------------------------------------------
     # MAIN
     # --------------------------------------------------
-    def train(self, shard: TrainingShard) -> ShardTrainingResult:
+    def train(self, shard: TrainingShard, context=None) -> ShardTrainingResult:
         """
         shard: TrainingShard
         return: ShardTrainingResult
@@ -74,7 +75,10 @@ class ShardTrainer:
 
         #4️⃣ Eccezione globale fuori dal loop
         #Esempio: errore in data loading errore in config
-
+        self._ensure_rpc_active(
+            context,
+            "TrainShard cancelled before task execution",
+        )
         try:
             # ----------------------------------------
             # Caso: già completato (idempotenza forte, ovvero idempotenza per task)
@@ -124,6 +128,10 @@ class ShardTrainer:
             # ----------------------------------------
             # Load dataset (URI → numpy)
             # ----------------------------------------
+            self._ensure_rpc_active(
+                context,
+                "TrainShard cancelled before dataset loading",
+            )
             X: "np.ndarray" = self.data_loader.load_numpy(shard.train_features_uri)
             y: "np.ndarray" = self.data_loader.load_numpy(shard.train_labels_uri)
 
@@ -185,7 +193,10 @@ class ShardTrainer:
 
                 # id logico dell'albero (deterministico)
                 tree_id: str = generate_tree_id(shard.experiment_id, tree_index)
-
+                self._ensure_rpc_active(
+                    context,
+                    f"TrainShard cancelled before training tree {tree_id}",
+                )
                 # ----------------------------------------
                 # IDPOTENZA (CRITICO)
                 # ----------------------------------------
@@ -263,6 +274,10 @@ class ShardTrainer:
 
                     training_time: float = time.time() - t0
 
+                    self._ensure_rpc_active(
+                        context,
+                        f"TrainShard cancelled before artifact write for tree {tree_id}",
+                    )
                     # ----------------------------------------
                     # WRITE ARTIFACT (idempotente lato storage)
                     # ----------------------------------------
@@ -292,23 +307,32 @@ class ShardTrainer:
                     )
 
 
+
+                except TrainingCancelled:
+
+                    raise
+
+
                 except Exception as exc:
-                    """
-                    Gestione errore per singolo albero
-                    """
 
                     failed_tree_ids.add(tree_id)
 
-                    # aggiorniamo comunque lo snapshot
                     self.progress_store.update_task(
+
                         job_id=shard.job_id,
+
                         experiment_id=shard.experiment_id,
+
                         task_id=shard.task_id,
+
                         completed_tree_ids=list(completed_tree_ids),
+
                         failed_tree_ids=list(failed_tree_ids),
+
                     )
 
-                    print(f"[ShardTrainer] Tree {tree_id} failed: {exc}")
+                    print(f"[ShardTrainer] Tree {tree_id} failed: {exc}", flush=True)
+
 
             # ----------------------------------------
             # FINALIZZAZIONE
@@ -385,3 +409,6 @@ class ShardTrainer:
                 error_message=str(exc),
                 elapsed_time_seconds=time.time() - start_time,
             )
+    def _ensure_rpc_active(self, context, message: str) -> None:
+        if context is not None and not context.is_active():
+            raise TrainingCancelled(message)

@@ -217,26 +217,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             timeout_predict_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,
         )
 
-        self.training_orchestrator = TrainingOrchestrator(
-            leadership_guard=self.leadership_guard,
-            worker_registry=self.registry,
-            task_ledger=self.task_ledger,
-            job_repository=self.job_repository,
-            shard_planner=self.shard_planner,
-            worker_client=self.worker_client,
-            retry_policy=RetryPolicy(
-                max_attempts_per_task=2,
-                base_backoff_seconds=0.5,
-                retry_on_timeout=True,
-                retry_on_worker_failure=True,
-                retry_on_unknown_error=False,
-            ),
-            task_lease_manager=TaskLeaseManager(
-                task_ledger=self.task_ledger,
-                lease_timeout_seconds=600.0,
-            ),
-            worker_heartbeat_monitor=self.worker_heartbeat_monitor,
-        )
+
 
         self.inference_coordinator = InferenceCoordinator(
             leadership_guard=self.leadership_guard,
@@ -261,7 +242,26 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             worker_heartbeat_monitor=self.worker_heartbeat_monitor,
         )
 
-
+        self.training_orchestrator = TrainingOrchestrator(
+            leadership_guard=self.leadership_guard,
+            worker_registry=self.registry,
+            task_ledger=self.task_ledger,
+            job_repository=self.job_repository,
+            shard_planner=self.shard_planner,
+            worker_client=self.worker_client,
+            retry_policy=RetryPolicy(
+                max_attempts_per_task=2,
+                base_backoff_seconds=0.5,
+                retry_on_timeout=True,
+                retry_on_worker_failure=True,
+                retry_on_unknown_error=False,
+            ),
+            task_lease_manager=TaskLeaseManager(
+                task_ledger=self.task_ledger,
+                lease_timeout_seconds=600.0,
+            ),
+            worker_heartbeat_monitor=self.worker_heartbeat_monitor,
+        recovery_planner=self.recovery_planner)
         self.training_job_service = TrainingJobService(
             leadership_guard=self.leadership_guard,
             job_repository=self.job_repository,
