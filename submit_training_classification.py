@@ -23,7 +23,7 @@ def main(
         dataset_url=str(dataset_path),
         target_column="diagnosed_diabetes",
         task_type="classification",
-        n_estimators_total=4,
+        n_estimators_total=24,
         validation_ratio=0.2,
         test_ratio=0.2,
         bootstrap=True,
