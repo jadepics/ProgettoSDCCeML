@@ -152,6 +152,7 @@ class WorkerClient:
                     artifact_uri=artifact.artifact_uri,
                     status=TreeStatus.COMPLETED if response.success else TreeStatus.FAILED,
                     training_time_seconds=artifact.training_time_seconds,
+                    feature_importances=list(artifact.feature_importances),
                 )
             )
 

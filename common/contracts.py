@@ -163,6 +163,7 @@ class TreeArtifactMetadata:
     artifact_uri: str
     status: TreeStatus
     training_time_seconds: float
+    feature_importances: list[float] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -182,6 +183,7 @@ class TreeArtifactMetadata:
             artifact_uri=data["artifact_uri"],
             status=TreeStatus(data["status"]),
             training_time_seconds=data["training_time_seconds"],
+            feature_importances=data.get("feature_importances", []),
         )
 
 @dataclass(slots=True)

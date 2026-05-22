@@ -134,6 +134,7 @@ class TestEvaluator:
                 y_true=y_test,
                 responses=responses,
                 class_labels=class_labels,
+                tree_artifacts=tree_artifacts,
                 n_features=X_test.shape[1],
             )
 
@@ -144,6 +145,7 @@ class TestEvaluator:
                 y_true=y_test,
                 responses=responses,
                 tree_count=len(tree_artifacts),
+                tree_artifacts=tree_artifacts,
                 n_features=X_test.shape[1],
             )
 
@@ -216,6 +218,7 @@ class TestEvaluator:
             y_true: np.ndarray,
             responses: list,
             class_labels: Sequence[str] | None,
+            tree_artifacts: Sequence[TreeArtifactMetadata],
             n_features: int,
     ) -> TestEvaluationResult:
         resolved_class_labels = self._resolve_class_labels(y_true, class_labels)
@@ -278,12 +281,17 @@ class TestEvaluator:
             ).tolist()
             accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
 
+        feature_importances = self._aggregate_feature_importances(
+            tree_artifacts=tree_artifacts,
+            n_features=n_features,
+        )
+
         metrics = ValidationMetrics(
             experiment_id=experiment_id,
             accuracy=accuracy,
             classification_report=report,
             confusion_matrix=confusion,
-            feature_importances=[0.0] * n_features,
+            feature_importances=feature_importances,
             evaluated_at=time.time(),
         )
 
@@ -291,7 +299,7 @@ class TestEvaluator:
             metrics=metrics,
             predicted_labels=predicted_labels,
             predicted_values=None,
-            evaluated_rows=n_samples,
+            evaluated_rows=y_true.shape[0],
             model_id=model_id,
         )
 
@@ -302,8 +310,10 @@ class TestEvaluator:
             y_true: np.ndarray,
             responses: list,
             tree_count: int,
+            tree_artifacts: Sequence[TreeArtifactMetadata],
             n_features: int,
     ) -> TestEvaluationResult:
+
         n_samples = y_true.shape[0]
         aggregated_sum = np.zeros((n_samples, 1), dtype=float)
 
@@ -322,6 +332,11 @@ class TestEvaluator:
         rmse = float(np.sqrt(mse))
         r2 = float(r2_score(y_true, predicted_values))
 
+        feature_importances = self._aggregate_feature_importances(
+            tree_artifacts=tree_artifacts,
+            n_features=n_features,
+        )
+
         metrics = ValidationMetrics(
             experiment_id=experiment_id,
             accuracy=0.0,
@@ -331,7 +346,7 @@ class TestEvaluator:
                 "r2": r2,
             },
             confusion_matrix=[],
-            feature_importances=[0.0] * n_features,
+            feature_importances=feature_importances,
             evaluated_at=time.time(),
         )
 
@@ -441,3 +456,30 @@ class TestEvaluator:
                 path = path[1:]
 
         return path
+
+    def _aggregate_feature_importances(
+            self,
+            tree_artifacts: Sequence[TreeArtifactMetadata],
+            n_features: int,
+    ) -> list[float]:
+        vectors: list[np.ndarray] = []
+
+        for artifact in tree_artifacts:
+            raw = getattr(artifact, "feature_importances", None)
+            if not raw:
+                continue
+
+            vec = np.asarray(raw, dtype=float).ravel()
+
+            if vec.size != n_features:
+                padded = np.zeros(n_features, dtype=float)
+                limit = min(n_features, vec.size)
+                padded[:limit] = vec[:limit]
+                vec = padded
+
+            vectors.append(vec)
+
+        if not vectors:
+            return [0.0] * n_features
+
+        return np.mean(np.vstack(vectors), axis=0).tolist()

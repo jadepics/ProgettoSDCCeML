@@ -86,7 +86,12 @@ class TreeArtifactWriter:
         )
 
         # --------------------------------------------------
-        # 4. COSTRUZIONE METADATA (sempre)
+        # 4. Feature importances dal modello addestrato
+        # --------------------------------------------------
+        feature_importances = self._extract_feature_importances(model)
+
+        # --------------------------------------------------
+        # 5. COSTRUZIONE METADATA (sempre)
         # --------------------------------------------------
         metadata = TreeArtifactMetadata(
             tree_id=tree_id,
@@ -99,17 +104,26 @@ class TreeArtifactWriter:
             artifact_uri=artifact_key,
             status=TreeStatus.COMPLETED,
             training_time_seconds=training_time_seconds,
+            feature_importances=feature_importances,
         )
 
         # --------------------------------------------------
-        # 5. Scrittura metadata ATOMICA (sempre)
+        # 6. Scrittura metadata ATOMICA (sempre)
         # --------------------------------------------------
-        # ⚠️ FIX CRITICO:
-        # prima usavi save_json nel caso crash → NON atomico
-        # ora sempre atomico
         self.store.save_json_atomic(
             metadata_key,
             metadata.to_dict()
         )
 
         return metadata
+
+    @staticmethod
+    def _extract_feature_importances(model: object) -> list[float]:
+        importances = getattr(model, "feature_importances_", None)
+        if importances is None:
+            return []
+
+        if hasattr(importances, "tolist"):
+            importances = importances.tolist()
+
+        return [float(value) for value in importances]

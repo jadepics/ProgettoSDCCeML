@@ -468,6 +468,7 @@ def _tree_artifact_metadata_from_dict(payload: dict[str, Any]) -> TreeArtifactMe
         artifact_uri=payload["artifact_uri"],
         status=_tree_status_from_raw(payload["status"]),
         training_time_seconds=payload.get("training_time_seconds", 0.0),
+        feature_importances=payload.get("feature_importances", []),
     )
 
 

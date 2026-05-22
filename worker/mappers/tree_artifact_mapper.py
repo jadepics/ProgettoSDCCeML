@@ -11,4 +11,5 @@ def to_proto_tree_artifact(a: TreeArtifactMetadata) -> rf_pb2.TrainedTreeArtifac
         worker_id=a.worker_id,
         seed=a.seed,
         training_time_seconds=a.training_time_seconds,
+        feature_importances=list(a.feature_importances),
     )

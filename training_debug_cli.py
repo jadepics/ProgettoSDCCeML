@@ -747,30 +747,6 @@ def submit_inference_launcher():
     )
 
 
-#RIVEDERE QUESTO CODICE PERCHé NON è PIù CONFORME CON IL PATHING DELL'ARCH
-"""
-def reset_shared_artifacts(root_path: str = "./shared_artifacts") -> None:
-  
-    Rimuove completamente la directory shared_artifacts
-    e la ricrea vuota.
-
-    Equivalente Python di:
-
-        Remove-Item -Recurse -Force .\\shared_artifacts
-        New-Item -ItemType Directory -Force .\\shared_artifacts
-
-    Sicuro da chiamare prima di un test end-to-end.
-  
-
-    root = Path(root_path)
-
-    # rimozione completa se esiste
-    if root.exists():
-        shutil.rmtree(root, ignore_errors=True)
-
-    # ricreazione directory
-    root.mkdir(parents=True, exist_ok=True)
- """
 def reset_shared_artifacts() -> None:
     """
     Rimuove gli artifact generati dai job, lasciando intatti i dataset.
