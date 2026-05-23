@@ -11,6 +11,7 @@ from sklearn.metrics import (
     accuracy_score,
     classification_report,
     confusion_matrix,
+    mean_absolute_error,
     mean_squared_error,
     r2_score,
 )
@@ -89,10 +90,11 @@ class ValidationCoordinator:
             raise ValueError(
                 f"Experiment '{experiment_id}' has no tree artifacts for validation"
             )
+        X_val_df = self._read_parquet_dataframe(validation_features_uri)
+        feature_names = list(X_val_df.columns)
 
-        X_val = self._read_parquet_dataframe(validation_features_uri).to_numpy(dtype=float)
+        X_val = X_val_df.to_numpy(dtype=float)
         y_val = self._read_target_vector(validation_labels_uri)
-
         if X_val.ndim != 2:
             raise ValueError("Validation features must be a 2D matrix")
         if X_val.shape[0] == 0:
@@ -131,6 +133,7 @@ class ValidationCoordinator:
                 class_labels=class_labels,
                 tree_artifacts=tree_artifacts,
                 n_features=X_val.shape[1],
+                feature_names=feature_names,
             )
 
         if task_type == "regression":
@@ -141,6 +144,7 @@ class ValidationCoordinator:
                 tree_count=len(tree_artifacts),
                 tree_artifacts=tree_artifacts,
                 n_features=X_val.shape[1],
+                feature_names=feature_names,
             )
 
         raise ValueError(f"Unsupported task_type '{task_type}'")
@@ -205,17 +209,19 @@ class ValidationCoordinator:
         return responses
 
     def _build_classification_result(
-        self,
-        experiment_id: str,
-        y_true: np.ndarray,
-        responses: list,
-        class_labels: Sequence[str] | None,
-        tree_artifacts: Sequence[TreeArtifactMetadata],
-        n_features: int,
+            self,
+            experiment_id: str,
+            y_true: np.ndarray,
+            responses: list,
+            class_labels: Sequence[str] | None,
+            tree_artifacts: Sequence[TreeArtifactMetadata],
+            n_features: int,
+            feature_names: Sequence[str],
     ) -> ValidationResult:
         resolved_class_labels = self._resolve_class_labels(y_true, class_labels)
         n_samples = y_true.shape[0]
         n_classes = len(resolved_class_labels)
+
 
         aggregated_votes = np.zeros((n_samples, n_classes), dtype=float)
 
@@ -281,13 +287,18 @@ class ValidationCoordinator:
             tree_artifacts=tree_artifacts,
             n_features=n_features,
         )
+        feature_importances_by_name = self._map_feature_importances_by_name(
+            feature_names=feature_names,
+            feature_importances=feature_importances,
+        )
 
         metrics = ValidationMetrics(
             experiment_id=experiment_id,
             accuracy=accuracy,
             classification_report=report,
             confusion_matrix=confusion,
-            feature_importances= feature_importances,
+            feature_importances=feature_importances,
+            feature_importances_by_name=feature_importances_by_name,
             evaluated_at=time.time(),
         )
 
@@ -298,48 +309,60 @@ class ValidationCoordinator:
         )
 
     def _build_regression_result(
-        self,
-        experiment_id: str,
-        y_true: np.ndarray,
-        responses: list,
-        tree_count: int,
-        tree_artifacts: Sequence[TreeArtifactMetadata],
-        n_features: int,
-
+            self,
+            experiment_id: str,
+            y_true: np.ndarray,
+            responses: list,
+            tree_count: int,
+            tree_artifacts: Sequence[TreeArtifactMetadata],
+            n_features: int,
+            feature_names: Sequence[str],
     ) -> ValidationResult:
         n_samples = y_true.shape[0]
         aggregated_sum = np.zeros((n_samples, 1), dtype=float)
 
         for response in responses:
             values = response.values
+
             if values.shape != aggregated_sum.shape:
                 raise ValueError(
                     "Invalid regression shard response shape: "
                     f"expected {aggregated_sum.shape}, got {values.shape}"
                 )
+
             aggregated_sum += values
 
-        predicted_values = (aggregated_sum[:, 0] / tree_count).tolist()
+        y_true_float = np.asarray(y_true, dtype=float).reshape(-1)
+        predicted_values_array = aggregated_sum[:, 0] / float(tree_count)
+        predicted_values = predicted_values_array.tolist()
 
-        mse = float(mean_squared_error(y_true, predicted_values))
+        mae = float(mean_absolute_error(y_true_float, predicted_values_array))
+        mse = float(mean_squared_error(y_true_float, predicted_values_array))
         rmse = float(np.sqrt(mse))
-        r2 = float(r2_score(y_true, predicted_values))
+        r2 = float(r2_score(y_true_float, predicted_values_array))
 
         feature_importances = self._aggregate_feature_importances(
             tree_artifacts=tree_artifacts,
             n_features=n_features,
         )
-
+        feature_importances_by_name = self._map_feature_importances_by_name(
+            feature_names=feature_names,
+            feature_importances=feature_importances,
+        )
         metrics = ValidationMetrics(
             experiment_id=experiment_id,
-            accuracy=0.0,
-            classification_report={
-                "mse": mse,
-                "rmse": rmse,
-                "r2": r2,
-            },
-            confusion_matrix=[],
+
+            accuracy=None,
+            classification_report=None,
+            confusion_matrix=None,
+
+            mae=mae,
+            mse=mse,
+            rmse=rmse,
+            r2=r2,
+
             feature_importances=feature_importances,
+            feature_importances_by_name=feature_importances_by_name,
             evaluated_at=time.time(),
         )
 
@@ -474,3 +497,23 @@ class ValidationCoordinator:
             return [0.0] * n_features
 
         return np.mean(np.vstack(vectors), axis=0).tolist()
+
+    def _map_feature_importances_by_name(
+            self,
+            feature_names: Sequence[str],
+            feature_importances: Sequence[float],
+    ) -> dict[str, float]:
+        mapped: dict[str, float] = {}
+
+        limit = min(len(feature_names), len(feature_importances))
+
+        for index in range(limit):
+            mapped[str(feature_names[index])] = float(feature_importances[index])
+
+        return dict(
+            sorted(
+                mapped.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        )

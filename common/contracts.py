@@ -219,14 +219,24 @@ class ShardTrainingResult:
 @dataclass(slots=True)
 class ValidationMetrics:
     experiment_id: str
+
+    # Classification metrics
     accuracy: Optional[float] = None
     classification_report: Optional[dict[str, Any]] = None
     confusion_matrix: Optional[list[list[int]]] = None
 
+    # Regression metrics
     mae: Optional[float] = None
     mse: Optional[float] = None
     rmse: Optional[float] = None
     r2: Optional[float] = None
+
+    # Shared metrics / diagnostics
+    feature_importances: list[float] = field(default_factory=list)
+    feature_importances_by_name: dict[str, float] = field(default_factory=dict)
+
+    evaluated_at: float = field(default_factory=time.time)
+
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
