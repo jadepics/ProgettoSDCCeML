@@ -36,7 +36,7 @@ class WorkerRegistryLike(Protocol):
         exclude_worker_id: str | None = None,
     ) -> Optional[WorkerLike]:
         ...
-
+#todo verifica che questi puntini abbiano senso
 
 class TrainingOrchestrator:
     def __init__(

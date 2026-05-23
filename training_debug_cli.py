@@ -80,7 +80,8 @@ def submit_training():
             MASTER_ADDRESS,
             dataset_path,
             dataset_scenario="baseline_no_leakage",
-            leakage_columns=["diabetes_stage"],
+            leakage_columns=["diabetes_stage",
+            "diabetes_risk_score"],
         )
 
     elif choice == "3":

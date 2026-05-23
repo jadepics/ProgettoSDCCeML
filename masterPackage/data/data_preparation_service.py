@@ -38,6 +38,7 @@ class DataPreparationService:
     DROP_COLUMNS_BY_SCENARIO: dict[str, list[str]] = {
         "baseline_no_leakage": [
             "diabetes_stage",
+            "diabetes_risk_score",
         ],
         "no_diagnostic_features": [
             "diabetes_stage",
