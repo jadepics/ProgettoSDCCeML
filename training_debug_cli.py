@@ -60,7 +60,7 @@ def submit_training():
     print("4 -> CLASSIFICATION - NO DIAGNOSTIC EXTENDED")
     print("5 -> CLASSIFICATION - CLINICAL ONLY")
     print("6 -> CLASSIFICATION - GLUCOSE ONLY")
-    print("7 -> REGRESSION")
+    print("7 -> REGRESSION - PREDICT HBA1C")
     print("8 -> GO BACK")
 
     choice = input(

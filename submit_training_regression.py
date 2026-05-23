@@ -11,8 +11,14 @@ def main(PrivateIp_Port : str, dataset_path :str):
 
     request = pb.SubmitTrainingRequest(
         dataset_url=str(dataset_path),
-        target_column="diagnosed_diabetes",
-        task_type="classification",
+        target_column="hba1c",
+        task_type="regression",
+        dataset_scenario="baseline_no_leakage",
+        leakage_columns=[
+            "diagnosed_diabetes",
+            "diabetes_stage",
+            "diabetes_risk_score",
+        ],
         n_estimators_total=24,
         validation_ratio=0.2,
         test_ratio=0.2,
@@ -22,7 +28,7 @@ def main(PrivateIp_Port : str, dataset_path :str):
         max_features_candidates=["sqrt"],
         min_samples_split_candidates=[2],
         min_samples_leaf_candidates=[1],
-        criterion_candidates=["gini"],
+        criterion_candidates=["squared_error"],
     )
 
     response = stub.SubmitTraining(request, timeout=30)

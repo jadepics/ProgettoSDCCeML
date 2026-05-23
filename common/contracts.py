@@ -219,11 +219,14 @@ class ShardTrainingResult:
 @dataclass(slots=True)
 class ValidationMetrics:
     experiment_id: str
-    accuracy: float
-    classification_report: dict[str, Any]
-    confusion_matrix: list[list[int]]
-    feature_importances: list[float]
-    evaluated_at: float = field(default_factory=time.time)
+    accuracy: Optional[float] = None
+    classification_report: Optional[dict[str, Any]] = None
+    confusion_matrix: Optional[list[list[int]]] = None
+
+    mae: Optional[float] = None
+    mse: Optional[float] = None
+    rmse: Optional[float] = None
+    r2: Optional[float] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
