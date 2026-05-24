@@ -335,11 +335,13 @@ class TrainingJobService:
         model_id = generate_model_id()
 
         test_metrics = None
+        task_type = job_record.training_request.task_type.strip().lower()
+
         if self.test_evaluator is not None and prepared_dataset.n_test > 0:
             test_result = self.test_evaluator.evaluate_model(
                 model_id=model_id,
                 experiment_id=experiment_record.experiment_id,
-                task_type=job_record.training_request.task_type,
+                task_type=task_type,
                 test_features_uri=prepared_dataset.test_features_uri,
                 test_labels_uri=prepared_dataset.test_labels_uri,
                 tree_artifacts=tree_artifacts,
@@ -347,18 +349,18 @@ class TrainingJobService:
             )
             test_metrics = test_result.metrics.to_dict()
 
-        return self.model_manifest_builder .build(
+        return self.model_manifest_builder.build(
             model_id=model_id,
             job_id=job_record.job_id,
             experiment_id=experiment_record.experiment_id,
-            model_type=job_record.training_request.task_type,
+            model_type=task_type,
             forest_config=experiment_record.forest_config,
             prepared_dataset=prepared_dataset,
             tree_artifacts=tree_artifacts,
             validation_metrics=experiment_record.validation_metrics,
             test_metrics=test_metrics,
             status=ModelStatus.READY,
-        )   
+        )
 
     # --------------------------------------------------------
     # failure handling

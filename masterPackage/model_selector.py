@@ -64,20 +64,29 @@ class ModelSelector:
         metric_name = self._resolve_metric_name(experiment)
 
         if metric_name == "accuracy":
-            score = float(metrics.accuracy)
-            return score
+            if metrics.accuracy is None:
+                raise ValueError(
+                    f"Experiment '{experiment.experiment_id}' has no accuracy "
+                    "inside validation_metrics"
+                )
+
+            return float(metrics.accuracy)
 
         if metric_name == "r2":
+            if metrics.r2 is not None:
+                return float(metrics.r2)
+
+            # Compatibilità con vecchi job dove r2 era salvato male dentro classification_report
             report = metrics.classification_report or {}
-            if "r2" not in report:
-                raise ValueError(
-                    f"Experiment '{experiment.experiment_id}' has no 'r2' "
-                    "inside validation_metrics.classification_report"
-                )
-            return float(report["r2"])
+            if isinstance(report, dict) and "r2" in report:
+                return float(report["r2"])
+
+            raise ValueError(
+                f"Experiment '{experiment.experiment_id}' has no r2 "
+                "inside validation_metrics"
+            )
 
         raise ValueError(f"Unsupported resolved metric '{metric_name}'")
-
     def _resolve_metric_name(self, experiment: ExperimentRecord) -> str:
         if self.selection_metric != "auto":
             return self.selection_metric
