@@ -371,7 +371,6 @@ class ValidationCoordinator:
             predicted_labels=None,
             predicted_values=predicted_values,
         )
-
     def _resolve_class_labels(
         self,
         y_true: np.ndarray,

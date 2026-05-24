@@ -17,7 +17,7 @@ from .contracts import (
     TrainingJobRecord,
     TrainingRequest,
     ValidationMetrics,
-    WorkerProgressSnapshot, TreeArtifactMetadata,
+    WorkerProgressSnapshot, TreeArtifactMetadata, DatasetPreparationMetadata,
 )
 from .enums import ExperimentStatus, JobStatus, ModelStatus,TaskStatus, TreeStatus
 from .storage_layout import StorageLayout
@@ -137,6 +137,9 @@ def _prepared_dataset_from_dict(payload: dict[str, Any]) -> PreparedDataset:
         n_train=payload["n_train"],
         n_validation=payload["n_validation"],
         n_test=payload["n_test"],
+        preparation_metadata=_dataset_preparation_metadata_from_dict(
+            payload.get("preparation_metadata")
+        ),
     )
 
 
@@ -155,16 +158,27 @@ def _forest_configuration_from_dict(payload: dict[str, Any]) -> ForestConfigurat
     )
 
 
-def _validation_metrics_from_dict(payload: dict[str, Any]) -> ValidationMetrics:
-    return ValidationMetrics(
-        experiment_id=payload["experiment_id"],
-        accuracy=payload["accuracy"],
-        classification_report=payload["classification_report"],
-        confusion_matrix=payload["confusion_matrix"],
-        feature_importances=payload["feature_importances"],
-        evaluated_at=payload.get("evaluated_at", 0.0),
-    )
+def _validation_metrics_from_dict(data: dict[str, Any] | None) -> ValidationMetrics | None:
+    if data is None:
+        return None
 
+    return ValidationMetrics(
+        experiment_id=data["experiment_id"],
+
+        accuracy=data.get("accuracy"),
+        classification_report=data.get("classification_report"),
+        confusion_matrix=data.get("confusion_matrix"),
+
+        mae=data.get("mae"),
+        mse=data.get("mse"),
+        rmse=data.get("rmse"),
+        r2=data.get("r2"),
+
+        feature_importances=data.get("feature_importances", []),
+        feature_importances_by_name=data.get("feature_importances_by_name", {}),
+
+        evaluated_at=data.get("evaluated_at", time.time()),
+    )
 
 def _experiment_record_from_dict(payload: dict[str, Any]) -> ExperimentRecord:
     validation_metrics_payload = payload.get("validation_metrics")
@@ -200,6 +214,38 @@ def _training_job_record_from_dict(payload: dict[str, Any]) -> TrainingJobRecord
         message=payload.get("message", ""),
         created_at=payload.get("created_at", 0.0),
         updated_at=payload.get("updated_at", 0.0),
+    )
+
+def _dataset_preparation_metadata_from_dict(
+    payload: dict[str, Any] | None,
+) -> DatasetPreparationMetadata:
+    if payload is None:
+        return DatasetPreparationMetadata()
+
+    return DatasetPreparationMetadata(
+        dataset_scenario=payload.get("dataset_scenario", "baseline_original"),
+        scenario_type=payload.get("scenario_type", "none"),
+
+        requested_drop_columns=payload.get("requested_drop_columns"),
+        dropped_columns=payload.get("dropped_columns", []),
+        missing_requested_drop_columns=payload.get("missing_requested_drop_columns", []),
+
+        requested_keep_columns=payload.get("requested_keep_columns"),
+        kept_columns=payload.get("kept_columns", []),
+        missing_requested_keep_columns=payload.get("missing_requested_keep_columns", []),
+
+        requested_leakage_columns=payload.get("requested_leakage_columns"),
+        missing_requested_leakage_columns=payload.get(
+            "missing_requested_leakage_columns",
+            [],
+        ),
+
+        original_column_count=payload.get("original_column_count", 0),
+        final_column_count=payload.get("final_column_count", 0),
+        original_row_count=payload.get("original_row_count", 0),
+        final_row_count=payload.get("final_row_count", 0),
+
+        scenario_report_uri=payload.get("scenario_report_uri"),
     )
 
 
