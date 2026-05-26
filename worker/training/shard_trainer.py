@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+
 import numpy as np
 from common.ids import generate_tree_id
 
@@ -188,150 +190,147 @@ class ShardTrainer:
                 i: int
                 """
 
-                # indice globale dell'albero nella foresta
-                tree_index: int = shard.tree_start_index + i
-
-                # id logico dell'albero (deterministico)
-                tree_id: str = generate_tree_id(shard.experiment_id, tree_index)
-                self._ensure_rpc_active(
-                    context,
-                    f"TrainShard cancelled before training tree {tree_id}",
-                )
-                # ----------------------------------------
-                # IDPOTENZA (CRITICO)
-                # ----------------------------------------
-                artifact_key = tree_artifact_path(
-                    job_id=shard.job_id,
-                    experiment_id=shard.experiment_id,
-                    tree_index=tree_index,
-                )
-
-                # ----------------------------------------
-                # CONSISTENCY CHECK (artifact vs snapshot)
-                # ----------------------------------------
-                artifact_exists = self.artifact_writer.store.exists(artifact_key)
-
-                if tree_id in completed_tree_ids and not artifact_exists:
-                    # inconsistenza → correggiamo
-                    completed_tree_ids.remove(tree_id)
-
-                # ----------------------------------------
-                # SKIP se già completato (retry-safe)
-                # ----------------------------------------
-                if tree_id in completed_tree_ids:
-                    continue
-
-                # ----------------------------------------
-                # SEED deterministico per l'albero
-                # ----------------------------------------
-                seed: int = shard.seed_base + tree_index
-
-                # ----------------------------------------
-                # BOOTSTRAP (firma corretta)
-                # sample_indices(n_samples: int, seed: int, bootstrap: bool)
-                # ----------------------------------------
-                indices = self.bootstrap_sampler.sample_indices(
-                    n_samples=len(X),
-                    seed=seed,
-                    bootstrap=shard.forest_config.bootstrap,
-                )
-
-                X_sample = X[indices]
-                y_sample = y[indices]
-
-                # ----------------------------------------
-                # CREAZIONE MODELLO (firma corretta)
-                # create(max_depth, min_samples_split, min_samples_leaf, max_features, seed)
-                # ----------------------------------------
-                fc = shard.forest_config  # alias per leggibilità
-                task_type = fc.task_type.lower().strip()
-
-                tree = self.tree_factory.create(
-                    max_depth=fc.max_depth,
-                    min_samples_split=fc.min_samples_split,
-                    min_samples_leaf=fc.min_samples_leaf,
-                    max_features=fc.max_features,
-                    seed=seed,
-                    task_type=task_type
-                )
-
-                # ----------------------------------------
-                # Da qui partirà:
-                # try:
-                #     tree.fit(...)
-                # ----------------------------------------
                 try:
-                    """
-                    Training + persistenza atomica albero
-                    """
 
-                    # ----------------------------------------
-                    # TRAIN
-                    # ----------------------------------------
-                    t0: float = time.time()
+                    # indice globale dell'albero nella foresta
+                    tree_index: int = shard.tree_start_index + i
 
-                    tree.fit(X_sample, y_sample)
-
-                    training_time: float = time.time() - t0
-
+                    # id logico dell'albero (deterministico)
+                    tree_id: str = generate_tree_id(shard.experiment_id, tree_index)
                     self._ensure_rpc_active(
                         context,
-                        f"TrainShard cancelled before artifact write for tree {tree_id}",
+                        f"TrainShard cancelled before training tree {tree_id}",
                     )
                     # ----------------------------------------
-                    # WRITE ARTIFACT (idempotente lato storage)
+                    # IDPOTENZA (CRITICO)
                     # ----------------------------------------
-                    metadata: TreeArtifactMetadata = self.artifact_writer.write_tree(
-                        model=tree,
+                    artifact_key = tree_artifact_path(
                         job_id=shard.job_id,
                         experiment_id=shard.experiment_id,
-                        task_id=shard.task_id,
                         tree_index=tree_index,
+                    )
+
+                    # ----------------------------------------
+                    # CONSISTENCY CHECK (artifact vs snapshot)
+                    # ----------------------------------------
+                    artifact_exists = self.artifact_writer.store.exists(artifact_key)
+
+                    if tree_id in completed_tree_ids and not artifact_exists:
+                        # inconsistenza → correggiamo
+                        completed_tree_ids.remove(tree_id)
+
+                    # ----------------------------------------
+                    # SKIP se già completato (retry-safe)
+                    # ----------------------------------------
+                    if tree_id in completed_tree_ids:
+                        continue
+
+                    # ----------------------------------------
+                    # SEED deterministico per l'albero
+                    # ----------------------------------------
+                    seed: int = shard.seed_base + tree_index
+
+                    # ----------------------------------------
+                    # BOOTSTRAP (firma corretta)
+                    # sample_indices(n_samples: int, seed: int, bootstrap: bool)
+                    # ----------------------------------------
+                    indices = self.bootstrap_sampler.sample_indices(
+                        n_samples=len(X),
                         seed=seed,
-                        training_time_seconds=training_time,
+                        bootstrap=shard.forest_config.bootstrap,
+                    )
+
+                    X_sample = X[indices]
+                    y_sample = y[indices]
+
+                    # ----------------------------------------
+                    # CREAZIONE MODELLO (firma corretta)
+                    # create(max_depth, min_samples_split, min_samples_leaf, max_features, seed)
+                    # ----------------------------------------
+                    fc = shard.forest_config  # alias per leggibilità
+                    task_type = fc.task_type.lower().strip()
+
+                    tree = self.tree_factory.create(
+                        max_depth=fc.max_depth,
+                        min_samples_split=fc.min_samples_split,
+                        min_samples_leaf=fc.min_samples_leaf,
+                        max_features=fc.max_features,
+                        seed=seed,
+                        task_type=task_type
                     )
 
                     # ----------------------------------------
-                    # UPDATE SUCCESS
+                    # Da qui partirà:
+                    # try:
+                    #     tree.fit(...)
                     # ----------------------------------------
-                    tree_artifacts.append(metadata)
-                    completed_tree_ids.add(tree_id)
+                    try:
+                        """
+                        Training + persistenza atomica albero
+                        """
 
-                    # aggiornamento snapshot consistente
-                    self.progress_store.update_task(
-                        job_id=shard.job_id,
-                        experiment_id=shard.experiment_id,
-                        task_id=shard.task_id,
-                        completed_tree_ids=list(completed_tree_ids),
-                        failed_tree_ids=list(failed_tree_ids),
-                    )
+                        # ----------------------------------------
+                        # TRAIN
+                        # ----------------------------------------
+                        t0: float = time.time()
 
+                        tree.fit(X_sample, y_sample)
 
+                        training_time: float = time.time() - t0
 
-                except TrainingCancelled:
+                        self._ensure_rpc_active(
+                            context,
+                            f"TrainShard cancelled before artifact write for tree {tree_id}",
+                        )
+                        # ----------------------------------------
+                        # WRITE ARTIFACT (idempotente lato storage)
+                        # ----------------------------------------
+                        metadata: TreeArtifactMetadata = self.artifact_writer.write_tree(
+                            model=tree,
+                            job_id=shard.job_id,
+                            experiment_id=shard.experiment_id,
+                            task_id=shard.task_id,
+                            tree_index=tree_index,
+                            seed=seed,
+                            training_time_seconds=training_time,
+                        )
 
-                    raise
+                        # ----------------------------------------
+                        # UPDATE SUCCESS
+                        # ----------------------------------------
+                        tree_artifacts.append(metadata)
+                        completed_tree_ids.add(tree_id)
 
+                        # aggiornamento snapshot consistente
+                        self.progress_store.update_task(
+                            job_id=shard.job_id,
+                            experiment_id=shard.experiment_id,
+                            task_id=shard.task_id,
+                            completed_tree_ids=list(completed_tree_ids),
+                            failed_tree_ids=list(failed_tree_ids),
+                        )
 
-                except Exception as exc:
+                    except TrainingCancelled:
 
-                    failed_tree_ids.add(tree_id)
+                        raise
 
-                    self.progress_store.update_task(
+                    except Exception as exc:
 
-                        job_id=shard.job_id,
+                        failed_tree_ids.add(tree_id)
 
-                        experiment_id=shard.experiment_id,
+                        self.progress_store.update_task(
+                            job_id=shard.job_id,
+                            experiment_id=shard.experiment_id,
+                            task_id=shard.task_id,
+                            completed_tree_ids=list(completed_tree_ids),
+                            failed_tree_ids=list(failed_tree_ids),
+                        )
 
-                        task_id=shard.task_id,
-
-                        completed_tree_ids=list(completed_tree_ids),
-
-                        failed_tree_ids=list(failed_tree_ids),
-
-                    )
-
-                    print(f"[ShardTrainer] Tree {tree_id} failed: {exc}", flush=True)
+                        print(f"[ShardTrainer] Tree {tree_id} failed: {exc}", flush=True)
+                finally:
+                    # libera subito la memoria temporanea del singolo albero
+                    del indices, X_sample, y_sample, tree
+                    gc.collect()
 
 
             # ----------------------------------------

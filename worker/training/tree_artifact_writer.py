@@ -55,17 +55,19 @@ class TreeArtifactWriter:
         # --------------------------------------------------
         # 1. Path deterministici
         # --------------------------------------------------
-        artifact_key: str = tree_artifact_path(
+        artifact_key = tree_artifact_path(
+            job_id=job_id,
+            experiment_id=experiment_id,
+            tree_index=tree_index,
+        )
+        metadata_key = tree_metadata_path(
             job_id=job_id,
             experiment_id=experiment_id,
             tree_index=tree_index,
         )
 
-        metadata_key: str = tree_metadata_path(
-            job_id=job_id,
-            experiment_id=experiment_id,
-            tree_index=tree_index,
-        )
+        # pulizia hardening: eventuali file temporanei rimasti da crash precedenti
+        self._cleanup_tmp_paths(artifact_key, metadata_key)
 
         tree_id = generate_tree_id(experiment_id, tree_index)
 
@@ -75,15 +77,17 @@ class TreeArtifactWriter:
         # --------------------------------------------------
         if self.store.exists(metadata_key):
             data = self.store.load_json(metadata_key)
-            return TreeArtifactMetadata.from_dict(data)
+            metadata = TreeArtifactMetadata.from_dict(data)
+            if self.store.exists(metadata.artifact_uri):
+                return metadata
+
+            # metadata senza artifact → stato incoerente, lo rimuovo e ricostruisco
+            self.store.delete(metadata_key)
 
         # --------------------------------------------------
         # 3. Scrittura artifact (idempotente)
         # --------------------------------------------------
-        created: bool = self.store.save_tree_artifact_if_not_exists(
-            artifact_key,
-            model
-        )
+        self.store.save_tree_artifact_if_not_exists(artifact_key, model)
 
         # --------------------------------------------------
         # 4. Feature importances dal modello addestrato
@@ -110,12 +114,13 @@ class TreeArtifactWriter:
         # --------------------------------------------------
         # 6. Scrittura metadata ATOMICA (sempre)
         # --------------------------------------------------
-        self.store.save_json_atomic(
-            metadata_key,
-            metadata.to_dict()
-        )
-
+        self.store.save_json_atomic(metadata_key, metadata.to_dict())
         return metadata
+
+    def _cleanup_tmp_paths(self, artifact_key: str, metadata_key: str) -> None:
+        for key in (artifact_key + ".tmp", metadata_key + ".tmp"):
+            if self.store.exists(key):
+                self.store.delete(key)
 
     @staticmethod
     def _extract_feature_importances(model: object) -> list[float]:

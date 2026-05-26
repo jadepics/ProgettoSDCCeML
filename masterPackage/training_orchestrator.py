@@ -437,6 +437,19 @@ class TrainingOrchestrator:
 
         return final_artifacts
 
+    def _is_current_attempt(
+            self,
+            shard: TrainingShard,
+            result: ShardTrainingResult,
+    ) -> bool:
+        latest_attempt_id = self.task_ledger.latest_attempt_id(
+            job_id=shard.job_id,
+            task_id=shard.task_id,
+        )
+        if latest_attempt_id is None:
+            return True
+        return int(latest_attempt_id) == int(result.attempt_id)
+
     def _execute_shard_with_retry(
         self,
         worker: WorkerLike,
@@ -462,6 +475,18 @@ class TrainingOrchestrator:
                 worker=current_worker,
                 shard=current_shard,
             )
+
+            # se è arrivato un risultato non allineato all'attempt corrente,
+            # lo ignoro e continuo a seguire lo stato persistito
+            if not self._is_current_attempt(current_shard, result):
+                print(
+                    "[TrainingOrchestrator] stale attempt ignored:",
+                    f"task_id={current_shard.task_id}",
+                    f"attempt_id={result.attempt_id}",
+                    flush=True,
+                )
+                observed_results.append(result)
+                return current_shard, result, observed_results
 
             observed_results.append(result)
 
