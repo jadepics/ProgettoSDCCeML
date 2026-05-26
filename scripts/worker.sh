@@ -1,107 +1,161 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-ACTION=$1
-WORKER_ID=$2
-WORKER_PORT=$3
-
-BASE_DIR="$HOME/gp"
-
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_NAME="gp-worker"
-CONTAINER_NAME="$WORKER_ID"
+ENV_TEMPLATE="${PROJECT_ROOT}/.env.worker"
+RUNTIME_ENV_DIR="${PROJECT_ROOT}/runtime-env"
+ARTIFACT_MOUNT="/mnt/efs/gp_artifacts"
 
-ENV_TEMPLATE="$BASE_DIR/.env.worker"
-RUNTIME_ENV_DIR="$BASE_DIR/runtime-env"
+ACTION="${1:-}"
+WORKER_ID="${2:-}"
+WORKER_PORT="${3:-}"
+EXTRA_ENV_VARS=()
+if (( $# > 3 )); then
+  EXTRA_ENV_VARS=("${@:4}")
+fi
 
 mkdir -p "$RUNTIME_ENV_DIR"
 
-if [ -z "$ACTION" ]; then
+usage() {
   echo "Usage:"
-  echo "./worker.sh build"
-  echo "./worker.sh start worker1 50061"
-  echo "./worker.sh restart worker1 50061"
-  echo "./worker.sh stop worker1"
+  echo "  ./scripts/worker.sh build"
+  echo "  ./scripts/worker.sh start <worker_id> <worker_port> [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh restart <worker_id> <worker_port> [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh rebuild <worker_id> <worker_port> [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh update <worker_id> <worker_port> [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh stop <worker_id>"
+  echo "  ./scripts/worker.sh logs <worker_id>"
+  echo "  ./scripts/worker.sh shell <worker_id>"
   exit 1
-fi
-
-build_image () {
-
-  cd "$BASE_DIR" || exit 1
-
-  docker build \
-    -t $IMAGE_NAME \
-    -f Dockerfile.worker \
-    .
 }
 
-generate_env () {
+set_env_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
 
-  if [ ! -f "$ENV_TEMPLATE" ]; then
-    echo ".env.worker not found in $ENV_TEMPLATE"
+  if grep -qE "^${key}=" "$file"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+  else
+    echo "${key}=${value}" >> "$file"
+  fi
+}
+
+container_name_from_worker_id() {
+  local worker_id="$1"
+  echo "gp-${worker_id}"
+}
+
+generate_env() {
+  local worker_id="$1"
+  local worker_port="$2"
+  local runtime_env_file="${RUNTIME_ENV_DIR}/${worker_id}.runtime.env"
+
+  if [[ ! -f "$ENV_TEMPLATE" ]]; then
+    echo "[ERROR] .env.worker not found at: $ENV_TEMPLATE"
     exit 1
   fi
 
-  ENV_FILE="$RUNTIME_ENV_DIR/$WORKER_ID.env"
+  cp "$ENV_TEMPLATE" "$runtime_env_file"
 
-  cp "$ENV_TEMPLATE" "$ENV_FILE"
+  set_env_value "$runtime_env_file" "WORKER_ID" "$worker_id"
+  set_env_value "$runtime_env_file" "WORKER_PORT" "$worker_port"
 
-  sed -i "s/^WORKER_ID=.*/WORKER_ID=$WORKER_ID/" "$ENV_FILE"
+  for kv in "${EXTRA_ENV_VARS[@]}"; do
+    [[ "$kv" == *=* ]] || { echo "[ERROR] invalid env override: $kv"; exit 1; }
+    key="${kv%%=*}"
+    value="${kv#*=}"
+    set_env_value "$runtime_env_file" "$key" "$value"
+  done
 
-  sed -i "s/^WORKER_PORT=.*/WORKER_PORT=$WORKER_PORT/" "$ENV_FILE"
-
-  echo "$ENV_FILE"
+  echo "$runtime_env_file"
 }
 
-start_worker () {
+stop_container() {
+  local container_name="$1"
+  docker stop "$container_name" >/dev/null 2>&1 || true
+  docker rm "$container_name" >/dev/null 2>&1 || true
+}
 
-  if [ -z "$WORKER_ID" ] || [ -z "$WORKER_PORT" ]; then
-    echo "Missing worker_id or worker_port"
-    exit 1
-  fi
+build_image() {
+  cd "$PROJECT_ROOT"
+  docker build -t "$IMAGE_NAME" -f Dockerfile.worker .
+}
 
-  ENV_FILE=$(generate_env)
+run_worker() {
+  local worker_id="$1"
+  local worker_port="$2"
+  local container_name
+  container_name="$(container_name_from_worker_id "$worker_id")"
+
+  local env_file
+  env_file="$(generate_env "$worker_id" "$worker_port")"
 
   docker run -d \
-    --name "$CONTAINER_NAME" \
+    --name "$container_name" \
     --restart unless-stopped \
     --network host \
-    --env-file "$ENV_FILE" \
-    -v /mnt/efs/gp_artifacts:/mnt/efs/gp_artifacts \
-    $IMAGE_NAME
+    --env-file "$env_file" \
+    -v "$ARTIFACT_MOUNT:$ARTIFACT_MOUNT" \
+    "$IMAGE_NAME"
 }
 
-stop_worker () {
-
-  docker stop "$CONTAINER_NAME" || true
-
-  docker rm "$CONTAINER_NAME" || true
-}
-
-restart_worker () {
-
-  stop_worker
-
-  start_worker
-}
-
-case $ACTION in
-
+case "$ACTION" in
   build)
     build_image
     ;;
 
   start)
-    start_worker
-    ;;
-
-  stop)
-    stop_worker
+    [[ -n "$WORKER_ID" && -n "$WORKER_PORT" ]] || usage
+    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+    run_worker "$WORKER_ID" "$WORKER_PORT"
     ;;
 
   restart)
-    restart_worker
+    [[ -n "$WORKER_ID" && -n "$WORKER_PORT" ]] || usage
+    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+    run_worker "$WORKER_ID" "$WORKER_PORT"
+    ;;
+
+  rebuild)
+    [[ -n "$WORKER_ID" && -n "$WORKER_PORT" ]] || usage
+    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+    docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
+    build_image
+    run_worker "$WORKER_ID" "$WORKER_PORT"
+    ;;
+
+  update)
+    [[ -n "$WORKER_ID" && -n "$WORKER_PORT" ]] || usage
+    cd "$PROJECT_ROOT"
+    git pull
+    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+    docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
+    build_image
+    run_worker "$WORKER_ID" "$WORKER_PORT"
+    ;;
+
+  stop)
+    [[ -n "$WORKER_ID" ]] || usage
+    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+    ;;
+
+  logs)
+    [[ -n "$WORKER_ID" ]] || usage
+    docker logs -f "$(container_name_from_worker_id "$WORKER_ID")"
+    ;;
+
+  shell)
+    [[ -n "$WORKER_ID" ]] || usage
+    docker exec -it "$(container_name_from_worker_id "$WORKER_ID")" bash
+    ;;
+
+  "")
+    usage
     ;;
 
   *)
-    echo "Invalid action"
+    usage
     ;;
 esac

@@ -3,6 +3,8 @@ from __future__ import annotations
 import gc
 
 import numpy as np
+
+from common.chaos import maybe_fail
 from common.ids import generate_tree_id
 
 from common.contracts import (
@@ -283,6 +285,9 @@ class ShardTrainer:
                             f"TrainShard cancelled before artifact write for tree {tree_id}",
                         )
                         # ----------------------------------------
+
+                        maybe_fail("worker.train.after_fit_before_write")
+
                         # WRITE ARTIFACT (idempotente lato storage)
                         # ----------------------------------------
                         metadata: TreeArtifactMetadata = self.artifact_writer.write_tree(

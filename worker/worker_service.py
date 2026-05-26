@@ -1,5 +1,6 @@
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
+from common.chaos import maybe_fail
 from common.contracts import TrainingShard, ForestConfiguration, TreeArtifactMetadata
 from worker.mappers.tree_artifact_mapper import to_proto_tree_artifact
 from worker.utils.dataset_utils import split_features_labels
@@ -56,6 +57,8 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 seed_base=request.seed_base,
                 lease_expires_at_ts=request.lease_expires_at_unix_ms / 1000.0,
             )
+
+            maybe_fail("worker.train.before_trainer")
 
             # ----------------------------------------
             # 2. Delega totale al trainer
@@ -118,6 +121,8 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 
             if not artifact_uris:
                 raise ValueError("No tree artifacts provided")
+
+            maybe_fail("worker.predict.before_predictor")
 
             # 3. prediction (NO aggregation finale)
             result = self.shard_predictor.predict(

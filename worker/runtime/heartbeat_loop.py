@@ -1,6 +1,8 @@
 import threading
 import time
 
+from common.chaos import maybe_fail
+
 
 class HeartbeatLoop:
 
@@ -23,6 +25,8 @@ class HeartbeatLoop:
             try:
                 running_tasks = self.worker_state.running_tasks_count()
                 active_task_ids = self.worker_state.active_task_ids()
+
+                maybe_fail("worker.heartbeat.before_send")
 
                 self.master_client.send_heartbeat(
                     worker_id=self.worker_id,
