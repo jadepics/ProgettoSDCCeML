@@ -344,6 +344,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             node_id=node_id,
             start_as_leader=True,
         )
+
     # --------------------------------------------------------
     # RPC: submit training
     # --------------------------------------------------------
@@ -684,7 +685,42 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 )
 
             time.sleep(poll_seconds)
+    def _wait_for_at_least_one_worker(self) -> None:
+        timeout_seconds = float(
+            os.getenv("RECOVERY_WAIT_WORKERS_TIMEOUT_SECONDS", "60")
+        )
+        poll_interval_seconds = float(
+            os.getenv("RECOVERY_WAIT_WORKERS_POLL_SECONDS", "2")
+        )
 
+        deadline = time.time() + timeout_seconds
+
+        while time.time() < deadline:
+            try:
+                workers = self.registry.alive_workers()
+
+                if workers:
+                    print(
+                        "[MasterCoordinator] Workers available for recovery: "
+                        f"{[worker.worker_id for worker in workers]}",
+                        flush=True,
+                    )
+                    return
+
+            except Exception as exc:
+                print(
+                    "[MasterCoordinator] Worker availability check failed: "
+                    f"{exc}",
+                    flush=True,
+                )
+
+            time.sleep(poll_interval_seconds)
+
+        print(
+            "[MasterCoordinator] No workers available before recovery timeout. "
+            "Recovery will still be attempted.",
+            flush=True,
+        )
     def _list_recoverable_jobs(self):
         jobs = self._list_all_jobs_from_repository()
 
