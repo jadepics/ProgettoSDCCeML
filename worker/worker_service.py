@@ -63,7 +63,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             # ----------------------------------------
             # 2. Delega totale al trainer
             # ----------------------------------------
-            result = self.shard_trainer.train(shard, context=context)
+            result = self.shard_trainer.train(shard, context=context, progress_callback=self.state.on_task_progress,)
 
             # ----------------------------------------
             # 3. Stato worker

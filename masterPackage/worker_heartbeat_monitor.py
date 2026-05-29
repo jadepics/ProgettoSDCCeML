@@ -114,7 +114,7 @@ class WorkerHeartbeatMonitor:
         return [
             item
             for item in self.snapshot(now_ts=now_ts)
-            if not item.is_stale
+            if not item.is_stale and not item.is_zombie
         ]
 
     def stale_workers(

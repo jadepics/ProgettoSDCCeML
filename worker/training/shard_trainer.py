@@ -48,7 +48,7 @@ class ShardTrainer:
     # --------------------------------------------------
     # MAIN
     # --------------------------------------------------
-    def train(self, shard: TrainingShard, context=None) -> ShardTrainingResult:
+    def train(self, shard: TrainingShard, context=None, progress_callback=None) -> ShardTrainingResult:
         """
         shard: TrainingShard
         return: ShardTrainingResult
@@ -314,6 +314,11 @@ class ShardTrainer:
                             completed_tree_ids=list(completed_tree_ids),
                             failed_tree_ids=list(failed_tree_ids),
                         )
+
+                        if progress_callback is not None:
+                            progress_callback(shard.task_id)
+
+                        maybe_fail("worker.train.after_progress_update")
 
                     except TrainingCancelled:
 

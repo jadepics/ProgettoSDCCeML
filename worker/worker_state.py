@@ -38,12 +38,11 @@ class WorkerState:
             self._task_status[task_id] = "RUNNING"
             self._task_last_progress_ts[task_id] = now
 
-        def on_task_progress(self, task_id: str) -> None:
-            now = time.time()
-            with self._lock:
-                if task_id in self._active_tasks:
-                    self._task_status[task_id] = "RUNNING"
-                    self._task_last_progress_ts[task_id] = now
+    def on_task_progress(self, task_id: str) -> None:
+        now = time.time()
+        with self._lock:
+            if task_id in self._active_tasks:
+                self._task_last_progress_ts[task_id] = now
 
     def on_task_success(self, task_id: str) -> None:
         now = time.time()
