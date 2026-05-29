@@ -23,6 +23,8 @@ from masterPackage.experiment_planner import ExperimentPlanner
 from masterPackage.fault_tolerance import (
     InMemoryLeaderConsensusService,
     LeadershipGuard,
+    RaftConsensusService,
+    build_raft_node_config_from_env,
 )
 from masterPackage.inference_coordinator import InferenceCoordinator
 from masterPackage.model_manifest_builder import ModelManifestBuilder
@@ -187,10 +189,8 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         self.task_ledger = TaskLedger(self.store)
 
         # leadership / consenso
-        self.consensus = InMemoryLeaderConsensusService(
-            node_id="master-1",
-            start_as_leader=True,
-        )
+        self.consensus = self._build_consensus_service()
+        self.consensus.start()
         self.leadership_guard = LeadershipGuard(self.consensus)
 
         # monitor heartbeat: va creato PRIMA di orchestrator/recovery
@@ -279,6 +279,14 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     # --------------------------------------------------------
 
     def RegisterWorker(self, request, context):
+        if not self.consensus.is_leader():
+            return rf_pb2.RegisterWorkerResponse(
+                accepted=False,
+                message=(
+                    f"Not leader. role={self.consensus.current_role()} "
+                    f"term={self.consensus.current_term()}"
+                ),
+            )
         if not request.worker_id.strip():
             return rf_pb2.RegisterWorkerResponse(
                 accepted=False,
@@ -308,6 +316,9 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         )
 
     def Heartbeat(self, request, context):
+        if not self.consensus.is_leader():
+            return rf_pb2.HeartbeatResponse(ok=False)
+
         ok = self.registry.heartbeat(
             worker_id=request.worker_id,
             running_tasks=request.running_tasks,
@@ -315,6 +326,24 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         )
         return rf_pb2.HeartbeatResponse(ok=ok)
 
+# --------------------------------------------------------------
+#               consenso
+# ----------------------------------------------------------
+    def _build_consensus_service(self):
+        backend = os.getenv("CONSENSUS_BACKEND", "memory").strip().lower()
+
+        if backend == "raft":
+            config = build_raft_node_config_from_env(
+                artifact_root=str(self.artifact_root),
+            )
+            return RaftConsensusService(config)
+
+        node_id = os.getenv("MASTER_NODE_ID", "master-1").strip()
+
+        return InMemoryLeaderConsensusService(
+            node_id=node_id,
+            start_as_leader=True,
+        )
     # --------------------------------------------------------
     # RPC: submit training
     # --------------------------------------------------------
@@ -584,86 +613,77 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         startup_delay_seconds = float(
             os.getenv("RECOVERY_STARTUP_DELAY_SECONDS", "10")
         )
+        poll_seconds = float(
+            os.getenv("RECOVERY_LEADER_POLL_SECONDS", "2")
+        )
 
         print(
-            "[MasterCoordinator] Startup recovery scheduled "
+            "[MasterCoordinator] Startup recovery watcher scheduled "
             f"in {startup_delay_seconds} seconds"
         )
 
         time.sleep(startup_delay_seconds)
 
-        try:
-            self.leadership_guard.require_leader()
-        except Exception as exc:
-            print(
-                "[MasterCoordinator] Startup recovery skipped: "
-                f"this master is not leader: {exc}"
-            )
-            return
+        recovered_terms: set[int] = set()
 
-        self._wait_for_at_least_one_worker()
-
-        recoverable_jobs = self._list_recoverable_jobs()
-
-        if not recoverable_jobs:
-            print("[MasterCoordinator] No recoverable jobs found at startup")
-            return
-
-        print(
-            "[MasterCoordinator] Recoverable jobs found: "
-            f"{[job.job_id for job in recoverable_jobs]}"
-        )
-
-        for job_record in recoverable_jobs:
+        while True:
             try:
+                if not self.consensus.is_leader():
+                    time.sleep(poll_seconds)
+                    continue
+
+                term = self.consensus.current_term()
+
+                if term in recovered_terms:
+                    time.sleep(poll_seconds)
+                    continue
+
+                recovered_terms.add(term)
+
                 print(
-                    "[MasterCoordinator] Resuming job "
-                    f"{job_record.job_id}"
+                    "[MasterCoordinator] This node is leader, "
+                    f"starting recovery check for term {term}"
                 )
 
-                self.training_job_service.resume_training_job(
-                    job_id=job_record.job_id,
-                    async_run=False,
+                self._wait_for_at_least_one_worker()
+
+                recoverable_jobs = self._list_recoverable_jobs()
+
+                if not recoverable_jobs:
+                    print("[MasterCoordinator] No recoverable jobs found")
+                    time.sleep(poll_seconds)
+                    continue
+
+                print(
+                    "[MasterCoordinator] Recoverable jobs found: "
+                    f"{[job.job_id for job in recoverable_jobs]}"
                 )
+
+                for job_record in recoverable_jobs:
+                    try:
+                        print(
+                            "[MasterCoordinator] Resuming job "
+                            f"{job_record.job_id}"
+                        )
+
+                        self.training_job_service.resume_training_job(
+                            job_id=job_record.job_id,
+                            async_run=False,
+                        )
+
+                    except Exception as exc:
+                        print(
+                            "[MasterCoordinator] Failed to resume job "
+                            f"{job_record.job_id}: {exc}"
+                        )
 
             except Exception as exc:
                 print(
-                    "[MasterCoordinator] Failed to resume job "
-                    f"{job_record.job_id}: {exc}"
-                )
-
-    def _wait_for_at_least_one_worker(self) -> None:
-        timeout_seconds = float(
-            os.getenv("RECOVERY_WAIT_WORKERS_TIMEOUT_SECONDS", "60")
-        )
-        poll_interval_seconds = float(
-            os.getenv("RECOVERY_WAIT_WORKERS_POLL_SECONDS", "2")
-        )
-
-        deadline = time.time() + timeout_seconds
-
-        while time.time() < deadline:
-            try:
-                workers = self.registry.alive_workers()
-                if workers:
-                    print(
-                        "[MasterCoordinator] Workers available for recovery: "
-                        f"{[worker.worker_id for worker in workers]}"
-                    )
-                    return
-
-            except Exception as exc:
-                print(
-                    "[MasterCoordinator] Worker availability check failed: "
+                    "[MasterCoordinator] Recovery watcher error: "
                     f"{exc}"
                 )
 
-            time.sleep(poll_interval_seconds)
-
-        print(
-            "[MasterCoordinator] No workers available before recovery timeout. "
-            "Recovery will still be attempted."
-        )
+            time.sleep(poll_seconds)
 
     def _list_recoverable_jobs(self):
         jobs = self._list_all_jobs_from_repository()
