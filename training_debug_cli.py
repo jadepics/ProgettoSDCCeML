@@ -46,83 +46,140 @@ GRPC_OPTIONS = [
 ]
 
 
+def _n_estimators_total():
+
+    try:
+        print("INSERIRE  IL NUMERO DI ALBERI PER OGNI WORKER")
+
+        n_estimators_total = int(input(
+            "\nSelect option: "
+        ).strip())
+
+        return n_estimators_total
+
+    except:
+        return 0
+
 
 # =========================================================
 # SUBMIT TRAINING
 # =========================================================
-
-def submit_training():
+def _submit_training_regression():
 
     print("CHOOSE TRAINING TYPE")
-    print("1 -> CLASSIFICATION - BASELINE ORIGINAL")
-    print("2 -> CLASSIFICATION - BASELINE NO LEAKAGE")
-    print("3 -> CLASSIFICATION - NO DIAGNOSTIC FEATURES")
-    print("4 -> CLASSIFICATION - NO DIAGNOSTIC EXTENDED")
-    print("5 -> CLASSIFICATION - CLINICAL ONLY")
-    print("6 -> CLASSIFICATION - GLUCOSE ONLY")
-    print("7 -> REGRESSION - PREDICT HBA1C")
-    print("8 -> GO BACK")
+    print("1 -> PREDICT HBA1C")
+    print("2 -> EXIT")
 
     choice = input(
         "\nSelect option: "
     ).strip()
 
     if choice == "1":
-        submit_training_classification.main(
-            MASTER_ADDRESS,
-            dataset_path,
-            dataset_scenario="baseline_original",
-            leakage_columns=[],
-        )
+        pass
 
     elif choice == "2":
-        submit_training_classification.main(
-            MASTER_ADDRESS,
-            dataset_path,
-            dataset_scenario="baseline_no_leakage",
-            leakage_columns=["diabetes_stage",
-            "diabetes_risk_score"],
-        )
+        return
+
+    else:
+        print()
+        print("[ERROR] Invalid option")
+        print()
+        return
+
+    n_estimators_total=_n_estimators_total()
+    if n_estimators_total == 0:
+        print("INSERT A NUMBER OF USABLE TREE, >0")
+        return
+
+    submit_training_regression.main(
+                MASTER_ADDRESS,
+                dataset_path,
+                n_estimators_total,
+            )
+
+def _submit_training_classification():
+
+    print("CHOOSE TRAINING TYPE")
+    print("1 -> BASELINE ORIGINAL")
+    print("2 -> BASELINE NO LEAKAGE")
+    print("3 -> NO DIAGNOSTIC FEATURES")
+    print("4 -> NO DIAGNOSTIC EXTENDED")
+    print("5 -> CLINICAL ONLY")
+    print("6 -> GLUCOSE ONLY")
+    print("7 -> GO BACK")
+
+    choice = input(
+        "\nSelect option: "
+    ).strip()
+
+    if choice == "1":
+            dataset_scenario="baseline_original"
+            leakage_columns=[]
+
+    elif choice == "2":
+            dataset_scenario="baseline_no_leakage"
+            leakage_columns=["diabetes_stage"
+            "diabetes_risk_score"]
 
     elif choice == "3":
-        submit_training_classification.main(
-            MASTER_ADDRESS,
-            dataset_path,
-            dataset_scenario="no_diagnostic_features",
-            leakage_columns=[],
-        )
+            dataset_scenario="no_diagnostic_features"
+            leakage_columns=[]
 
     elif choice == "4":
-        submit_training_classification.main(
-            MASTER_ADDRESS,
-            dataset_path,
-            dataset_scenario="no_diagnostic_extended",
-            leakage_columns=[],
-        )
+            dataset_scenario="no_diagnostic_extended"
+            leakage_columns=[]
 
     elif choice == "5":
-        submit_training_classification.main(
-            MASTER_ADDRESS,
-            dataset_path,
-            dataset_scenario="clinical_only",
-            leakage_columns=[],
-        )
+            dataset_scenario="clinical_only"
+            leakage_columns=[]
 
     elif choice == "6":
-        submit_training_classification.main(
-            MASTER_ADDRESS,
-            dataset_path,
-            dataset_scenario="glucose_only",
-            leakage_columns=[],
-        )
+            dataset_scenario="glucose_only"
+            leakage_columns=[]
 
     elif choice == "7":
-        submit_training_regression.main(
-            MASTER_ADDRESS,
-            dataset_path,
-        )
+        return
 
-    elif choice == "8":
+    else:
+        print()
+        print("[ERROR] Invalid option")
+        print()
+        return
+
+    n_estimators_total=_n_estimators_total()
+    if n_estimators_total == 0:
+        print("INSERT A NUMBER OF USABLE TREE, >0")
+        return
+
+    submit_training_classification.main(
+        MASTER_ADDRESS,
+        dataset_path,
+        n_estimators_total,
+        dataset_scenario,
+        leakage_columns,
+    )
+
+def submit_training_launcher():
+
+    print()
+    print("===================================")
+    print("SUBMIT TRAINING. CHOOSE BETWEEN:")
+    print("1 -> REGRESSION")
+    print("2 -> CLASSIFICATION")
+    print("3 -> GO BACK")
+    print("===================================")
+
+    choice = input(
+        "\nSelect option: "
+    ).strip()
+
+    if choice == "1":
+        _submit_training_regression()
+
+    elif choice == "2":
+        _submit_training_classification()
+
+    elif choice == "3":
         return
 
     else:
@@ -130,19 +187,9 @@ def submit_training():
         print("[ERROR] Invalid option")
         print()
 
-def submit_training_launcher():
-
-    print()
-    print("===================================")
-    print("SUBMIT TRAINING")
-    print("===================================")
-
-    submit_training()
-
 # =========================================================
 # JOB STATUS
 # =========================================================
-
 def see_job_status(job_id: str):
 
     job_record_path = (

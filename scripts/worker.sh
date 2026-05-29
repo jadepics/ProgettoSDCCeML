@@ -44,7 +44,7 @@ set_env_value() {
 
 container_name_from_worker_id() {
   local worker_id="$1"
-  echo "gp-${worker_id}"
+  echo "${worker_id}"
 }
 
 generate_env() {
