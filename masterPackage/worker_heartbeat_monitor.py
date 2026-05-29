@@ -27,6 +27,8 @@ class WorkerHeartbeatSnapshot:
     age_seconds: float
     running_tasks: int
     is_stale: bool
+    last_progress_age_seconds: float = 0.0
+    is_zombie: bool = False
 
 
 class WorkerHeartbeatMonitor:
@@ -47,12 +49,17 @@ class WorkerHeartbeatMonitor:
         self,
         worker_registry: WorkerRegistryLike,
         heartbeat_timeout_seconds: float = 30.0,
+        task_progress_timeout_seconds: float = 120.0,
+
     ) -> None:
         if heartbeat_timeout_seconds <= 0:
             raise ValueError("heartbeat_timeout_seconds must be > 0")
+        if task_progress_timeout_seconds <= 0:
+            raise ValueError("task_progress_timeout_seconds must be > 0")
 
         self.worker_registry = worker_registry
         self.heartbeat_timeout_seconds = heartbeat_timeout_seconds
+        self.task_progress_timeout_seconds = task_progress_timeout_seconds
 
     def snapshot(
         self,
@@ -65,6 +72,24 @@ class WorkerHeartbeatMonitor:
             age_seconds = max(0.0, effective_now - float(worker.last_heartbeat))
             is_stale = age_seconds > self.heartbeat_timeout_seconds
 
+            active_task_last_progress_ts = getattr(
+                worker,
+                "active_task_last_progress_ts",
+                {},
+            ) or {}
+
+            if active_task_last_progress_ts:
+                last_progress_ts = max(active_task_last_progress_ts.values())
+                last_progress_age_seconds = max(0.0, effective_now - float(last_progress_ts))
+            else:
+                last_progress_age_seconds = age_seconds
+
+            is_zombie = (
+                not is_stale
+                and int(worker.running_tasks) > 0
+                and last_progress_age_seconds > self.task_progress_timeout_seconds
+            )
+
             result.append(
                 WorkerHeartbeatSnapshot(
                     worker_id=worker.worker_id,
@@ -74,6 +99,8 @@ class WorkerHeartbeatMonitor:
                     age_seconds=age_seconds,
                     running_tasks=int(worker.running_tasks),
                     is_stale=is_stale,
+                    last_progress_age_seconds=last_progress_age_seconds,
+                    is_zombie=is_zombie,
                 )
             )
 
@@ -100,11 +127,30 @@ class WorkerHeartbeatMonitor:
             if item.is_stale
         ]
 
+    def zombie_workers(
+            self,
+            now_ts: Optional[float] = None
+    ) -> list[WorkerHeartbeatSnapshot]:
+        return [
+            item
+            for item in self.snapshot(now_ts=now_ts)
+            if item.is_zombie]
+
     def stale_worker_ids(
         self,
         now_ts: Optional[float] = None,
     ) -> list[str]:
-        return [item.worker_id for item in self.stale_workers(now_ts=now_ts)]
+        return [
+            item.worker_id
+            for item in self.stale_workers(now_ts=now_ts)]
+
+    def zombie_worker_ids(
+            self,
+            now_ts: Optional[float] = None
+    ) -> list[str]:
+        return [
+            item.worker_id
+            for item in self.zombie_workers(now_ts=now_ts)]
 
     def is_worker_stale(
         self,

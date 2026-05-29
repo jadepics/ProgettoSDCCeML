@@ -102,8 +102,9 @@ class RecoveryPlanner:
             now_ts=effective_now,
         )
 
-        stale_worker_ids = self._stale_worker_ids(now_ts=effective_now)
-        stale_worker_ids_set = set(stale_worker_ids)
+        stale_worker_ids = set (self._stale_worker_ids(now_ts=effective_now))
+        zombie_worker_ids = set(self._zombie_worker_ids(now_ts=effective_now))
+        stale_worker_ids_set = stale_worker_ids | zombie_worker_ids
 
         running_owner_by_tree = self._running_owner_by_tree(
             job_id=job_id,
@@ -285,6 +286,11 @@ class RecoveryPlanner:
             owner_task_id=owner.task_id,
             owner_worker_id=owner_worker_id,
         )
+
+    def _zombie_worker_ids(self, now_ts: float) -> list[str]:
+        if hasattr(self.worker_heartbeat_monitor, "zombie_worker_ids"):
+            return list(self.worker_heartbeat_monitor.zombie_worker_ids(now_ts=now_ts))
+        return []
 
     def _next_recovery_attempt_id(
         self,

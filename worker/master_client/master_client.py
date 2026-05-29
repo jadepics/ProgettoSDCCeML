@@ -90,17 +90,12 @@ class MasterClient:
     # --------------------------------------------------
     # HEARTBEAT
     # --------------------------------------------------
-
-    def send_heartbeat(
-        self,
-        worker_id: str,
-        running_tasks: int,
-        active_task_ids,
-    ):
+    def send_heartbeat(self, worker_id: str, running_tasks: int, active_task_ids, active_tasks):
         request = rf_pb2.HeartbeatRequest(
             worker_id=worker_id,
             running_tasks=running_tasks,
-            active_task_ids=list(active_task_ids),
+            active_task_ids=active_task_ids,
+            active_tasks = active_tasks
         )
 
         return self.stub.Heartbeat(

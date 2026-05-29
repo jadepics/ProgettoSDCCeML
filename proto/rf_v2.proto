@@ -28,10 +28,16 @@ message RegisterWorkerResponse {
   string message = 2;
 }
 
+message ActiveTaskHeartbeat {
+  string task_id = 1;
+  double last_progress_ts = 2;
+}
+
 message HeartbeatRequest {
   string worker_id = 1;
   int32 running_tasks = 2;
   repeated string active_task_ids = 3;
+  repeated ActiveTaskHeartbeat active_tasks = 4;
 }
 
 message HeartbeatResponse {
