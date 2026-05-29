@@ -229,18 +229,41 @@ class TrainingOrchestrator:
                 )
 
                 if (
-                    recovery_plan.deferred_tree_ids
-                    and not recovery_plan.recover_now_tree_ids
+                        recovery_plan.deferred_tree_ids
+                        and not recovery_plan.recover_now_tree_ids
                 ):
+                    force_after_rounds = int(
+                        os.getenv("TRAINING_FORCE_RECLAIM_DEFERRED_AFTER_ROUNDS", "3")
+                    )
+
+                    if recovery_round < force_after_rounds:
+                        print(
+                            "[TrainingOrchestrator] recovery deferred:",
+                            f"deferred={len(recovery_plan.deferred_tree_ids)}",
+                            f"round={recovery_round}/{force_after_rounds}",
+                            f"sleep={deferred_sleep_seconds}",
+                            flush=True,
+                        )
+
+                        time.sleep(deferred_sleep_seconds)
+                        continue
+
                     print(
-                        "[TrainingOrchestrator] recovery deferred:",
+                        "[TrainingOrchestrator] forcing recovery of missing trees after "
+                        "repeated deferred rounds:",
                         f"deferred={len(recovery_plan.deferred_tree_ids)}",
-                        f"sleep={deferred_sleep_seconds}",
+                        f"missing={len(missing_tree_ids)}",
                         flush=True,
                     )
 
-                    time.sleep(deferred_sleep_seconds)
-                    continue
+                    shards = self._plan_missing_shards(
+                        job_id=job_id,
+                        experiment_id=experiment_id,
+                        forest_config=forest_config,
+                        prepared_dataset=prepared_dataset,
+                        workers=alive_workers,
+                        missing_tree_ids=missing_tree_ids,
+                    )
 
                 missing_tree_ids = list(recovery_plan.recover_now_tree_ids)
                 shards = list(recovery_plan.recovery_shards)
