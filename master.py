@@ -274,7 +274,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             model_manifest_builder=self.model_manifest_builder,
             test_evaluator=self.test_evaluator,
         )
-    # --------------------------------------------------------
+        self._start_recovery_on_startup_if_enabled()    # --------------------------------------------------------
     # RPC: worker lifecycle
     # --------------------------------------------------------
 
@@ -563,7 +563,152 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     def _generate_job_id(self) -> str:
         from common.ids import generate_job_id
         return generate_job_id()
+    # --------------------------------------------------------
+    # Startup recovery
+    # --------------------------------------------------------
 
+    def _start_recovery_on_startup_if_enabled(self) -> None:
+        enabled = os.getenv("RECOVER_INCOMPLETE_JOBS_ON_STARTUP", "true").lower()
+
+        if enabled not in {"1", "true", "yes", "y"}:
+            print("[MasterCoordinator] Startup recovery disabled")
+            return
+
+        thread = threading.Thread(
+            target=self._recover_incomplete_jobs_on_startup,
+            daemon=True,
+        )
+        thread.start()
+
+    def _recover_incomplete_jobs_on_startup(self) -> None:
+        startup_delay_seconds = float(
+            os.getenv("RECOVERY_STARTUP_DELAY_SECONDS", "10")
+        )
+
+        print(
+            "[MasterCoordinator] Startup recovery scheduled "
+            f"in {startup_delay_seconds} seconds"
+        )
+
+        time.sleep(startup_delay_seconds)
+
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            print(
+                "[MasterCoordinator] Startup recovery skipped: "
+                f"this master is not leader: {exc}"
+            )
+            return
+
+        self._wait_for_at_least_one_worker()
+
+        recoverable_jobs = self._list_recoverable_jobs()
+
+        if not recoverable_jobs:
+            print("[MasterCoordinator] No recoverable jobs found at startup")
+            return
+
+        print(
+            "[MasterCoordinator] Recoverable jobs found: "
+            f"{[job.job_id for job in recoverable_jobs]}"
+        )
+
+        for job_record in recoverable_jobs:
+            try:
+                print(
+                    "[MasterCoordinator] Resuming job "
+                    f"{job_record.job_id}"
+                )
+
+                self.training_job_service.resume_training_job(
+                    job_id=job_record.job_id,
+                    async_run=False,
+                )
+
+            except Exception as exc:
+                print(
+                    "[MasterCoordinator] Failed to resume job "
+                    f"{job_record.job_id}: {exc}"
+                )
+
+    def _wait_for_at_least_one_worker(self) -> None:
+        timeout_seconds = float(
+            os.getenv("RECOVERY_WAIT_WORKERS_TIMEOUT_SECONDS", "60")
+        )
+        poll_interval_seconds = float(
+            os.getenv("RECOVERY_WAIT_WORKERS_POLL_SECONDS", "2")
+        )
+
+        deadline = time.time() + timeout_seconds
+
+        while time.time() < deadline:
+            try:
+                workers = self.registry.alive_workers()
+                if workers:
+                    print(
+                        "[MasterCoordinator] Workers available for recovery: "
+                        f"{[worker.worker_id for worker in workers]}"
+                    )
+                    return
+
+            except Exception as exc:
+                print(
+                    "[MasterCoordinator] Worker availability check failed: "
+                    f"{exc}"
+                )
+
+            time.sleep(poll_interval_seconds)
+
+        print(
+            "[MasterCoordinator] No workers available before recovery timeout. "
+            "Recovery will still be attempted."
+        )
+
+    def _list_recoverable_jobs(self):
+        jobs = self._list_all_jobs_from_repository()
+
+        recover_failed_jobs = os.getenv(
+            "RECOVER_FAILED_JOBS_ON_STARTUP",
+            "false",
+        ).lower() in {"1", "true", "yes", "y"}
+
+        recoverable = []
+
+        for job in jobs:
+            status = self._status_value(job.status)
+
+            if status in {"PENDING", "RUNNING", "VALIDATING"}:
+                recoverable.append(job)
+                continue
+
+            if recover_failed_jobs and status == "FAILED":
+                recoverable.append(job)
+
+        return recoverable
+
+    def _list_all_jobs_from_repository(self):
+        if hasattr(self.job_repository, "list_jobs"):
+            return self.job_repository.list_jobs()
+
+        if hasattr(self.job_repository, "list_all"):
+            return self.job_repository.list_all()
+
+        if hasattr(self.job_repository, "all"):
+            return self.job_repository.all()
+
+        if hasattr(self.job_repository, "load_all"):
+            return self.job_repository.load_all()
+
+        raise AttributeError(
+            "JobRepository must expose one of: "
+            "list_jobs, list_all, all, load_all"
+        )
+
+    def _status_value(self, status) -> str:
+        if hasattr(status, "value"):
+            return str(status.value)
+        return str(status)
 
 # ============================================================
 # Server bootstrap

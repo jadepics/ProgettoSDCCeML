@@ -74,19 +74,72 @@ class TrainingJobService:
 
         worker = threading.Thread(
             target=self._run_training_job,
-            args=(job_id,),
+            args=(job_id, False),
             daemon=True,
         )
         worker.start()
 
         return job_id
 
+
+    def resume_training_job(
+        self,
+        job_id: str,
+        async_run: bool = True,
+    ) -> None:
+        """
+        Riprende un job già esistente dopo crash master / restart / failover.
+
+        Non deve:
+        - ricreare il job;
+        - rifare split/preprocessing se prepared_dataset esiste;
+        - ripianificare esperimenti già salvati;
+        - perdere alberi già completati.
+
+        Deve:
+        - rileggere JobRepository;
+        - riusare PreparedDataset persistito;
+        - riusare ExperimentRecord persistiti;
+        - delegare a TrainingOrchestrator, che rilegge TaskLedger/artifact;
+        - rigenerare validation/manifest se mancanti.
+        """
+
+        self.leadership_guard.require_leader()
+
+        job_record = self._load_job_or_raise(job_id)
+
+        if self._job_status_is(job_record.status, JobStatus.COMPLETED) and job_record.model_id:
+            print(
+                f"[TrainingJobService] Job {job_id} already completed "
+                f"with model_id={job_record.model_id}"
+            )
+            return
+
+        self.job_repository.mark_running(
+            job_id=job_id,
+            message="Resuming training job after recovery",
+        )
+
+        if async_run:
+            worker = threading.Thread(
+                target=self._run_training_job,
+                args=(job_id, True),
+                daemon=True,
+            )
+            worker.start()
+            return
+
+        self._run_training_job(job_id, True)
     # --------------------------------------------------------
     # internal workflow
     # --------------------------------------------------------
 
-    def _run_training_job(self, job_id: str) -> None:
-        current_experiment_id: str | None = None
+    def _run_training_job(
+            self,
+            job_id: str,
+            resume: bool = False,
+    ) -> None:
+        current_experiment_id: Optional[str] = None
 
         try:
             self.leadership_guard.require_leader()
@@ -94,32 +147,22 @@ class TrainingJobService:
             job_record = self._load_job_or_raise(job_id)
             training_request = job_record.training_request
 
-            self.job_repository.mark_running(
+            prepared_dataset = self._load_or_prepare_dataset(
                 job_id=job_id,
-                message="Preparing dataset",
+                training_request=training_request,
+                resume=resume,
             )
 
-            prepared_dataset = self.data_preparation_service.prepare(
-                job_id=training_request.job_id,
-                dataset_uri=training_request.dataset_uri,
-                target_column=training_request.target_column,
-                task_type=training_request.task_type,
-                validation_ratio=training_request.validation_ratio,
-                test_ratio=training_request.test_ratio,
-                random_seed=training_request.global_random_seed,
-                dataset_scenario=training_request.dataset_scenario,
-                leakage_columns=training_request.leakage_columns,
+            experiments = self._load_or_plan_experiments(
+                job_id=job_id,
+                training_request=training_request,
+                resume=resume,
             )
-            self.job_repository.attach_prepared_dataset(job_id, prepared_dataset)
 
-            experiments = self._plan_experiments(training_request)
             if not experiments:
-                raise RuntimeError("ExperimentPlanner produced no experiments")
+                raise RuntimeError("No experiments available for training")
 
             artifacts_by_experiment_id: dict[str, list[TreeArtifactMetadata]] = {}
-
-            for experiment in experiments:
-                self.job_repository.save_experiment(job_id, experiment)
 
             for experiment in experiments:
                 current_experiment_id = experiment.experiment_id
@@ -129,9 +172,13 @@ class TrainingJobService:
                     experiment_id=experiment.experiment_id,
                     status=ExperimentStatus.RUNNING,
                 )
+
                 self.job_repository.mark_running(
                     job_id=job_id,
-                    message=f"Training experiment {experiment.experiment_id}",
+                    message=(
+                        f"{'Recovering' if resume else 'Training'} "
+                        f"experiment {experiment.experiment_id}"
+                    ),
                 )
 
                 tree_artifacts = self.training_orchestrator.run_experiment(
@@ -139,25 +186,54 @@ class TrainingJobService:
                     experiment_id=experiment.experiment_id,
                     forest_config=experiment.forest_config,
                 )
-                artifacts_by_experiment_id[experiment.experiment_id] = list(tree_artifacts)
 
-                validation_result = self._validate_experiment(
-                    job_id=job_id,
-                    experiment=experiment,
-                    tree_artifacts=tree_artifacts,
-                )
+                tree_artifacts = list(tree_artifacts)
+                artifacts_by_experiment_id[experiment.experiment_id] = tree_artifacts
+
+                if len(tree_artifacts) != experiment.forest_config.n_estimators:
+                    raise RuntimeError(
+                        f"Experiment {experiment.experiment_id} incomplete after recovery: "
+                        f"{len(tree_artifacts)}/"
+                        f"{experiment.forest_config.n_estimators} trees"
+                    )
+
+                refreshed_experiment = self.job_repository.load_experiment(
+                    job_id,
+                    experiment.experiment_id,
+                ) or experiment
+
+                if refreshed_experiment.validation_metrics is None:
+                    validation_result = self._validate_experiment(
+                        job_id=job_id,
+                        experiment=experiment,
+                        tree_artifacts=tree_artifacts,
+                    )
+                    validation_metrics = validation_result.metrics
+                else:
+                    validation_metrics = refreshed_experiment.validation_metrics
 
                 self.job_repository.update_experiment_status(
                     job_id=job_id,
                     experiment_id=experiment.experiment_id,
                     status=ExperimentStatus.COMPLETED,
                     completed_tree_count=len(tree_artifacts),
-                    validation_metrics=validation_result.metrics,
+                    validation_metrics=validation_metrics,
                 )
 
             completed_experiments = self.job_repository.list_experiments(job_id)
+
+            completed_experiments = [
+                experiment
+                for experiment in completed_experiments
+                if self._experiment_status_is(
+                    experiment.status,
+                    ExperimentStatus.COMPLETED,
+                )
+                   and experiment.validation_metrics is not None
+            ]
+
             if not completed_experiments:
-                raise RuntimeError("No persisted experiments found after training")
+                raise RuntimeError("No completed experiments with validation metrics found")
 
             winning_experiment = self._select_best_experiment(completed_experiments)
             if winning_experiment is None:
@@ -172,10 +248,21 @@ class TrainingJobService:
                 winning_experiment.experiment_id,
                 [],
             )
+
             if not selected_tree_artifacts:
+                selected_tree_artifacts = list(
+                    self.training_orchestrator.run_experiment(
+                        job_id=job_id,
+                        experiment_id=winning_experiment.experiment_id,
+                        forest_config=winning_experiment.forest_config,
+                    )
+                )
+
+            if len(selected_tree_artifacts) != winning_experiment.forest_config.n_estimators:
                 raise RuntimeError(
-                    f"No tree artifacts found for selected experiment "
-                    f"{winning_experiment.experiment_id}"
+                    f"Selected experiment {winning_experiment.experiment_id} has "
+                    f"{len(selected_tree_artifacts)}/"
+                    f"{winning_experiment.forest_config.n_estimators} artifacts"
                 )
 
             current_job = self._load_job_or_raise(job_id)
@@ -189,6 +276,7 @@ class TrainingJobService:
             )
 
             self.model_repository.save(manifest)
+
             if hasattr(self.model_repository, "mark_ready"):
                 self.model_repository.mark_ready(manifest.model_id)
 
@@ -197,8 +285,9 @@ class TrainingJobService:
                 selected_experiment_id=winning_experiment.experiment_id,
                 model_id=manifest.model_id,
                 message=(
-                    f"Training completed. Selected experiment "
-                    f"{winning_experiment.experiment_id}"
+                    f"Training completed after "
+                    f"{'recovery' if resume else 'normal execution'}. "
+                    f"Selected experiment {winning_experiment.experiment_id}"
                 ),
             )
 
@@ -208,7 +297,94 @@ class TrainingJobService:
                 error_message=str(exc),
                 experiment_id=current_experiment_id,
             )
+    def _load_or_prepare_dataset(
+        self,
+        job_id: str,
+        training_request: TrainingRequest,
+        resume: bool,
+    ):
+        job_record = self._load_job_or_raise(job_id)
 
+        if resume and job_record.prepared_dataset is not None:
+            self.job_repository.mark_running(
+                job_id=job_id,
+                message="Reusing persisted prepared dataset",
+            )
+            return job_record.prepared_dataset
+
+        if job_record.prepared_dataset is not None:
+            return job_record.prepared_dataset
+
+        self.job_repository.mark_running(
+            job_id=job_id,
+            message="Preparing dataset",
+        )
+
+        prepared_dataset = self.data_preparation_service.prepare(
+            job_id=training_request.job_id,
+            dataset_uri=training_request.dataset_uri,
+            target_column=training_request.target_column,
+            task_type=training_request.task_type,
+            validation_ratio=training_request.validation_ratio,
+            test_ratio=training_request.test_ratio,
+            random_seed=training_request.global_random_seed,
+            dataset_scenario=training_request.dataset_scenario,
+            leakage_columns=training_request.leakage_columns,
+        )
+
+        self.job_repository.attach_prepared_dataset(
+            job_id,
+            prepared_dataset,
+        )
+
+        return prepared_dataset
+
+    def _load_or_plan_experiments(
+        self,
+        job_id: str,
+        training_request: TrainingRequest,
+        resume: bool,
+    ) -> list[ExperimentRecord]:
+        persisted_experiments = self.job_repository.list_experiments(job_id)
+
+        if persisted_experiments:
+            self.job_repository.mark_running(
+                job_id=job_id,
+                message="Reusing persisted experiment records",
+            )
+            return persisted_experiments
+
+        experiments = self._plan_experiments(training_request)
+
+        if not experiments:
+            raise RuntimeError("ExperimentPlanner produced no experiments")
+
+        for experiment in experiments:
+            self.job_repository.save_experiment(
+                job_id,
+                experiment,
+            )
+
+        return experiments
+
+    def _job_status_is(
+        self,
+        actual_status,
+        expected_status: JobStatus,
+    ) -> bool:
+        return self._status_value(actual_status) == self._status_value(expected_status)
+
+    def _experiment_status_is(
+        self,
+        actual_status,
+        expected_status: ExperimentStatus,
+    ) -> bool:
+        return self._status_value(actual_status) == self._status_value(expected_status)
+
+    def _status_value(self, status) -> str:
+        if hasattr(status, "value"):
+            return str(status.value)
+        return str(status)
     # --------------------------------------------------------
     # planning helpers
     # --------------------------------------------------------
@@ -370,7 +546,7 @@ class TrainingJobService:
         self,
         job_id: str,
         error_message: str,
-        experiment_id: str | None = None,
+            experiment_id: Optional[str] = None,
     ) -> None:
         try:
             if experiment_id is not None:

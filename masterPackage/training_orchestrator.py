@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Protocol
@@ -96,317 +97,433 @@ class TrainingOrchestrator:
             forest_config=forest_config,
         )
 
-        completed_tree_ids = set(
-            self._completed_tree_ids(
-                job_id=job_id,
-                experiment_id=experiment_id,
+        max_recovery_rounds = int(
+            os.getenv("TRAINING_MAX_RECOVERY_ROUNDS", "20")
+        )
+        max_idle_rounds = int(
+            os.getenv("TRAINING_MAX_IDLE_RECOVERY_ROUNDS", "3")
+        )
+        deferred_sleep_seconds = float(
+            os.getenv("TRAINING_RECOVERY_DEFERRED_SLEEP_SECONDS", "5")
+        )
+
+        artifact_by_tree_id: dict[str, TreeArtifactMetadata] = {}
+        idle_rounds = 0
+        last_completed_count = -1
+
+        for recovery_round in range(1, max_recovery_rounds + 1):
+            self.leadership_guard.require_leader()
+
+            artifact_by_tree_id.update(
+                self._collect_persisted_completed_artifacts(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    forest_config=forest_config,
+                )
             )
-        )
 
-        missing_tree_ids = self._missing_tree_ids(
-            job_id=job_id,
-            experiment_id=experiment_id,
-            forest_config=forest_config,
-        )
+            completed_tree_ids = set(
+                self._durable_completed_tree_ids(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    forest_config=forest_config,
+                )
+            )
 
-        artifact_by_tree_id = self._collect_persisted_completed_artifacts(
-            job_id=job_id,
-            experiment_id=experiment_id,
-            forest_config=forest_config,
-        )
-
-        experiment.completed_tree_count = len(completed_tree_ids)
-        self.job_repository.save_experiment(job_id, experiment)
-
-        self.job_repository.update_job_status(
-            job_id=job_id,
-            status=JobStatus.RUNNING,
-            message=(
-                f"Recovered {len(completed_tree_ids)}/{forest_config.n_estimators} "
-                f"completed trees from persisted state"
-            ),
-        )
-
-        if not missing_tree_ids:
-            final_artifacts = self._collect_final_artifacts(
+            missing_tree_ids = self._missing_tree_ids(
                 job_id=job_id,
                 experiment_id=experiment_id,
                 forest_config=forest_config,
-                artifact_by_tree_id=artifact_by_tree_id,
             )
 
-            experiment.status = ExperimentStatus.COMPLETED
-            experiment.completed_tree_count = len(final_artifacts)
+            completed_count = len(completed_tree_ids)
+
+            experiment.completed_tree_count = completed_count
+            experiment.status = ExperimentStatus.RUNNING
             self.job_repository.save_experiment(job_id, experiment)
 
             self.job_repository.update_job_status(
                 job_id=job_id,
                 status=JobStatus.RUNNING,
                 message=(
-                    f"Experiment already complete: "
-                    f"{len(final_artifacts)}/{forest_config.n_estimators} trees"
+                    f"Recovery round {recovery_round}: "
+                    f"{completed_count}/{forest_config.n_estimators} trees completed, "
+                    f"{len(missing_tree_ids)} missing"
                 ),
             )
 
-            return final_artifacts
-
-        alive_workers = self._alive_workers_for_scheduling()
-        self._log_alive_workers(alive_workers)
-
-        if not alive_workers:
-            stale_ids = self._stale_worker_ids()
-            if stale_ids:
-                raise RuntimeError(
-                    f"No alive workers available during scheduling. "
-                    f"Stale workers detected: {stale_ids}"
-                )
-            raise RuntimeError("No alive workers available during scheduling")
-
-        attempts = self.task_ledger.list_attempts_by_experiment(
-            job_id=job_id,
-            experiment_id=experiment_id,
-        )
-
-        expected_tree_ids = self._expected_tree_ids(
-            experiment_id=experiment_id,
-            forest_config=forest_config,
-        )
-
-        is_initial_full_training_plan = self._is_initial_full_training_plan(
-            attempts=attempts,
-            missing_tree_ids=missing_tree_ids,
-            expected_tree_ids=expected_tree_ids,
-        )
-
-        if self.recovery_planner is not None and not is_initial_full_training_plan:
-            recovery_plan = self.recovery_planner.build_plan(
-                job_id=job_id,
-                experiment_id=experiment_id,
-                forest_config=forest_config,
-                prepared_dataset=prepared_dataset,
-                workers=alive_workers,
-            )
-
-            if recovery_plan.deferred_tree_ids and not recovery_plan.recover_now_tree_ids:
-                raise RuntimeError(
-                    "Recovery deferred: some trees are still associated with RUNNING "
-                    "tasks that look alive or are within grace period"
-                )
-
-            missing_tree_ids = list(recovery_plan.recover_now_tree_ids)
-            shards = list(recovery_plan.recovery_shards)
-
             print(
-                "[TrainingOrchestrator] using recovery planner:",
-                f"recover_now={len(recovery_plan.recover_now_tree_ids)}",
-                f"deferred={len(recovery_plan.deferred_tree_ids)}",
+                "[TrainingOrchestrator] recovery round:",
+                f"round={recovery_round}",
+                f"completed={completed_count}",
+                f"missing={len(missing_tree_ids)}",
                 flush=True,
             )
 
-        else:
-            shards = self._plan_missing_shards(
-                job_id=job_id,
-                experiment_id=experiment_id,
-                forest_config=forest_config,
-                prepared_dataset=prepared_dataset,
-                workers=alive_workers,
-                missing_tree_ids=missing_tree_ids,
-            )
-
-            print(
-                "[TrainingOrchestrator] using initial/missing shard planner:",
-                f"is_initial_full_training_plan={is_initial_full_training_plan}",
-                flush=True,
-            )
-
-        if not shards:
-            raise RuntimeError(
-                "Some trees are still missing, but no shards could be planned "
-                "for the missing tree set"
-            )
-
-        self._log_planned_shards(shards)
-
-        max_workers = self._effective_max_parallel_shards(
-            shard_count=len(shards),
-        )
-
-        experiment.status = ExperimentStatus.RUNNING
-        experiment.assigned_workers = list(
-            dict.fromkeys(
-                list(experiment.assigned_workers)
-                + [shard.assigned_worker_id for shard in shards]
-            )
-        )
-        self.job_repository.save_experiment(job_id, experiment)
-
-        self.job_repository.update_job_status(
-            job_id=job_id,
-            status=JobStatus.RUNNING,
-            message=(
-                f"Training scheduled: {len(shards)} shards for "
-                f"{len(missing_tree_ids)}/{forest_config.n_estimators} missing trees; "
-                f"parallelism={max_workers}"
-            ),
-        )
-
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            future_map = {}
-
-            for shard in shards:
-                worker = self._find_worker_or_raise(
-                    workers=alive_workers,
-                    worker_id=shard.assigned_worker_id,
+            if not missing_tree_ids:
+                final_artifacts = self._collect_final_artifacts(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    forest_config=forest_config,
+                    artifact_by_tree_id=artifact_by_tree_id,
                 )
 
-                print(
-                    "[TrainingOrchestrator] dispatching shard:",
-                    f"task_id={shard.task_id}",
-                    f"attempt_id={shard.attempt_id}",
-                    f"worker={worker.worker_id}@{worker.host}:{worker.port}",
-                    f"tree_start={shard.tree_start_index}",
-                    f"tree_count={shard.tree_count}",
-                    flush=True,
-                )
-
-                future = pool.submit(
-                    self._execute_shard_with_retry,
-                    worker,
-                    shard,
-                )
-                future_map[future] = shard
-
-            for future in as_completed(future_map):
-                initial_shard = future_map[future]
-
-                try:
-                    effective_shard, final_result, observed_results = future.result()
-                except Exception as exc:
-                    error_message = (
-                        f"Unexpected executor failure for task "
-                        f"{initial_shard.task_id} attempt {initial_shard.attempt_id}: {exc}"
-                    )
-
-                    self.task_ledger.mark_partial_failure(
-                        task_id=initial_shard.task_id,
-                        attempt_id=initial_shard.attempt_id,
-                        job_id=initial_shard.job_id,
-                        completed_tree_ids=[],
-                        failed_tree_ids=self._tree_ids_for_shard(initial_shard),
-                        error_message=error_message,
-                    )
-
-                    self.task_lease_manager.release(
-                        job_id=initial_shard.job_id,
-                        task_id=initial_shard.task_id,
-                        attempt_id=initial_shard.attempt_id,
-                    )
-
-                    experiment.status = ExperimentStatus.FAILED
-                    self.job_repository.save_experiment(job_id, experiment)
-                    self.job_repository.update_job_status(
-                        job_id=job_id,
-                        status=JobStatus.FAILED,
-                        message=error_message,
-                    )
-                    raise RuntimeError(error_message) from exc
-
-                for result in observed_results:
-                    self._register_result_artifacts(
-                        artifact_by_tree_id=artifact_by_tree_id,
-                        result=result,
-                    )
-
-                if effective_shard.assigned_worker_id not in experiment.assigned_workers:
-                    experiment.assigned_workers.append(effective_shard.assigned_worker_id)
-
-                if not final_result.success:
-                    self.task_ledger.mark_partial_failure(
-                        task_id=effective_shard.task_id,
-                        attempt_id=effective_shard.attempt_id,
-                        job_id=effective_shard.job_id,
-                        completed_tree_ids=list(final_result.completed_tree_ids),
-                        failed_tree_ids=list(final_result.failed_tree_ids),
-                        error_message=(
-                            final_result.error_message
-                            or "Unknown training shard failure"
-                        ),
-                    )
-
-                    self.task_lease_manager.release(
-                        job_id=effective_shard.job_id,
-                        task_id=effective_shard.task_id,
-                        attempt_id=effective_shard.attempt_id,
-                    )
-
-                    experiment.status = ExperimentStatus.FAILED
-                    self.job_repository.save_experiment(job_id, experiment)
-
-                    self.job_repository.update_job_status(
-                        job_id=job_id,
-                        status=JobStatus.FAILED,
-                        message=(
-                            f"Training shard failed permanently for task "
-                            f"{effective_shard.task_id} attempt "
-                            f"{effective_shard.attempt_id}: "
-                            f"{final_result.error_message or 'unknown error'}"
-                        ),
-                    )
-
+                if len(final_artifacts) != forest_config.n_estimators:
                     raise RuntimeError(
-                        f"Training shard failed permanently for task "
-                        f"{effective_shard.task_id} attempt "
-                        f"{effective_shard.attempt_id}: "
-                        f"{final_result.error_message or 'unknown error'}"
+                        f"Experiment {experiment_id} has no missing trees, "
+                        f"but final artifacts are incomplete: "
+                        f"{len(final_artifacts)}/{forest_config.n_estimators}"
                     )
 
-                completed_tree_ids_for_attempt = list(final_result.completed_tree_ids)
-                if not completed_tree_ids_for_attempt:
-                    completed_tree_ids_for_attempt = [
-                        artifact.tree_id
-                        for artifact in final_result.tree_artifacts
-                    ]
-
-                self.task_ledger.mark_completed(
-                    task_id=effective_shard.task_id,
-                    attempt_id=effective_shard.attempt_id,
-                    job_id=effective_shard.job_id,
-                    completed_tree_ids=completed_tree_ids_for_attempt,
-                )
-
-                self.task_lease_manager.release(
-                    job_id=effective_shard.job_id,
-                    task_id=effective_shard.task_id,
-                    attempt_id=effective_shard.attempt_id,
-                )
-
-                completed_count = len(
-                    self._completed_tree_ids(
-                        job_id=job_id,
-                        experiment_id=experiment_id,
-                    )
-                )
-
-                experiment.completed_tree_count = completed_count
+                experiment.status = ExperimentStatus.COMPLETED
+                experiment.completed_tree_count = len(final_artifacts)
                 self.job_repository.save_experiment(job_id, experiment)
-
-                print(
-                    "[TrainingOrchestrator] shard completed:",
-                    f"task_id={effective_shard.task_id}",
-                    f"attempt_id={effective_shard.attempt_id}",
-                    f"worker={effective_shard.assigned_worker_id}",
-                    f"completed_tree_ids={completed_tree_ids_for_attempt}",
-                    f"progress={completed_count}/{forest_config.n_estimators}",
-                    flush=True,
-                )
 
                 self.job_repository.update_job_status(
                     job_id=job_id,
                     status=JobStatus.RUNNING,
                     message=(
-                        f"Completed {completed_count}/"
-                        f"{forest_config.n_estimators} trees"
+                        f"Training experiment completed: "
+                        f"{len(final_artifacts)}/{forest_config.n_estimators} trees"
                     ),
+                )
+
+                return final_artifacts
+
+            alive_workers = self._alive_workers_for_scheduling()
+            self._log_alive_workers(alive_workers)
+
+            if not alive_workers:
+                stale_ids = self._stale_worker_ids()
+                if stale_ids:
+                    raise RuntimeError(
+                        f"No alive workers available during scheduling. "
+                        f"Stale workers detected: {stale_ids}"
+                    )
+
+                raise RuntimeError("No alive workers available during scheduling")
+
+            attempts = self.task_ledger.list_attempts_by_experiment(
+                job_id=job_id,
+                experiment_id=experiment_id,
+            )
+
+            expected_tree_ids = self._expected_tree_ids(
+                experiment_id=experiment_id,
+                forest_config=forest_config,
+            )
+
+            is_initial_full_training_plan = self._is_initial_full_training_plan(
+                attempts=attempts,
+                missing_tree_ids=missing_tree_ids,
+                expected_tree_ids=expected_tree_ids,
+            )
+
+            if self.recovery_planner is not None and not is_initial_full_training_plan:
+                recovery_plan = self.recovery_planner.build_plan(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    forest_config=forest_config,
+                    prepared_dataset=prepared_dataset,
+                    workers=alive_workers,
+                )
+
+                if (
+                    recovery_plan.deferred_tree_ids
+                    and not recovery_plan.recover_now_tree_ids
+                ):
+                    print(
+                        "[TrainingOrchestrator] recovery deferred:",
+                        f"deferred={len(recovery_plan.deferred_tree_ids)}",
+                        f"sleep={deferred_sleep_seconds}",
+                        flush=True,
+                    )
+
+                    time.sleep(deferred_sleep_seconds)
+                    continue
+
+                missing_tree_ids = list(recovery_plan.recover_now_tree_ids)
+                shards = list(recovery_plan.recovery_shards)
+
+                print(
+                    "[TrainingOrchestrator] using recovery planner:",
+                    f"recover_now={len(recovery_plan.recover_now_tree_ids)}",
+                    f"deferred={len(recovery_plan.deferred_tree_ids)}",
+                    flush=True,
+                )
+
+            else:
+                shards = self._plan_missing_shards(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    forest_config=forest_config,
+                    prepared_dataset=prepared_dataset,
+                    workers=alive_workers,
+                    missing_tree_ids=missing_tree_ids,
+                )
+
+                print(
+                    "[TrainingOrchestrator] using initial/missing shard planner:",
+                    f"is_initial_full_training_plan={is_initial_full_training_plan}",
+                    flush=True,
+                )
+
+            if not shards:
+                idle_rounds += 1
+
+                print(
+                    "[TrainingOrchestrator] no shards planned:",
+                    f"idle_rounds={idle_rounds}/{max_idle_rounds}",
+                    flush=True,
+                )
+
+                if idle_rounds >= max_idle_rounds:
+                    raise RuntimeError(
+                        "Some trees are still missing, but no shards could be "
+                        "planned for too many consecutive recovery rounds"
+                    )
+
+                time.sleep(deferred_sleep_seconds)
+                continue
+
+            self._log_planned_shards(shards)
+
+            max_workers = self._effective_max_parallel_shards(
+                shard_count=len(shards),
+            )
+
+            experiment.status = ExperimentStatus.RUNNING
+            experiment.assigned_workers = list(
+                dict.fromkeys(
+                    list(experiment.assigned_workers)
+                    + [shard.assigned_worker_id for shard in shards]
+                )
+            )
+            self.job_repository.save_experiment(job_id, experiment)
+
+            self.job_repository.update_job_status(
+                job_id=job_id,
+                status=JobStatus.RUNNING,
+                message=(
+                    f"Training scheduled: {len(shards)} shards for "
+                    f"{len(missing_tree_ids)}/{forest_config.n_estimators} "
+                    f"missing trees; parallelism={max_workers}"
+                ),
+            )
+
+            had_failure = False
+
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_map = {}
+
+                for shard in shards:
+                    worker = self._find_worker_or_raise(
+                        workers=alive_workers,
+                        worker_id=shard.assigned_worker_id,
+                    )
+
+                    print(
+                        "[TrainingOrchestrator] dispatching shard:",
+                        f"task_id={shard.task_id}",
+                        f"attempt_id={shard.attempt_id}",
+                        f"worker={worker.worker_id}@{worker.host}:{worker.port}",
+                        f"tree_start={shard.tree_start_index}",
+                        f"tree_count={shard.tree_count}",
+                        flush=True,
+                    )
+
+                    future = pool.submit(
+                        self._execute_shard_with_retry,
+                        worker,
+                        shard,
+                    )
+                    future_map[future] = shard
+
+                for future in as_completed(future_map):
+                    initial_shard = future_map[future]
+
+                    try:
+                        (
+                            effective_shard,
+                            final_result,
+                            observed_results,
+                        ) = future.result()
+
+                    except Exception as exc:
+                        had_failure = True
+
+                        error_message = (
+                            f"Unexpected executor failure for task "
+                            f"{initial_shard.task_id} attempt "
+                            f"{initial_shard.attempt_id}: {exc}"
+                        )
+
+                        self.task_ledger.mark_partial_failure(
+                            task_id=initial_shard.task_id,
+                            attempt_id=initial_shard.attempt_id,
+                            job_id=initial_shard.job_id,
+                            completed_tree_ids=[],
+                            failed_tree_ids=self._tree_ids_for_shard(
+                                initial_shard
+                            ),
+                            error_message=error_message,
+                        )
+
+                        self.task_lease_manager.release(
+                            job_id=initial_shard.job_id,
+                            task_id=initial_shard.task_id,
+                            attempt_id=initial_shard.attempt_id,
+                        )
+
+                        print(
+                            "[TrainingOrchestrator] shard executor failure, "
+                            "will retry through recovery loop:",
+                            error_message,
+                            flush=True,
+                        )
+
+                        continue
+
+                    for result in observed_results:
+                        self._register_result_artifacts(
+                            artifact_by_tree_id=artifact_by_tree_id,
+                            result=result,
+                        )
+
+                    if (
+                        effective_shard.assigned_worker_id
+                        not in experiment.assigned_workers
+                    ):
+                        experiment.assigned_workers.append(
+                            effective_shard.assigned_worker_id
+                        )
+
+                    if not final_result.success:
+                        had_failure = True
+
+                        self.task_ledger.mark_partial_failure(
+                            task_id=effective_shard.task_id,
+                            attempt_id=effective_shard.attempt_id,
+                            job_id=effective_shard.job_id,
+                            completed_tree_ids=list(
+                                final_result.completed_tree_ids
+                            ),
+                            failed_tree_ids=list(
+                                final_result.failed_tree_ids
+                            ),
+                            error_message=(
+                                final_result.error_message
+                                or "Unknown training shard failure"
+                            ),
+                        )
+
+                        self.task_lease_manager.release(
+                            job_id=effective_shard.job_id,
+                            task_id=effective_shard.task_id,
+                            attempt_id=effective_shard.attempt_id,
+                        )
+
+                        print(
+                            "[TrainingOrchestrator] shard failed permanently, "
+                            "will retry missing trees through recovery loop:",
+                            f"task_id={effective_shard.task_id}",
+                            f"attempt_id={effective_shard.attempt_id}",
+                            f"error={final_result.error_message}",
+                            flush=True,
+                        )
+
+                        continue
+
+                    completed_tree_ids_for_attempt = list(
+                        final_result.completed_tree_ids
+                    )
+
+                    if not completed_tree_ids_for_attempt:
+                        completed_tree_ids_for_attempt = [
+                            artifact.tree_id
+                            for artifact in final_result.tree_artifacts
+                        ]
+
+                    self.task_ledger.mark_completed(
+                        task_id=effective_shard.task_id,
+                        attempt_id=effective_shard.attempt_id,
+                        job_id=effective_shard.job_id,
+                        completed_tree_ids=completed_tree_ids_for_attempt,
+                    )
+
+                    self.task_lease_manager.release(
+                        job_id=effective_shard.job_id,
+                        task_id=effective_shard.task_id,
+                        attempt_id=effective_shard.attempt_id,
+                    )
+
+                    artifact_by_tree_id.update(
+                        self._collect_persisted_completed_artifacts(
+                            job_id=job_id,
+                            experiment_id=experiment_id,
+                            forest_config=forest_config,
+                        )
+                    )
+
+                    new_completed_count = len(
+                        self._durable_completed_tree_ids(
+                            job_id=job_id,
+                            experiment_id=experiment_id,
+                            forest_config=forest_config,
+                        )
+                    )
+
+                    experiment.completed_tree_count = new_completed_count
+                    self.job_repository.save_experiment(job_id, experiment)
+
+                    print(
+                        "[TrainingOrchestrator] shard completed:",
+                        f"task_id={effective_shard.task_id}",
+                        f"attempt_id={effective_shard.attempt_id}",
+                        f"worker={effective_shard.assigned_worker_id}",
+                        f"completed_tree_ids={completed_tree_ids_for_attempt}",
+                        f"progress={new_completed_count}/"
+                        f"{forest_config.n_estimators}",
+                        flush=True,
+                    )
+
+                    self.job_repository.update_job_status(
+                        job_id=job_id,
+                        status=JobStatus.RUNNING,
+                        message=(
+                            f"Completed {new_completed_count}/"
+                            f"{forest_config.n_estimators} trees"
+                        ),
+                    )
+
+            artifact_by_tree_id.update(
+                self._collect_persisted_completed_artifacts(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    forest_config=forest_config,
+                )
+            )
+
+            durable_completed_count = len(
+                self._durable_completed_tree_ids(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    forest_config=forest_config,
+                )
+            )
+
+            if durable_completed_count <= last_completed_count:
+                idle_rounds += 1
+            else:
+                idle_rounds = 0
+                last_completed_count = durable_completed_count
+
+            if had_failure and idle_rounds >= max_idle_rounds:
+                raise RuntimeError(
+                    f"Training recovery made no progress for "
+                    f"{idle_rounds} consecutive rounds. "
+                    f"Completed {durable_completed_count}/"
+                    f"{forest_config.n_estimators} trees."
                 )
 
         final_artifacts = self._collect_final_artifacts(
@@ -416,26 +533,12 @@ class TrainingOrchestrator:
             artifact_by_tree_id=artifact_by_tree_id,
         )
 
-        if len(final_artifacts) != forest_config.n_estimators:
-            raise RuntimeError(
-                f"Expected {forest_config.n_estimators} tree artifacts, "
-                f"got {len(final_artifacts)}"
-            )
-
-        experiment.status = ExperimentStatus.COMPLETED
-        experiment.completed_tree_count = len(final_artifacts)
-        self.job_repository.save_experiment(job_id, experiment)
-
-        self.job_repository.update_job_status(
-            job_id=job_id,
-            status=JobStatus.RUNNING,
-            message=(
-                f"Training experiment completed: "
-                f"{len(final_artifacts)}/{forest_config.n_estimators} trees"
-            ),
+        raise RuntimeError(
+            f"Training recovery exceeded max rounds "
+            f"({max_recovery_rounds}). "
+            f"Final artifacts: {len(final_artifacts)}/"
+            f"{forest_config.n_estimators}"
         )
-
-        return final_artifacts
 
     def _is_current_attempt(
             self,
@@ -670,12 +773,48 @@ class TrainingOrchestrator:
             job_id=job_id,
             experiment_id=experiment_id,
         )
-
-    def _missing_tree_ids(
+    def _durable_completed_tree_ids(
         self,
         job_id: str,
         experiment_id: str,
         forest_config: ForestConfiguration,
+    ) -> list[str]:
+        """
+        Ritorna gli alberi completati guardando sia TaskLedger sia artifact
+        persistiti su storage condiviso.
+
+        Questo è importante per recovery post-crash master:
+        un worker può avere scritto tree_N.json/tree_N.joblib prima che il master
+        abbia aggiornato il TaskLedger.
+        """
+
+        completed = set(
+            self.task_ledger.completed_tree_ids(
+                job_id=job_id,
+                experiment_id=experiment_id,
+            )
+        )
+
+        for tree_id in self._expected_tree_ids(
+            experiment_id=experiment_id,
+            forest_config=forest_config,
+        ):
+            metadata = self._load_tree_metadata(
+                job_id=job_id,
+                experiment_id=experiment_id,
+                tree_id=tree_id,
+            )
+
+            if metadata is not None and metadata.status == TreeStatus.COMPLETED:
+                completed.add(tree_id)
+
+        return sorted(completed)
+
+    def _missing_tree_ids(
+            self,
+            job_id: str,
+            experiment_id: str,
+            forest_config: ForestConfiguration,
     ) -> list[str]:
         expected_tree_ids = self._expected_tree_ids(
             experiment_id=experiment_id,
@@ -683,9 +822,10 @@ class TrainingOrchestrator:
         )
 
         completed_tree_ids = set(
-            self.task_ledger.completed_tree_ids(
+            self._durable_completed_tree_ids(
                 job_id=job_id,
                 experiment_id=experiment_id,
+                forest_config=forest_config,
             )
         )
 
@@ -875,19 +1015,17 @@ class TrainingOrchestrator:
                 artifact_by_tree_id[artifact.tree_id] = artifact
 
     def _collect_persisted_completed_artifacts(
-        self,
-        job_id: str,
-        experiment_id: str,
-        forest_config: ForestConfiguration,
+            self,
+            job_id: str,
+            experiment_id: str,
+            forest_config: ForestConfiguration,
     ) -> dict[str, TreeArtifactMetadata]:
         result: dict[str, TreeArtifactMetadata] = {}
 
-        completed_tree_ids = self.task_ledger.completed_tree_ids(
-            job_id=job_id,
-            experiment_id=experiment_id,
-        )
-
-        for tree_id in completed_tree_ids:
+        for tree_id in self._expected_tree_ids(
+                experiment_id=experiment_id,
+                forest_config=forest_config,
+        ):
             metadata = self._load_tree_metadata(
                 job_id=job_id,
                 experiment_id=experiment_id,

@@ -6,7 +6,13 @@ from common.chaos import maybe_fail
 
 class HeartbeatLoop:
 
-    def __init__(self, master_client, worker_state, worker_id, interval_sec=5):
+    def __init__(
+        self,
+        master_client,
+        worker_state,
+        worker_id,
+        interval_sec=5,
+    ):
         self.master_client = master_client
         self.worker_state = worker_state
         self.worker_id = worker_id
@@ -14,7 +20,10 @@ class HeartbeatLoop:
         self._stop = False
 
     def start(self):
-        thread = threading.Thread(target=self._run, daemon=True)
+        thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+        )
         thread.start()
 
     def stop(self):
@@ -28,11 +37,18 @@ class HeartbeatLoop:
 
                 maybe_fail("worker.heartbeat.before_send")
 
-                self.master_client.send_heartbeat(
+                response = self.master_client.send_heartbeat(
                     worker_id=self.worker_id,
                     running_tasks=running_tasks,
-                    active_task_ids=active_task_ids
+                    active_task_ids=active_task_ids,
                 )
+
+                if not response.ok:
+                    print(
+                        "[HeartbeatLoop] Master does not know this worker. "
+                        "Re-registering..."
+                    )
+                    self.master_client.reregister_worker()
 
             except Exception as e:
                 print(f"[HeartbeatLoop] Failed: {e}")
