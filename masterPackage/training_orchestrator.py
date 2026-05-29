@@ -228,29 +228,37 @@ class TrainingOrchestrator:
                     workers=alive_workers,
                 )
 
+                force_after_rounds = int(
+                    os.getenv(
+                        "TRAINING_FORCE_RECLAIM_DEFERRED_AFTER_ROUNDS",
+                        "3",
+                    )
+                )
+
                 if (
                         recovery_plan.deferred_tree_ids
                         and not recovery_plan.recover_now_tree_ids
+                        and recovery_round < force_after_rounds
                 ):
-                    force_after_rounds = int(
-                        os.getenv("TRAINING_FORCE_RECLAIM_DEFERRED_AFTER_ROUNDS", "3")
+                    print(
+                        "[TrainingOrchestrator] recovery deferred:",
+                        f"deferred={len(recovery_plan.deferred_tree_ids)}",
+                        f"round={recovery_round}/{force_after_rounds}",
+                        f"sleep={deferred_sleep_seconds}",
+                        flush=True,
                     )
 
-                    if recovery_round < force_after_rounds:
-                        print(
-                            "[TrainingOrchestrator] recovery deferred:",
-                            f"deferred={len(recovery_plan.deferred_tree_ids)}",
-                            f"round={recovery_round}/{force_after_rounds}",
-                            f"sleep={deferred_sleep_seconds}",
-                            flush=True,
-                        )
+                    time.sleep(deferred_sleep_seconds)
+                    continue
 
-                        time.sleep(deferred_sleep_seconds)
-                        continue
-
+                if (
+                        recovery_plan.deferred_tree_ids
+                        and not recovery_plan.recover_now_tree_ids
+                        and recovery_round >= force_after_rounds
+                ):
                     print(
-                        "[TrainingOrchestrator] forcing recovery of missing trees after "
-                        "repeated deferred rounds:",
+                        "[TrainingOrchestrator] forcing recovery of missing trees "
+                        "after repeated deferred rounds:",
                         f"deferred={len(recovery_plan.deferred_tree_ids)}",
                         f"missing={len(missing_tree_ids)}",
                         flush=True,
@@ -265,15 +273,23 @@ class TrainingOrchestrator:
                         missing_tree_ids=missing_tree_ids,
                     )
 
-                missing_tree_ids = list(recovery_plan.recover_now_tree_ids)
-                shards = list(recovery_plan.recovery_shards)
+                    print(
+                        "[TrainingOrchestrator] using forced missing shard planner:",
+                        f"missing={len(missing_tree_ids)}",
+                        f"planned_shards={len(shards)}",
+                        flush=True,
+                    )
 
-                print(
-                    "[TrainingOrchestrator] using recovery planner:",
-                    f"recover_now={len(recovery_plan.recover_now_tree_ids)}",
-                    f"deferred={len(recovery_plan.deferred_tree_ids)}",
-                    flush=True,
-                )
+                else:
+                    missing_tree_ids = list(recovery_plan.recover_now_tree_ids)
+                    shards = list(recovery_plan.recovery_shards)
+
+                    print(
+                        "[TrainingOrchestrator] using recovery planner:",
+                        f"recover_now={len(recovery_plan.recover_now_tree_ids)}",
+                        f"deferred={len(recovery_plan.deferred_tree_ids)}",
+                        flush=True,
+                    )
 
             else:
                 shards = self._plan_missing_shards(
@@ -290,7 +306,6 @@ class TrainingOrchestrator:
                     f"is_initial_full_training_plan={is_initial_full_training_plan}",
                     flush=True,
                 )
-
             if not shards:
                 idle_rounds += 1
 
