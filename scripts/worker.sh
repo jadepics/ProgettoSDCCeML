@@ -127,14 +127,28 @@ case "$ACTION" in
     ;;
 
   update)
-    [[ -n "$WORKER_ID" && -n "$WORKER_PORT" ]] || usage
-    cd "$PROJECT_ROOT"
-    git pull
-    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
-    docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
-    build_image
-    run_worker "$WORKER_ID" "$WORKER_PORT"
-    ;;
+  [[ -n "$WORKER_ID" ]] || usage
+
+  if [[ -z "$WORKER_PORT" ]]; then
+    ENV_FILE="${RUNTIME_ENV_DIR}/${WORKER_ID}.runtime.env"
+
+    if [[ -f "$ENV_FILE" ]]; then
+      WORKER_PORT=$(grep '^WORKER_PORT=' "$ENV_FILE" | cut -d= -f2)
+    fi
+  fi
+
+  [[ -n "$WORKER_PORT" ]] || {
+    echo "[ERROR] WORKER_PORT not found"
+    exit 1
+  }
+
+  cd "$PROJECT_ROOT"
+  git pull
+  stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+  docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
+  build_image
+  run_worker "$WORKER_ID" "$WORKER_PORT"
+  ;;
 
   stop)
     [[ -n "$WORKER_ID" ]] || usage
