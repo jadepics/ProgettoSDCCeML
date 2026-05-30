@@ -34,13 +34,15 @@ class HeartbeatLoop:
             try:
                 running_tasks = self.worker_state.running_tasks_count()
                 active_task_ids = self.worker_state.active_task_ids()
-
+                active_tasks = self.worker_state.active_tasks_snapshot()
                 maybe_fail("worker.heartbeat.before_send")
 
                 response = self.master_client.send_heartbeat(
                     worker_id=self.worker_id,
                     running_tasks=running_tasks,
                     active_task_ids=active_task_ids,
+                    active_tasks = active_tasks,
+
                 )
 
                 if not response.ok:

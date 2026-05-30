@@ -47,6 +47,7 @@ from common.repositories import (
     TaskLedger,
 )
 from common.storage_layout import StorageLayout
+from common.enums import WorkerLivenessStatus
 
 HEARTBEAT_TIMEOUT_SECONDS = 15.0
 DEFAULT_RPC_TIMEOUT_SECONDS = 600.0
@@ -92,6 +93,14 @@ class WorkerInfo:
         self.running_tasks = 0
         self.active_task_ids: list[str] = []
 
+        # nuovo: timestamp ultimo progresso per task
+        self.active_task_last_progress_ts: dict[str, float] = {}
+
+        # nuovo: stato di liveness del worker
+        self.liveness_status = WorkerLivenessStatus.ALIVE
+        self.quarantined_at: float | None = None
+        self.quarantine_reason: str | None = None
+
     @property
     def address(self) -> str:
         return f"{self.host}:{self.port}"
@@ -111,15 +120,32 @@ class WorkerRegistry:
         worker_id: str,
         running_tasks: int,
         active_task_ids: Optional[list[str]] = None,
+        active_task_last_progress_ts: Optional[dict[str, float]] = None,
     ) -> bool:
         with self._lock:
             worker = self._workers.get(worker_id)
             if worker is None:
                 return False
 
+            # se il worker è già quarantinato, non lo riattiviamo
+            if worker.liveness_status == WorkerLivenessStatus.DEAD:
+                return False
+
             worker.last_heartbeat = now_ts()
             worker.running_tasks = running_tasks
             worker.active_task_ids = list(active_task_ids or [])
+            worker.active_task_last_progress_ts = dict(active_task_last_progress_ts or {})
+            return True
+
+    def quarantine(self, worker_id: str, reason: str) -> bool:
+        with self._lock:
+            worker = self._workers.get(worker_id)
+            if worker is None:
+                return False
+
+            worker.liveness_status = WorkerLivenessStatus.DEAD
+            worker.quarantined_at = now_ts()
+            worker.quarantine_reason = reason
             return True
 
     def alive_workers(self) -> list[WorkerInfo]:
@@ -129,6 +155,7 @@ class WorkerRegistry:
                 worker
                 for worker in self._workers.values()
                 if worker.last_heartbeat >= cutoff
+                   and worker.liveness_status == WorkerLivenessStatus.ALIVE
             ]
 
     def get_retry_candidate(
@@ -320,11 +347,38 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         if not self.consensus.is_leader():
             return rf_pb2.HeartbeatResponse(ok=False)
 
+
+        active_task_progress = {
+        item.task_id: float(item.last_progress_ts)
+        for item in getattr(request, "active_tasks", [])
+    }
+
         ok = self.registry.heartbeat(
             worker_id=request.worker_id,
             running_tasks=request.running_tasks,
             active_task_ids=list(request.active_task_ids),
+            active_task_last_progress_ts=active_task_progress,
         )
+
+        if ok:
+            snapshot = next(
+                (
+                    item
+                    for item in self.worker_heartbeat_monitor.snapshot()
+                    if item.worker_id == request.worker_id
+                ),
+                None,
+            )
+
+            if snapshot is not None and snapshot.is_zombie:
+                self.registry.quarantine(
+                    request.worker_id,
+                    reason=(
+                        f"zombie worker: "
+                        f"last_progress_age_seconds={snapshot.last_progress_age_seconds:.1f}"
+                    ),
+                )
+
         return rf_pb2.HeartbeatResponse(ok=ok)
 
 # --------------------------------------------------------------
@@ -794,6 +848,6 @@ if __name__ == "__main__":
     serve(
         host=os.getenv("MASTER_HOST", "0.0.0.0"),
         port=int(os.getenv("MASTER_PORT", "50051")),
-        #modificato questo codice da os.getenv("ARTIFACT_ROOT", "/mnt/efs/gp_artifacts") per salvare direttaente nel path condiviso di efs
+        #modificato questo codice da os.getenv("ARTIFACT_ROOT", "/mnt/efs/gp_artifacts") per salvare direttamente nel path condiviso di efs
         artifact_root=os.getenv("ARTIFACT_ROOT","/mnt/efs/gp_artifacts")
     )
