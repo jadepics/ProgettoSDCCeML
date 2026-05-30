@@ -1,5 +1,7 @@
+import os
 import grpc
 import time
+from typing import Optional
 
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
@@ -15,13 +17,80 @@ GRPC_OPTIONS = [
 class MasterClient:
 
     def __init__(self, host: str, port: int):
-        self.address = f"{host}:{port}"
-        self.channel = grpc.insecure_channel(self.address, options=GRPC_OPTIONS)
-        self.stub = rf_pb2_grpc.CoordinatorServiceStub(self.channel)
+        self.default_address = f"{host}:{port}"
+        self.master_addresses = self._load_master_addresses(
+            fallback_address=self.default_address,
+        )
+
+        self.address: Optional[str] = None
+        self.channel = None
+        self.stub = None
 
         self._registered_worker_id = None
         self._registered_host = None
         self._registered_port = None
+
+        self._connect_to(self.master_addresses[0])
+
+    # --------------------------------------------------
+    # MASTER DISCOVERY / CONNECTION
+    # --------------------------------------------------
+
+    def _load_master_addresses(self, fallback_address: str) -> list[str]:
+        raw_seeds = os.getenv("MASTER_SEEDS", "").strip()
+
+        if not raw_seeds:
+            return [fallback_address]
+
+        addresses: list[str] = []
+
+        for item in raw_seeds.split(","):
+            address = item.strip()
+            if not address:
+                continue
+
+            if ":" not in address:
+                raise ValueError(
+                    f"Invalid MASTER_SEEDS item '{address}'. "
+                    "Expected host:port"
+                )
+
+            if address not in addresses:
+                addresses.append(address)
+
+        return addresses or [fallback_address]
+
+    def _connect_to(self, address: str) -> None:
+        if self.address == address and self.stub is not None:
+            return
+
+        self.address = address
+        self.channel = grpc.insecure_channel(
+            self.address,
+            options=GRPC_OPTIONS,
+        )
+        self.stub = rf_pb2_grpc.CoordinatorServiceStub(self.channel)
+
+        print(
+            f"[MasterClient] Using master candidate {self.address}",
+            flush=True,
+        )
+
+    def _candidate_addresses(self) -> list[str]:
+        if self.address is None:
+            return list(self.master_addresses)
+
+        ordered = [self.address]
+
+        for address in self.master_addresses:
+            if address not in ordered:
+                ordered.append(address)
+
+        return ordered
+
+    def _is_not_leader_message(self, message: str) -> bool:
+        normalized = str(message or "").lower()
+        return "not leader" in normalized or "operation allowed only" in normalized
 
     # --------------------------------------------------
     # REGISTER
@@ -45,30 +114,58 @@ class MasterClient:
         )
 
         while True:
-            try:
-                response = self.stub.RegisterWorker(
-                    request,
-                    timeout=10,
-                )
+            last_error = None
 
-                if response.accepted:
-                    print(
-                        f"[MasterClient] Registered worker "
-                        f"{worker_id} as {host}:{port}"
+            for address in self._candidate_addresses():
+                try:
+                    self._connect_to(address)
+
+                    response = self.stub.RegisterWorker(
+                        request,
+                        timeout=10,
                     )
-                    return response
 
+                    if response.accepted:
+                        print(
+                            f"[MasterClient] Registered worker {worker_id} "
+                            f"as {host}:{port} on master {self.address}",
+                            flush=True,
+                        )
+                        return response
+
+                    message = response.message or ""
+
+                    if self._is_not_leader_message(message):
+                        print(
+                            f"[MasterClient] Master {self.address} rejected "
+                            f"registration because it is not leader",
+                            flush=True,
+                        )
+                        last_error = RuntimeError(message)
+                        continue
+
+                    raise RuntimeError(
+                        f"Registration rejected by {self.address}: {message}"
+                    )
+
+                except Exception as exc:
+                    last_error = exc
+                    print(
+                        f"[MasterClient] Register failed on {address}: {exc}",
+                        flush=True,
+                    )
+                    continue
+
+            if not retry:
                 raise RuntimeError(
-                    f"Registration rejected: {response.message}"
+                    f"Unable to register worker on any master: {last_error}"
                 )
 
-            except Exception as e:
-                print(f"[MasterClient] Register failed: {e}")
-
-                if not retry:
-                    raise
-
-                time.sleep(2)
+            print(
+                "[MasterClient] No leader accepted registration. Retrying...",
+                flush=True,
+            )
+            time.sleep(2)
 
     def reregister_worker(self):
         if (
@@ -103,7 +200,36 @@ class MasterClient:
             active_task_ids=list(active_task_ids),
         )
 
-        return self.stub.Heartbeat(
-            request,
-            timeout=10,
+        last_error = None
+
+        for address in self._candidate_addresses():
+            try:
+                self._connect_to(address)
+
+                response = self.stub.Heartbeat(
+                    request,
+                    timeout=10,
+                )
+
+                if response.ok:
+                    return response
+
+                print(
+                    f"[MasterClient] Heartbeat rejected by {self.address}. "
+                    "Worker may need re-registration or this master is not leader.",
+                    flush=True,
+                )
+
+                return response
+
+            except Exception as exc:
+                last_error = exc
+                print(
+                    f"[MasterClient] Heartbeat failed on {address}: {exc}",
+                    flush=True,
+                )
+                continue
+
+        raise RuntimeError(
+            f"Heartbeat failed on all master candidates: {last_error}"
         )

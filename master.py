@@ -274,7 +274,8 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             model_manifest_builder=self.model_manifest_builder,
             test_evaluator=self.test_evaluator,
         )
-        self._start_recovery_on_startup_if_enabled()    # --------------------------------------------------------
+        self._start_recovery_on_startup_if_enabled()
+    # --------------------------------------------------------
     # RPC: worker lifecycle
     # --------------------------------------------------------
 
