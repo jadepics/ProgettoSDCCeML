@@ -17,6 +17,25 @@ import submit_training_regression
 # =========================================================
 # CONFIG
 # =========================================================
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    with open(path, "r", encoding="utf-8") as file:
+        for raw_line in file:
+            line = raw_line.strip()
+
+            if not line or line.startswith("#"):
+                continue
+
+            if "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+
+            os.environ.setdefault(key, value)
 
 ARTIFACT_ROOT = Path("/mnt/efs/gp_artifacts").resolve()
 dataset_path = Path(ARTIFACT_ROOT / "datasets" / "diabetes_dataset.csv").resolve()
@@ -39,6 +58,8 @@ GRPC_OPTIONS = [
 # =========================================================
 # MASTER LEADER DISCOVERY
 # =========================================================
+PROJECT_ROOT = Path(__file__).resolve().parent
+load_env_file(PROJECT_ROOT / ".env.client")
 
 def load_master_addresses() -> list[str]:
     raw_seeds = os.getenv("MASTER_SEEDS", "").strip()
