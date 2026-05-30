@@ -7,27 +7,89 @@ ENV_TEMPLATE="${PROJECT_ROOT}/.env.worker"
 RUNTIME_ENV_DIR="${PROJECT_ROOT}/runtime-env"
 ARTIFACT_MOUNT="/mnt/efs/gp_artifacts"
 
+WORKERS=("worker1" "worker2" "worker3" "worker4" "worker5" "worker6")
+
+declare -A WORKER_PORTS=(
+  ["worker1"]="50061"
+  ["worker2"]="50062"
+  ["worker3"]="50063"
+  ["worker4"]="50064"
+  ["worker5"]="50065"
+  ["worker6"]="50066"
+)
+
 ACTION="${1:-}"
-WORKER_ID="${2:-}"
-WORKER_PORT="${3:-}"
-EXTRA_ENV_VARS=()
-if (( $# > 3 )); then
-  EXTRA_ENV_VARS=("${@:4}")
+if [[ $# -gt 0 ]]; then
+  shift
 fi
+
+WORKER_ID="worker1"
+WORKER_PORT=""
+EXTRA_ENV_VARS=()
 
 mkdir -p "$RUNTIME_ENV_DIR"
 
 usage() {
   echo "Usage:"
   echo "  ./scripts/worker.sh build"
-  echo "  ./scripts/worker.sh start <worker_id> <worker_port> [KEY=VALUE ...]"
-  echo "  ./scripts/worker.sh restart <worker_id> <worker_port> [KEY=VALUE ...]"
-  echo "  ./scripts/worker.sh rebuild <worker_id> <worker_port> [KEY=VALUE ...]"
-  echo "  ./scripts/worker.sh update <worker_id> <worker_port> [KEY=VALUE ...]"
+  echo ""
+  echo "Single worker:"
+  echo "  ./scripts/worker.sh start <worker_id> [worker_port] [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh restart <worker_id> [worker_port] [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh rebuild <worker_id> [worker_port] [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh update <worker_id> [worker_port] [KEY=VALUE ...]"
   echo "  ./scripts/worker.sh stop <worker_id>"
   echo "  ./scripts/worker.sh logs <worker_id>"
   echo "  ./scripts/worker.sh shell <worker_id>"
+  echo ""
+  echo "All workers:"
+  echo "  ./scripts/worker.sh start-all [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh restart-all [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh rebuild-all [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh update-all [KEY=VALUE ...]"
+  echo "  ./scripts/worker.sh stop-all"
+  echo "  ./scripts/worker.sh ps"
+  echo ""
+  echo "Example:"
+  echo "  ./scripts/worker.sh rebuild-all MASTER_CLUSTER_HOST=172.31.37.47 WORKER_ADVERTISE_HOST=172.31.39.5"
   exit 1
+}
+
+is_known_worker() {
+  local worker_id="$1"
+
+  for candidate in "${WORKERS[@]}"; do
+    if [[ "$candidate" == "$worker_id" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+parse_worker_and_env() {
+  [[ $# -ge 1 ]] || usage
+
+  WORKER_ID="$1"
+  shift
+
+  if [[ $# -gt 0 && "$1" != *=* ]]; then
+    WORKER_PORT="$1"
+    shift
+  else
+    if is_known_worker "$WORKER_ID"; then
+      WORKER_PORT="${WORKER_PORTS[$WORKER_ID]}"
+    else
+      echo "[ERROR] worker_port is required for unknown worker_id: $WORKER_ID"
+      exit 1
+    fi
+  fi
+
+  EXTRA_ENV_VARS=("$@")
+}
+
+parse_env_only() {
+  EXTRA_ENV_VARS=("$@")
 }
 
 set_env_value() {
@@ -40,6 +102,84 @@ set_env_value() {
   else
     echo "${key}=${value}" >> "$file"
   fi
+}
+
+get_extra_env_value() {
+  local key="$1"
+
+  for kv in "${EXTRA_ENV_VARS[@]}"; do
+    if [[ "${kv%%=*}" == "$key" ]]; then
+      echo "${kv#*=}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+get_template_env_value() {
+  local key="$1"
+
+  if [[ ! -f "$ENV_TEMPLATE" ]]; then
+    return 1
+  fi
+
+  grep -E "^${key}=" "$ENV_TEMPLATE" | tail -n 1 | cut -d "=" -f 2- || true
+}
+
+detect_private_ip() {
+  hostname -I | awk '{print $1}'
+}
+
+master_cluster_host() {
+  local value=""
+
+  if value="$(get_extra_env_value "MASTER_CLUSTER_HOST" 2>/dev/null)"; then
+    echo "$value"
+    return
+  fi
+
+  if [[ -n "${MASTER_CLUSTER_HOST:-}" ]]; then
+    echo "$MASTER_CLUSTER_HOST"
+    return
+  fi
+
+  value="$(get_template_env_value "MASTER_HOST")"
+  if [[ -n "$value" ]]; then
+    echo "$value"
+    return
+  fi
+
+  echo "172.31.37.47"
+}
+
+worker_advertise_host() {
+  local value=""
+
+  if value="$(get_extra_env_value "WORKER_ADVERTISE_HOST" 2>/dev/null)"; then
+    echo "$value"
+    return
+  fi
+
+  if [[ -n "${WORKER_ADVERTISE_HOST:-}" ]]; then
+    echo "$WORKER_ADVERTISE_HOST"
+    return
+  fi
+
+  value="$(get_template_env_value "WORKER_ADVERTISE_HOST")"
+  if [[ -n "$value" ]]; then
+    echo "$value"
+    return
+  fi
+
+  detect_private_ip
+}
+
+master_seeds() {
+  local host
+  host="$(master_cluster_host)"
+
+  echo "${host}:50051,${host}:50052,${host}:50053"
 }
 
 container_name_from_worker_id() {
@@ -59,13 +199,43 @@ generate_env() {
 
   cp "$ENV_TEMPLATE" "$runtime_env_file"
 
+  local master_host
+  local advertise_host
+  local seeds
+
+  master_host="$(master_cluster_host)"
+  advertise_host="$(worker_advertise_host)"
+  seeds="$(master_seeds)"
+
   set_env_value "$runtime_env_file" "WORKER_ID" "$worker_id"
+  set_env_value "$runtime_env_file" "WORKER_BIND_HOST" "0.0.0.0"
   set_env_value "$runtime_env_file" "WORKER_PORT" "$worker_port"
+  set_env_value "$runtime_env_file" "WORKER_ADVERTISE_HOST" "$advertise_host"
+
+  set_env_value "$runtime_env_file" "MASTER_HOST" "$master_host"
+  set_env_value "$runtime_env_file" "MASTER_PORT" "50051"
+
+  set_env_value "$runtime_env_file" "MASTER_LEADER_HOST" "$master_host"
+  set_env_value "$runtime_env_file" "MASTER_LEADER_PORT" "50051"
+
+  set_env_value "$runtime_env_file" "MASTER_SEEDS" "$seeds"
+
+  set_env_value "$runtime_env_file" "SHARED_STORAGE_ROOT" "$ARTIFACT_MOUNT"
+  set_env_value "$runtime_env_file" "MAX_CONCURRENT_TASKS" "1"
 
   for kv in "${EXTRA_ENV_VARS[@]}"; do
-    [[ "$kv" == *=* ]] || { echo "[ERROR] invalid env override: $kv"; exit 1; }
+    [[ "$kv" == *=* ]] || {
+      echo "[ERROR] invalid env override: $kv"
+      exit 1
+    }
+
     key="${kv%%=*}"
     value="${kv#*=}"
+
+    if [[ "$key" == "MASTER_CLUSTER_HOST" ]]; then
+      continue
+    fi
+
     set_env_value "$runtime_env_file" "$key" "$value"
   done
 
@@ -78,6 +248,12 @@ stop_container() {
   docker rm "$container_name" >/dev/null 2>&1 || true
 }
 
+stop_all_containers() {
+  for worker_id in "${WORKERS[@]}"; do
+    stop_container "$(container_name_from_worker_id "$worker_id")"
+  done
+}
+
 build_image() {
   cd "$PROJECT_ROOT"
   docker build -t "$IMAGE_NAME" -f Dockerfile.worker .
@@ -87,9 +263,9 @@ run_worker() {
   local worker_id="$1"
   local worker_port="$2"
   local container_name
-  container_name="$(container_name_from_worker_id "$worker_id")"
-
   local env_file
+
+  container_name="$(container_name_from_worker_id "$worker_id")"
   env_file="$(generate_env "$worker_id" "$worker_port")"
 
   docker run -d \
@@ -99,6 +275,96 @@ run_worker() {
     --env-file "$env_file" \
     -v "$ARTIFACT_MOUNT:$ARTIFACT_MOUNT" \
     "$IMAGE_NAME"
+
+  echo "[WORKER] started $worker_id as container $container_name"
+  echo "[WORKER] port: $worker_port"
+  echo "[WORKER] env file: $env_file"
+}
+
+start_one() {
+  parse_worker_and_env "$@"
+  stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+  run_worker "$WORKER_ID" "$WORKER_PORT"
+}
+
+restart_one() {
+  parse_worker_and_env "$@"
+  stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+  run_worker "$WORKER_ID" "$WORKER_PORT"
+}
+
+rebuild_one() {
+  parse_worker_and_env "$@"
+  stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+  docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
+  build_image
+  run_worker "$WORKER_ID" "$WORKER_PORT"
+}
+
+update_one() {
+  parse_worker_and_env "$@"
+  cd "$PROJECT_ROOT"
+  git pull
+  stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+  docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
+  build_image
+  run_worker "$WORKER_ID" "$WORKER_PORT"
+}
+
+start_all() {
+  parse_env_only "$@"
+  stop_all_containers
+
+  for worker_id in "${WORKERS[@]}"; do
+    run_worker "$worker_id" "${WORKER_PORTS[$worker_id]}"
+  done
+}
+
+restart_all() {
+  parse_env_only "$@"
+  stop_all_containers
+
+  for worker_id in "${WORKERS[@]}"; do
+    run_worker "$worker_id" "${WORKER_PORTS[$worker_id]}"
+  done
+}
+
+rebuild_all() {
+  parse_env_only "$@"
+  stop_all_containers
+  docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
+  build_image
+
+  for worker_id in "${WORKERS[@]}"; do
+    run_worker "$worker_id" "${WORKER_PORTS[$worker_id]}"
+  done
+}
+
+update_all() {
+  parse_env_only "$@"
+  cd "$PROJECT_ROOT"
+  git pull
+  stop_all_containers
+  docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
+  build_image
+
+  for worker_id in "${WORKERS[@]}"; do
+    run_worker "$worker_id" "${WORKER_PORTS[$worker_id]}"
+  done
+}
+
+show_logs() {
+  parse_worker_and_env "$@"
+  docker logs -f "$(container_name_from_worker_id "$WORKER_ID")"
+}
+
+open_shell() {
+  parse_worker_and_env "$@"
+  docker exec -it "$(container_name_from_worker_id "$WORKER_ID")" bash
+}
+
+show_ps() {
+  docker ps --filter "name=worker" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Command}}"
 }
 
 case "$ACTION" in
@@ -107,48 +373,56 @@ case "$ACTION" in
     ;;
 
   start)
-    [[ -n "$WORKER_ID" && -n "$WORKER_PORT" ]] || usage
-    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
-    run_worker "$WORKER_ID" "$WORKER_PORT"
+    start_one "$@"
     ;;
 
   restart)
-    [[ -n "$WORKER_ID" && -n "$WORKER_PORT" ]] || usage
-    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
-    run_worker "$WORKER_ID" "$WORKER_PORT"
+    restart_one "$@"
     ;;
 
   rebuild)
-    [[ -n "$WORKER_ID" && -n "$WORKER_PORT" ]] || usage
-    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
-    docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
-    build_image
-    run_worker "$WORKER_ID" "$WORKER_PORT"
+    rebuild_one "$@"
     ;;
 
   update)
-    [[ -n "$WORKER_ID" && -n "$WORKER_PORT" ]] || usage
-    cd "$PROJECT_ROOT"
-    git pull
-    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
-    docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
-    build_image
-    run_worker "$WORKER_ID" "$WORKER_PORT"
+    update_one "$@"
     ;;
 
   stop)
-    [[ -n "$WORKER_ID" ]] || usage
-    stop_container "$(container_name_from_worker_id "$WORKER_ID")"
+    [[ $# -ge 1 ]] || usage
+    stop_container "$(container_name_from_worker_id "$1")"
     ;;
 
   logs)
-    [[ -n "$WORKER_ID" ]] || usage
-    docker logs -f "$(container_name_from_worker_id "$WORKER_ID")"
+    show_logs "$@"
     ;;
 
   shell)
-    [[ -n "$WORKER_ID" ]] || usage
-    docker exec -it "$(container_name_from_worker_id "$WORKER_ID")" bash
+    open_shell "$@"
+    ;;
+
+  start-all)
+    start_all "$@"
+    ;;
+
+  restart-all)
+    restart_all "$@"
+    ;;
+
+  rebuild-all)
+    rebuild_all "$@"
+    ;;
+
+  update-all)
+    update_all "$@"
+    ;;
+
+  stop-all)
+    stop_all_containers
+    ;;
+
+  ps)
+    show_ps
     ;;
 
   "")
