@@ -42,7 +42,6 @@ class HeartbeatLoop:
                     running_tasks=running_tasks,
                     active_task_ids=active_task_ids,
                     active_tasks = active_tasks,
-
                 )
 
                 if not response.ok:

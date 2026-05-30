@@ -36,6 +36,7 @@ class ShardPlanner:
         storage_layout: StorageLayout,
         lease_timeout_seconds: float | None = None,
         initial_attempt_id: int = 1,
+        max_running_tasks_per_worker: int | None = None
     ) -> None:
         if initial_attempt_id <= 0:
             raise ValueError("initial_attempt_id must be > 0")
@@ -46,6 +47,8 @@ class ShardPlanner:
         # Tenuto solo per retrocompatibilità con eventuali vecchie chiamate.
         # La lease non viene più calcolata qui.
         self.lease_timeout_seconds = lease_timeout_seconds
+
+        self.max_running_tasks_per_worker = max_running_tasks_per_worker
 
     def plan(
         self,
@@ -69,6 +72,7 @@ class ShardPlanner:
             raise ValueError("forest_config.n_estimators must be > 0")
 
         ordered_workers = self._normalize_workers(workers)
+        ordered_workers = self._filter_eligible_workers(ordered_workers)
         if not ordered_workers:
             raise ValueError("At least one worker is required to plan training shards")
 
@@ -144,6 +148,7 @@ class ShardPlanner:
         range del tipo (tree_start_index, tree_count).
         """
         ordered_workers = self._normalize_workers(workers)
+        ordered_workers = self._filter_eligible_workers(ordered_workers)
         if not ordered_workers:
             raise ValueError("At least one worker is required to replan training shards")
 
@@ -234,6 +239,22 @@ class ShardPlanner:
             unique_by_id[worker_id]
             for worker_id in sorted(unique_by_id.keys())
         ]
+
+    def _filter_eligible_workers(
+            self,
+            workers: Sequence[WorkerLike],
+    ) -> list[WorkerLike]:
+        if self.max_running_tasks_per_worker is None:
+            return list(workers)
+
+        eligible_workers: list[WorkerLike] = []
+
+        for worker in workers:
+            running_tasks = int(getattr(worker, "running_tasks", 0))
+            if running_tasks < self.max_running_tasks_per_worker:
+                eligible_workers.append(worker)
+
+        return eligible_workers
 
     def _split_trees(
         self,

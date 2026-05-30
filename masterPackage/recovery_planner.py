@@ -28,6 +28,7 @@ class RecoveryPlan:
     deferred_tree_ids: list[str]
     expired_running_tasks: list[TaskRecord]
     stale_worker_ids: list[str]
+    zombie_worker_ids: list[str]
     decisions: list[RecoveryDecision]
     recovery_shards: list[TrainingShard]
 
@@ -57,9 +58,16 @@ class RecoveryPlanner:
         shard_planner,
         worker_heartbeat_monitor,
         alive_worker_expired_lease_grace_seconds: float = 30.0,
+
+        #numero di alberi di cui facciamo il recoveri per ogni ciclo
+        max_recovery_trees_per_cycle: int = 16,
     ) -> None:
+
         if alive_worker_expired_lease_grace_seconds < 0:
             raise ValueError("alive_worker_expired_lease_grace_seconds must be >= 0")
+
+        if max_recovery_trees_per_cycle <= 0:
+            raise ValueError("max_recovery_trees_per_cycle must be > 0")
 
         self.task_ledger = task_ledger
         self.shard_planner = shard_planner
@@ -67,6 +75,7 @@ class RecoveryPlanner:
         self.alive_worker_expired_lease_grace_seconds = (
             alive_worker_expired_lease_grace_seconds
         )
+        self.max_recovery_trees_per_cycle = max_recovery_trees_per_cycle
 
     def build_plan(
         self,
@@ -102,9 +111,9 @@ class RecoveryPlanner:
             now_ts=effective_now,
         )
 
-        stale_worker_ids = set (self._stale_worker_ids(now_ts=effective_now))
+        stale_worker_ids = set(self._stale_worker_ids(now_ts=effective_now))
         zombie_worker_ids = set(self._zombie_worker_ids(now_ts=effective_now))
-        stale_worker_ids_set = stale_worker_ids | zombie_worker_ids
+        problematic_worker_ids  = stale_worker_ids | zombie_worker_ids
 
         running_owner_by_tree = self._running_owner_by_tree(
             job_id=job_id,
@@ -121,7 +130,7 @@ class RecoveryPlanner:
             decision = self._decide_missing_tree(
                 tree_id=tree_id,
                 owner=owner,
-                stale_worker_ids=stale_worker_ids_set,
+                stale_worker_ids=problematic_worker_ids,
                 now_ts=effective_now,
             )
             decisions.append(decision)
@@ -131,6 +140,14 @@ class RecoveryPlanner:
             else:
                 deferred_tree_ids.append(tree_id)
 
+        # --------------------------------------------------
+        # Recovery budget globale
+        # --------------------------------------------------
+        if len(recover_now_tree_ids) > self.max_recovery_trees_per_cycle:
+            overflow_tree_ids = recover_now_tree_ids[self.max_recovery_trees_per_cycle:]
+            recover_now_tree_ids = recover_now_tree_ids[:self.max_recovery_trees_per_cycle]
+            deferred_tree_ids.extend(overflow_tree_ids)
+            
         recovery_shards: list[TrainingShard] = []
 
         if recover_now_tree_ids and workers:
@@ -139,17 +156,26 @@ class RecoveryPlanner:
                 experiment_id=experiment_id,
             )
 
-            recovery_shards = list(
-                self.shard_planner.plan_missing_tree_ids(
-                    job_id=job_id,
-                    experiment_id=experiment_id,
-                    forest_config=forest_config,
-                    prepared_dataset=prepared_dataset,
-                    workers=workers,
-                    missing_tree_ids=recover_now_tree_ids,
-                    attempt_id=recovery_attempt_id,
+            try:
+                recovery_shards = list(
+                    self.shard_planner.plan_missing_tree_ids(
+                        job_id=job_id,
+                        experiment_id=experiment_id,
+                        forest_config=forest_config,
+                        prepared_dataset=prepared_dataset,
+                        workers=workers,
+                        missing_tree_ids=recover_now_tree_ids,
+                        attempt_id=recovery_attempt_id,
+                    )
                 )
-            )
+
+            except ValueError as exc:
+                if "eligible worker" in str(exc).lower():
+                    deferred_tree_ids.extend(recover_now_tree_ids)
+                    recover_now_tree_ids = []
+                    recovery_shards = []
+                else:
+                    raise
 
         return RecoveryPlan(
             job_id=job_id,
@@ -160,7 +186,8 @@ class RecoveryPlanner:
             recover_now_tree_ids=recover_now_tree_ids,
             deferred_tree_ids=deferred_tree_ids,
             expired_running_tasks=list(expired_running_tasks),
-            stale_worker_ids=stale_worker_ids,
+            stale_worker_ids=list(stale_worker_ids),
+            zombie_worker_ids=list(zombie_worker_ids),
             decisions=decisions,
             recovery_shards=recovery_shards,
         )

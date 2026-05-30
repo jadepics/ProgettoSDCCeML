@@ -237,8 +237,11 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         self.experiment_planner = ExperimentPlanner()
         self.model_selector = ModelSelector(selection_metric="auto")
         self.model_manifest_builder = ModelManifestBuilder()
-        self.shard_planner = ShardPlanner(self.layout)
-
+        self.shard_planner = ShardPlanner(
+            self.layout,
+            max_running_tasks_per_worker=2,
+        )
+        
         self.worker_client = WorkerClient(
             timeout_train_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,
             timeout_predict_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,
