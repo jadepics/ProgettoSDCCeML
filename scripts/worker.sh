@@ -9,6 +9,7 @@ ARTIFACT_MOUNT="/mnt/efs/gp_artifacts"
 
 WORKERS=("worker1" "worker2" "worker3" "worker4" "worker5" "worker6")
 
+#TODO togli questo dettaglio di worker già specifici
 declare -A WORKER_PORTS=(
   ["worker1"]="50061"
   ["worker2"]="50062"

@@ -189,11 +189,18 @@ class MasterClient:
     # --------------------------------------------------
 
     def send_heartbeat(
-        self,
-        worker_id: str,
-        running_tasks: int,
-        active_task_ids,
+            self,
+            worker_id: str,
+            running_tasks: int,
+            active_task_ids=None,
+            active_tasks=None,
     ):
+        if active_task_ids is None:
+            active_task_ids = active_tasks
+
+        if active_task_ids is None:
+            active_task_ids = []
+
         request = rf_pb2.HeartbeatRequest(
             worker_id=worker_id,
             running_tasks=running_tasks,
