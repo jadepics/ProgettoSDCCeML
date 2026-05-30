@@ -59,3 +59,5 @@ def main(
     print("job_id:", response.job_id)
     print("status:", response.status)
     print("message:", response.message)
+
+    return response

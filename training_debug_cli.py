@@ -1,11 +1,12 @@
 from pathlib import Path
 import json
+import os
 import shutil
+from typing import Optional, Callable, Any
 
 import grpc
 import numpy as np
 import pandas as pd
-from typing import Optional
 
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
@@ -17,22 +18,11 @@ import submit_training_regression
 # CONFIG
 # =========================================================
 
-##########################################################
-#
-#utilizzare l'ip privato del master per fare l'allenamento
-#Correggere per rendere tutto automatico
-#
-###########################################################
-MASTER_ADDRESS = "172.31.37.47:50051"
-
-###########################################################
-#
-#Modificare, se non funziona, con il mount comune
-#
-###########################################################
 ARTIFACT_ROOT = Path("/mnt/efs/gp_artifacts").resolve()
 dataset_path = Path(ARTIFACT_ROOT / "datasets" / "diabetes_dataset.csv").resolve()
 
+DEFAULT_MASTER_HOST = "172.31.37.47"
+DEFAULT_MASTER_PORT = "50051"
 
 DATASET_SCENARIO_ORIGINAL = "baseline_original"
 DATASET_SCENARIO_NO_LEAKAGE = "baseline_no_leakage"
@@ -46,33 +36,189 @@ GRPC_OPTIONS = [
 ]
 
 
-def _n_estimators_total():
+# =========================================================
+# MASTER LEADER DISCOVERY
+# =========================================================
 
+def load_master_addresses() -> list[str]:
+    raw_seeds = os.getenv("MASTER_SEEDS", "").strip()
+
+    if raw_seeds:
+        addresses = [
+            item.strip()
+            for item in raw_seeds.split(",")
+            if item.strip()
+        ]
+
+        if addresses:
+            return list(dict.fromkeys(addresses))
+
+    master_host = os.getenv("MASTER_HOST", DEFAULT_MASTER_HOST).strip()
+    master_port = os.getenv("MASTER_PORT", DEFAULT_MASTER_PORT).strip()
+
+    return [f"{master_host}:{master_port}"]
+
+
+def is_not_leader_message(message: str) -> bool:
+    normalized = str(message or "").lower()
+    return (
+        "not leader" in normalized
+        or "operation allowed only" in normalized
+        or "leader-only operation rejected" in normalized
+    )
+
+
+def submit_training_with_leader_discovery(
+    submit_function: Callable[..., Any],
+    *submit_args,
+) -> Optional[rf_pb2.SubmitTrainingResponse]:
+    last_error = None
+
+    for master_address in load_master_addresses():
+        try:
+            print()
+            print(f"[CLIENT] Trying SubmitTraining on master {master_address}")
+
+            response = submit_function(
+                master_address,
+                *submit_args,
+            )
+
+            if response is None:
+                raise RuntimeError(
+                    "submit_training module returned None. "
+                    "For leader discovery to work correctly, "
+                    "submit_training_classification.main(...) and "
+                    "submit_training_regression.main(...) must return "
+                    "the SubmitTrainingResponse received from gRPC."
+                )
+
+            message = getattr(response, "message", "")
+
+            if getattr(response, "job_id", ""):
+                print(f"[CLIENT] Training accepted by leader {master_address}")
+                return response
+
+            if is_not_leader_message(message):
+                print(
+                    f"[CLIENT] Master {master_address} is not leader. "
+                    "Trying next candidate..."
+                )
+                last_error = RuntimeError(message)
+                continue
+
+            return response
+
+        except Exception as exc:
+            last_error = exc
+            print(f"[CLIENT] SubmitTraining failed on {master_address}: {exc}")
+            continue
+
+    print()
+    print("[ERROR] No master leader accepted SubmitTraining")
+    print(last_error)
+    print()
+
+    return None
+
+
+def submit_inference_with_leader_discovery(
+    request: rf_pb2.SubmitInferenceRequest,
+) -> Optional[rf_pb2.SubmitInferenceResponse]:
+    last_error = None
+
+    for master_address in load_master_addresses():
+        try:
+            print()
+            print(f"[CLIENT] Trying SubmitInference on master {master_address}")
+
+            with grpc.insecure_channel(
+                master_address,
+                options=GRPC_OPTIONS,
+            ) as channel:
+                stub = rf_pb2_grpc.CoordinatorServiceStub(channel)
+
+                response = stub.SubmitInference(
+                    request,
+                    timeout=120,
+                )
+
+            if response.success:
+                print(f"[CLIENT] Inference accepted by leader {master_address}")
+                return response
+
+            if is_not_leader_message(response.error):
+                print(
+                    f"[CLIENT] Master {master_address} is not leader. "
+                    "Trying next candidate..."
+                )
+                last_error = RuntimeError(response.error)
+                continue
+
+            return response
+
+        except Exception as exc:
+            last_error = exc
+            print(f"[CLIENT] SubmitInference failed on {master_address}: {exc}")
+            continue
+
+    print()
+    print("[ERROR] No master leader accepted SubmitInference")
+    print(last_error)
+    print()
+
+    return None
+
+
+# =========================================================
+# INPUT HELPERS
+# =========================================================
+
+def _n_estimators_total() -> int:
     try:
-        print("INSERIRE  IL NUMERO DI ALBERI PER OGNI WORKER")
+        print("INSERIRE IL NUMERO TOTALE DI ALBERI")
 
-        n_estimators_total = int(input(
-            "\nSelect option: "
-        ).strip())
+        n_estimators_total = int(
+            input("\nSelect option: ").strip()
+        )
 
         return n_estimators_total
 
-    except:
+    except Exception:
         return 0
+
+
+def print_submit_training_response(
+    response: Optional[rf_pb2.SubmitTrainingResponse],
+) -> None:
+    if response is None:
+        return
+
+    print()
+    print("job_id:")
+    print(response.job_id)
+
+    print()
+    print("status:")
+    print(response.status)
+
+    print()
+    print("message:")
+    print(response.message)
+
+    print()
 
 
 # =========================================================
 # SUBMIT TRAINING
 # =========================================================
-def _submit_training_regression():
 
+def _submit_training_regression():
     print("CHOOSE TRAINING TYPE")
     print("1 -> PREDICT HBA1C")
     print("2 -> EXIT")
 
-    choice = input(
-        "\nSelect option: "
-    ).strip()
+    choice = input("\nSelect option: ").strip()
 
     if choice == "1":
         pass
@@ -86,19 +232,22 @@ def _submit_training_regression():
         print()
         return
 
-    n_estimators_total=_n_estimators_total()
-    if n_estimators_total == 0:
+    n_estimators_total = _n_estimators_total()
+
+    if n_estimators_total <= 0:
         print("INSERT A NUMBER OF USABLE TREE, >0")
         return
 
-    submit_training_regression.main(
-                MASTER_ADDRESS,
-                dataset_path,
-                n_estimators_total,
-            )
+    response = submit_training_with_leader_discovery(
+        submit_training_regression.main,
+        dataset_path,
+        n_estimators_total,
+    )
+
+    print_submit_training_response(response)
+
 
 def _submit_training_classification():
-
     print("CHOOSE TRAINING TYPE")
     print("1 -> BASELINE ORIGINAL")
     print("2 -> BASELINE NO LEAKAGE")
@@ -108,34 +257,34 @@ def _submit_training_classification():
     print("6 -> GLUCOSE ONLY")
     print("7 -> GO BACK")
 
-    choice = input(
-        "\nSelect option: "
-    ).strip()
+    choice = input("\nSelect option: ").strip()
 
     if choice == "1":
-            dataset_scenario="baseline_original"
-            leakage_columns=[]
+        dataset_scenario = "baseline_original"
+        leakage_columns = []
 
     elif choice == "2":
-            dataset_scenario="baseline_no_leakage"
-            leakage_columns=["diabetes_stage"
-            "diabetes_risk_score"]
+        dataset_scenario = "baseline_no_leakage"
+        leakage_columns = [
+            "diabetes_stage",
+            "diabetes_risk_score",
+        ]
 
     elif choice == "3":
-            dataset_scenario="no_diagnostic_features"
-            leakage_columns=[]
+        dataset_scenario = "no_diagnostic_features"
+        leakage_columns = []
 
     elif choice == "4":
-            dataset_scenario="no_diagnostic_extended"
-            leakage_columns=[]
+        dataset_scenario = "no_diagnostic_extended"
+        leakage_columns = []
 
     elif choice == "5":
-            dataset_scenario="clinical_only"
-            leakage_columns=[]
+        dataset_scenario = "clinical_only"
+        leakage_columns = []
 
     elif choice == "6":
-            dataset_scenario="glucose_only"
-            leakage_columns=[]
+        dataset_scenario = "glucose_only"
+        leakage_columns = []
 
     elif choice == "7":
         return
@@ -146,21 +295,24 @@ def _submit_training_classification():
         print()
         return
 
-    n_estimators_total=_n_estimators_total()
-    if n_estimators_total == 0:
+    n_estimators_total = _n_estimators_total()
+
+    if n_estimators_total <= 0:
         print("INSERT A NUMBER OF USABLE TREE, >0")
         return
 
-    submit_training_classification.main(
-        MASTER_ADDRESS,
+    response = submit_training_with_leader_discovery(
+        submit_training_classification.main,
         dataset_path,
         n_estimators_total,
         dataset_scenario,
         leakage_columns,
     )
 
-def submit_training_launcher():
+    print_submit_training_response(response)
 
+
+def submit_training_launcher():
     print()
     print("===================================")
     print("SUBMIT TRAINING. CHOOSE BETWEEN:")
@@ -169,9 +321,7 @@ def submit_training_launcher():
     print("3 -> GO BACK")
     print("===================================")
 
-    choice = input(
-        "\nSelect option: "
-    ).strip()
+    choice = input("\nSelect option: ").strip()
 
     if choice == "1":
         _submit_training_regression()
@@ -187,11 +337,12 @@ def submit_training_launcher():
         print("[ERROR] Invalid option")
         print()
 
+
 # =========================================================
 # JOB STATUS
 # =========================================================
-def see_job_status(job_id: str):
 
+def see_job_status(job_id: str):
     job_record_path = (
         ARTIFACT_ROOT
         / "jobs"
@@ -200,20 +351,17 @@ def see_job_status(job_id: str):
     )
 
     if not job_record_path.exists():
-
         print()
         print("[ERROR] job_record.json not found")
         print(job_record_path)
         print()
-
         return
 
     with open(
         job_record_path,
         "r",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as f:
-
         job_record = json.load(f)
 
     print()
@@ -235,15 +383,12 @@ def see_job_status(job_id: str):
 
 
 def see_job_status_launcher():
-
     print()
     print("===================================")
     print("SEE JOB STATUS")
     print("===================================")
 
-    job_id = input(
-        "\nInsert job_id: "
-    ).strip()
+    job_id = input("\nInsert job_id: ").strip()
 
     see_job_status(job_id)
 
@@ -253,7 +398,6 @@ def see_job_status_launcher():
 # =========================================================
 
 def see_experiments(job_id: str):
-
     experiments_root = (
         ARTIFACT_ROOT
         / "jobs"
@@ -262,18 +406,15 @@ def see_experiments(job_id: str):
     )
 
     if not experiments_root.exists():
-
         print()
         print("[ERROR] experiments folder not found")
         print(experiments_root)
         print()
-
         return
 
     print()
 
     for experiment_dir in experiments_root.iterdir():
-
         if not experiment_dir.is_dir():
             continue
 
@@ -288,65 +429,41 @@ def see_experiments(job_id: str):
         with open(
             experiment_record_path,
             "r",
-            encoding="utf-8"
+            encoding="utf-8",
         ) as f:
-
             experiment_record = json.load(f)
 
         print("===================================")
 
         print("experiment_id:")
-        print(
-            experiment_record.get(
-                "experiment_id"
-            )
-        )
+        print(experiment_record.get("experiment_id"))
 
         print()
         print("status:")
-        print(
-            experiment_record.get(
-                "status"
-            )
-        )
+        print(experiment_record.get("status"))
 
         print()
         print("expected_tree_count:")
-        print(
-            experiment_record.get(
-                "expected_tree_count"
-            )
-        )
+        print(experiment_record.get("expected_tree_count"))
 
         print()
         print("completed_tree_count:")
-        print(
-            experiment_record.get(
-                "completed_tree_count"
-            )
-        )
+        print(experiment_record.get("completed_tree_count"))
 
         print()
         print("assigned_workers:")
-        print(
-            experiment_record.get(
-                "assigned_workers"
-            )
-        )
+        print(experiment_record.get("assigned_workers"))
 
         print()
 
 
 def see_experiments_launcher():
-
     print()
     print("===================================")
     print("SEE EXPERIMENTS")
     print("===================================")
 
-    job_id = input(
-        "\nInsert job_id: "
-    ).strip()
+    job_id = input("\nInsert job_id: ").strip()
 
     see_experiments(job_id)
 
@@ -356,7 +473,6 @@ def see_experiments_launcher():
 # =========================================================
 
 def count_saved_trees(job_id: str):
-
     experiments_root = (
         ARTIFACT_ROOT
         / "jobs"
@@ -365,18 +481,15 @@ def count_saved_trees(job_id: str):
     )
 
     if not experiments_root.exists():
-
         print()
         print("[ERROR] experiments folder not found")
         print(experiments_root)
         print()
-
         return
 
     print()
 
     for experiment_dir in experiments_root.iterdir():
-
         if not experiment_dir.is_dir():
             continue
 
@@ -404,15 +517,12 @@ def count_saved_trees(job_id: str):
 
 
 def count_saved_trees_launcher():
-
     print()
     print("===================================")
     print("COUNT SAVED TREES")
     print("===================================")
 
-    job_id = input(
-        "\nInsert job_id: "
-    ).strip()
+    job_id = input("\nInsert job_id: ").strip()
 
     count_saved_trees(job_id)
 
@@ -425,7 +535,6 @@ def see_validation_metrics(
     job_id: str,
     experiment_id: str,
 ):
-
     experiment_record_path = (
         ARTIFACT_ROOT
         / "jobs"
@@ -436,85 +545,59 @@ def see_validation_metrics(
     )
 
     if not experiment_record_path.exists():
-
         print()
         print("[ERROR] experiment_record.json not found")
         print(experiment_record_path)
         print()
-
         return
 
     with open(
         experiment_record_path,
         "r",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as f:
-
         experiment_record = json.load(f)
 
     print()
 
     print("status:")
-    print(
-        experiment_record.get(
-            "status"
-        )
-    )
+    print(experiment_record.get("status"))
 
     print()
     print("expected_tree_count:")
-    print(
-        experiment_record.get(
-            "expected_tree_count"
-        )
-    )
+    print(experiment_record.get("expected_tree_count"))
 
     print()
     print("completed_tree_count:")
-    print(
-        experiment_record.get(
-            "completed_tree_count"
-        )
-    )
+    print(experiment_record.get("completed_tree_count"))
 
     print()
     print("assigned_workers:")
-    print(
-        experiment_record.get(
-            "assigned_workers"
-        )
-    )
+    print(experiment_record.get("assigned_workers"))
 
     print()
     print("validation_metrics:")
-    print(
-        experiment_record.get(
-            "validation_metrics"
-        )
-    )
+    print(experiment_record.get("validation_metrics"))
 
     print()
 
 
 def see_validation_metrics_launcher():
-
     print()
     print("===================================")
     print("SEE VALIDATION METRICS")
     print("===================================")
 
-    job_id = input(
-        "\nInsert job_id: "
-    ).strip()
+    job_id = input("\nInsert job_id: ").strip()
 
-    experiment_id = input(
-        "Insert experiment_id: "
-    ).strip()
+    experiment_id = input("Insert experiment_id: ").strip()
 
     see_validation_metrics(
         job_id,
         experiment_id,
     )
+
+
 # =========================================================
 # SUBMIT INFERENCE
 # =========================================================
@@ -550,7 +633,6 @@ def load_manifest_by_model_id(model_id: str) -> dict:
         with open(manifest_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    # fallback più robusto: cerca tutti i manifest e trova quello col model_id corretto
     for candidate in ARTIFACT_ROOT.rglob("manifest.json"):
         try:
             with open(candidate, "r", encoding="utf-8") as f:
@@ -596,7 +678,6 @@ def submit_inference(
     split_name: str,
     rows: int,
 ):
-
     try:
         manifest = load_manifest_by_model_id(model_id)
 
@@ -625,6 +706,7 @@ def submit_inference(
         X_df = pd.read_parquet(features_path)
 
         feature_names = manifest.get("feature_names") or []
+
         if feature_names:
             missing_features = [
                 feature
@@ -648,17 +730,10 @@ def submit_inference(
             features=matrix_to_proto(X),
         )
 
-        with grpc.insecure_channel(
-            MASTER_ADDRESS,
-            options=GRPC_OPTIONS,
-        ) as channel:
+        response = submit_inference_with_leader_discovery(request)
 
-            stub = rf_pb2_grpc.CoordinatorServiceStub(channel)
-
-            response = stub.SubmitInference(
-                request,
-                timeout=120,
-            )
+        if response is None:
+            return
 
     except Exception as exc:
         print()
@@ -722,15 +797,12 @@ def submit_inference(
 
 
 def submit_inference_launcher():
-
     print()
     print("===================================")
     print("SUBMIT INFERENCE")
     print("===================================")
 
-    model_id = input(
-        "\nInsert model_id: "
-    ).strip()
+    model_id = input("\nInsert model_id: ").strip()
 
     if not model_id:
         print()
@@ -745,9 +817,7 @@ def submit_inference_launcher():
     print("3 -> TRAIN")
     print("4 -> GO BACK")
 
-    split_choice = input(
-        "\nSelect option: "
-    ).strip()
+    split_choice = input("\nSelect option: ").strip()
 
     if split_choice == "1":
         split_name = "validation"
@@ -767,9 +837,7 @@ def submit_inference_launcher():
         print()
         return
 
-    rows_raw = input(
-        "\nHow many rows? Default 5: "
-    ).strip()
+    rows_raw = input("\nHow many rows? Default 5: ").strip()
 
     if rows_raw == "":
         rows = 5
@@ -795,12 +863,11 @@ def submit_inference_launcher():
     )
 
 
-def reset_shared_artifacts() -> None:
-    """
-    Rimuove gli artifact generati dai job, lasciando intatti i dataset.
-    TODO MODIFICA CON ROOT DI EFS
-    """
+# =========================================================
+# RESET ARTIFACTS
+# =========================================================
 
+def reset_shared_artifacts() -> None:
     folders_to_clean = [
         ARTIFACT_ROOT / "jobs",
         ARTIFACT_ROOT / "models",
@@ -812,6 +879,7 @@ def reset_shared_artifacts() -> None:
 
         folder.mkdir(parents=True, exist_ok=True)
 
+
 def reset_shared_artifacts_launcher():
     print()
     print("===================================")
@@ -820,9 +888,7 @@ def reset_shared_artifacts_launcher():
     print("1 -> ELIMINATE ARTIFACTS")
     print("2 -> GO BACK TO MENU")
 
-    choice = input(
-        "\nSelect option: "
-    ).strip()
+    choice = input("\nSelect option: ").strip()
 
     if choice == "1":
         reset_shared_artifacts()
@@ -830,14 +896,18 @@ def reset_shared_artifacts_launcher():
     elif choice == "2":
         return
 
+    else:
+        print()
+        print("[ERROR] Invalid option")
+        print()
+
+
 # =========================================================
 # MAIN MENU
 # =========================================================
 
 def main():
-
     while True:
-
         print()
         print("===================================")
         print("TRAINING DEBUG CLI")
@@ -852,55 +922,40 @@ def main():
         print("7 -> Eliminate shared artifacts")
         print("0 -> Exit")
 
-        choice = input(
-            "\nSelect option: "
-        ).strip()
+        choice = input("\nSelect option: ").strip()
 
         if choice == "1":
-
             submit_training_launcher()
 
         elif choice == "2":
-
             see_job_status_launcher()
 
         elif choice == "3":
-
             see_experiments_launcher()
 
         elif choice == "4":
-
             count_saved_trees_launcher()
 
         elif choice == "5":
-
             see_validation_metrics_launcher()
 
-
         elif choice == "6":
-
             submit_inference_launcher()
 
-
         elif choice == "7":
-
             reset_shared_artifacts_launcher()
 
         elif choice == "0":
-
             print()
             print("Closing CLI...")
             print()
-
             break
 
         else:
-
             print()
             print("[ERROR] Invalid option")
             print()
 
 
 if __name__ == "__main__":
-
     main()

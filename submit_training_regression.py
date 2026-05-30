@@ -43,3 +43,4 @@ def main(PrivateIp_Port : str, dataset_path :Path, n_estimators_total : int):
     print("job_id:", response.job_id)
     print("status:", response.status)
     print("message:", response.message)
+    return response
