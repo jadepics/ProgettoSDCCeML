@@ -115,6 +115,14 @@ class RecoveryPlanner:
         zombie_worker_ids = set(self._zombie_worker_ids(now_ts=effective_now))
         problematic_worker_ids  = stale_worker_ids | zombie_worker_ids
 
+        print(
+            "[RecoveryPlanner] worker health: "
+            f"stale={sorted(stale_worker_ids)} "
+            f"zombie={sorted(zombie_worker_ids)} "
+            f"problematic={sorted(problematic_worker_ids)}",
+            flush=True,
+        )
+
         running_owner_by_tree = self._running_owner_by_tree(
             job_id=job_id,
             experiment_id=experiment_id,

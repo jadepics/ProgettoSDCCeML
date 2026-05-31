@@ -146,7 +146,26 @@ class WorkerRegistry:
             worker.liveness_status = WorkerLivenessStatus.DEAD
             worker.quarantined_at = now_ts()
             worker.quarantine_reason = reason
+
+            print(
+                "[WorkerRegistry] quarantined "
+                f"worker={worker_id} "
+                f"reason={reason}",
+                flush=True,
+            )
+
             return True
+
+    def quarantined_workers(self) -> list[WorkerInfo]:
+        with self._lock:
+            return [
+                worker
+                for worker in self._workers.values()
+                if worker.liveness_status == WorkerLivenessStatus.DEAD
+            ]
+
+    def quarantined_worker_ids(self) -> list[str]:
+        return [worker.worker_id for worker in self.quarantined_workers()]
 
     def alive_workers(self) -> list[WorkerInfo]:
         cutoff = now_ts() - HEARTBEAT_TIMEOUT_SECONDS
@@ -224,6 +243,11 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         self.worker_heartbeat_monitor = WorkerHeartbeatMonitor(
             worker_registry=self.registry,
             heartbeat_timeout_seconds=HEARTBEAT_TIMEOUT_SECONDS,
+
+            ###########################################################################
+            #introdotto temporaneamente per rendere il timeout per gli zombie più breve
+            ###########################################################################
+            task_progress_timeout_seconds=20,
         )
 
         # data prep
@@ -374,6 +398,14 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             )
 
             if snapshot is not None and snapshot.is_zombie:
+                print(
+                    "[MasterCoordinator] zombie worker detected: "
+                    f"worker_id={snapshot.worker_id} "
+                    f"running_tasks={snapshot.running_tasks} "
+                    f"last_progress_age_seconds={snapshot.last_progress_age_seconds:.1f} "
+                    f"age_seconds={snapshot.age_seconds:.1f}",
+                    flush=True,
+                )
                 self.registry.quarantine(
                     request.worker_id,
                     reason=(
@@ -381,7 +413,6 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                         f"last_progress_age_seconds={snapshot.last_progress_age_seconds:.1f}"
                     ),
                 )
-
         return rf_pb2.HeartbeatResponse(ok=ok)
 
 # --------------------------------------------------------------
