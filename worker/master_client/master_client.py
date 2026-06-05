@@ -205,6 +205,13 @@ class MasterClient:
             worker_id=worker_id,
             running_tasks=running_tasks,
             active_task_ids=list(active_task_ids),
+            active_tasks=[
+                rf_pb2.ActiveTaskHeartbeat(
+                    task_id=str(item["task_id"]),
+                    last_progress_ts=float(item["last_progress_ts"]),
+                )
+                for item in active_tasks
+            ],
         )
 
         last_error = None
