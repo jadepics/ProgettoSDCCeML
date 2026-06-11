@@ -108,12 +108,26 @@ class TrainingJobService:
 
         job_record = self._load_job_or_raise(job_id)
 
-        if self._job_status_is(job_record.status, JobStatus.COMPLETED) and job_record.model_id:
+        allowed_statuses = {
+            JobStatus.PENDING,
+            JobStatus.RUNNING,
+            JobStatus.VALIDATING,
+            JobStatus.FAILED,
+        }
+
+        status = self._status_value(job_record.status)
+
+        if self._job_status_is(status, JobStatus.COMPLETED) and job_record.model_id:
             print(
                 f"[TrainingJobService] Job {job_id} already completed "
                 f"with model_id={job_record.model_id}"
             )
             return
+
+        if status not in allowed_statuses:
+            raise RuntimeError(
+                f"Job '{job_id}' cannot be resumed from status '{status}'"
+            )
 
         self.job_repository.mark_running(
             job_id=job_id,

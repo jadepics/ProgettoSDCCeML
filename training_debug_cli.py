@@ -190,6 +190,38 @@ def submit_inference_with_leader_discovery(
 
     return None
 
+def resume_training_launcher():
+    print()
+    print("===================================")
+    print("RESUME TRAINING JOB")
+    print("===================================")
+
+    job_id = input("\nInsert job_id: ").strip()
+
+    if not job_id:
+        print()
+        print("[ERROR] job_id cannot be empty")
+        print()
+        return
+
+    response = resume_training_with_leader_discovery(job_id)
+
+    if response is None:
+        return
+
+    print()
+    print("job_id:")
+    print(response.job_id)
+
+    print()
+    print("status:")
+    print(response.status)
+
+    print()
+    print("message:")
+    print(response.message)
+
+    print()
 
 # =========================================================
 # INPUT HELPERS
@@ -358,6 +390,60 @@ def submit_training_launcher():
         print("[ERROR] Invalid option")
         print()
 
+def resume_training_with_leader_discovery(job_id: str):
+    last_error = None
+
+    request = rf_pb2.ResumeTrainingRequest(
+        job_id=job_id,
+    )
+
+    for master_address in load_master_addresses():
+        try:
+            print()
+            print(f"[CLIENT] Trying ResumeTraining on master {master_address}")
+
+            with grpc.insecure_channel(
+                master_address,
+                options=GRPC_OPTIONS,
+            ) as channel:
+                stub = rf_pb2_grpc.CoordinatorServiceStub(channel)
+
+                response = stub.ResumeTraining(
+                    request,
+                    timeout=30,
+                )
+
+            message = getattr(response, "message", "")
+
+            if response.status == rf_pb2.RUNNING:
+                print(f"[CLIENT] Resume accepted by leader {master_address}")
+                return response
+
+            if response.status == rf_pb2.COMPLETED:
+                print(f"[CLIENT] Job already completed on leader {master_address}")
+                return response
+
+            if is_not_leader_message(message):
+                print(
+                    f"[CLIENT] Master {master_address} is not leader. "
+                    "Trying next candidate..."
+                )
+                last_error = RuntimeError(message)
+                continue
+
+            return response
+
+        except Exception as exc:
+            last_error = exc
+            print(f"[CLIENT] ResumeTraining failed on {master_address}: {exc}")
+            continue
+
+    print()
+    print("[ERROR] No master leader accepted ResumeTraining")
+    print(last_error)
+    print()
+
+    return None
 
 # =========================================================
 # JOB STATUS
@@ -940,7 +1026,8 @@ def main():
         print("4 -> Count saved trees")
         print("5 -> See validation metrics")
         print("6 -> Submit inference")
-        print("7 -> Eliminate shared artifacts")
+        print("7 -> Resume training job")
+        print("8 -> Eliminate shared artifacts")
         print("0 -> Exit")
 
         choice = input("\nSelect option: ").strip()
@@ -964,6 +1051,9 @@ def main():
             submit_inference_launcher()
 
         elif choice == "7":
+            resume_training_launcher()
+
+        elif choice == "8":
             reset_shared_artifacts_launcher()
 
         elif choice == "0":

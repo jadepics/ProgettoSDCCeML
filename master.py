@@ -467,6 +467,73 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             status=rf_pb2.PENDING,
             message="Training started",
         )
+
+    def ResumeTraining(self, request, context):
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            return rf_pb2.ResumeTrainingResponse(
+                job_id=getattr(request, "job_id", ""),
+                status=rf_pb2.FAILED,
+                message=f"Not leader: {exc}",
+            )
+
+        job_id = request.job_id.strip()
+
+        if not job_id:
+            return rf_pb2.ResumeTrainingResponse(
+                job_id="",
+                status=rf_pb2.FAILED,
+                message="job_id must be non-empty",
+            )
+
+        job_record = self.job_repository.load(job_id)
+
+        if job_record is None:
+            return rf_pb2.ResumeTrainingResponse(
+                job_id=job_id,
+                status=rf_pb2.FAILED,
+                message=f"Job '{job_id}' not found",
+            )
+
+        if self._status_value(job_record.status) == "COMPLETED":
+            return rf_pb2.ResumeTrainingResponse(
+                job_id=job_id,
+                status=rf_pb2.COMPLETED,
+                message=(
+                    f"Job '{job_id}' is already completed "
+                    f"with model_id={job_record.model_id}"
+                ),
+            )
+
+        alive_workers = self.registry.alive_workers()
+
+        if not alive_workers:
+            return rf_pb2.ResumeTrainingResponse(
+                job_id=job_id,
+                status=rf_pb2.FAILED,
+                message="No alive workers available for resume",
+            )
+
+        try:
+            self.training_job_service.resume_training_job(
+                job_id=job_id,
+                async_run=True,
+            )
+
+            return rf_pb2.ResumeTrainingResponse(
+                job_id=job_id,
+                status=rf_pb2.RUNNING,
+                message="Training resume started",
+            )
+
+        except Exception as exc:
+            return rf_pb2.ResumeTrainingResponse(
+                job_id=job_id,
+                status=rf_pb2.FAILED,
+                message=str(exc),
+            )
+
     def SubmitInference(self, request, context):
         try:
             self.leadership_guard.require_leader()

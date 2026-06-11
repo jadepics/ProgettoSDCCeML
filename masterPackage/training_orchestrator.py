@@ -138,6 +138,15 @@ class TrainingOrchestrator:
 
             completed_count = len(completed_tree_ids)
 
+            print(
+                "[TrainingOrchestrator] resume/recovery state:",
+                f"job_id={job_id}",
+                f"experiment_id={experiment_id}",
+                f"completed={completed_count}/{forest_config.n_estimators}",
+                f"missing={len(missing_tree_ids)}",
+                flush=True,
+            )
+
             experiment.completed_tree_count = completed_count
             experiment.status = ExperimentStatus.RUNNING
             self.job_repository.save_experiment(job_id, experiment)
@@ -811,11 +820,12 @@ class TrainingOrchestrator:
             job_id=job_id,
             experiment_id=experiment_id,
         )
+
     def _durable_completed_tree_ids(
-        self,
-        job_id: str,
-        experiment_id: str,
-        forest_config: ForestConfiguration,
+            self,
+            job_id: str,
+            experiment_id: str,
+            forest_config: ForestConfiguration,
     ) -> list[str]:
         """
         Ritorna gli alberi completati guardando sia TaskLedger sia artifact
@@ -826,27 +836,67 @@ class TrainingOrchestrator:
         abbia aggiornato il TaskLedger.
         """
 
-        completed = set(
-            self.task_ledger.completed_tree_ids(
+        expected_tree_ids = self._expected_tree_ids(
+            experiment_id=experiment_id,
+            forest_config=forest_config,
+        )
+
+        expected_set = set(expected_tree_ids)
+
+        completed = {
+            tree_id
+            for tree_id in self.task_ledger.completed_tree_ids(
                 job_id=job_id,
                 experiment_id=experiment_id,
             )
-        )
+            if tree_id in expected_set
+        }
 
-        for tree_id in self._expected_tree_ids(
-            experiment_id=experiment_id,
-            forest_config=forest_config,
-        ):
+        for tree_id in expected_tree_ids:
             metadata = self._load_tree_metadata(
                 job_id=job_id,
                 experiment_id=experiment_id,
                 tree_id=tree_id,
             )
 
-            if metadata is not None and metadata.status == TreeStatus.COMPLETED:
-                completed.add(tree_id)
+            if metadata is None:
+                continue
 
-        return sorted(completed)
+            if metadata.status != TreeStatus.COMPLETED:
+                continue
+
+            if not self._tree_artifact_exists(
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    tree_index=metadata.tree_index,
+            ):
+                continue
+
+            completed.add(tree_id)
+
+        return [
+            tree_id
+            for tree_id in expected_tree_ids
+            if tree_id in completed
+        ]
+
+    def _tree_artifact_exists(
+            self,
+            job_id: str,
+            experiment_id: str,
+            tree_index: int,
+    ) -> bool:
+        artifact_path = (
+                self.task_ledger.artifact_store.layout.root
+                / "jobs"
+                / job_id
+                / "experiments"
+                / experiment_id
+                / "trees"
+                / f"tree_{tree_index}.joblib"
+        )
+
+        return self.task_ledger.artifact_store.exists(artifact_path)
 
     def _missing_tree_ids(
             self,

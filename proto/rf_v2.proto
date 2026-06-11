@@ -70,6 +70,17 @@ message SubmitTrainingResponse {
   JobStatus status = 2;
   string message = 3;
 }
+
+message ResumeTrainingRequest {
+  string job_id = 1;
+}
+
+message ResumeTrainingResponse {
+  string job_id = 1;
+  JobStatus status = 2;
+  string message = 3;
+}
+
 message SubmitInferenceRequest {
   string model_id = 1;
   DenseMatrix features = 2;
@@ -156,6 +167,7 @@ service CoordinatorService {
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc SubmitTraining(SubmitTrainingRequest) returns (SubmitTrainingResponse);
+  rpc ResumeTraining(ResumeTrainingRequest) returns (ResumeTrainingResponse);
   rpc SubmitInference(SubmitInferenceRequest) returns (SubmitInferenceResponse);
 }
 

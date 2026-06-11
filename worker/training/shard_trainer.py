@@ -191,6 +191,10 @@ class ShardTrainer:
                 """
                 i: int
                 """
+                indices = None
+                X_sample = None
+                y_sample = None
+                tree = None
 
                 try:
 
@@ -339,7 +343,10 @@ class ShardTrainer:
                         print(f"[ShardTrainer] Tree {tree_id} failed: {exc}", flush=True)
                 finally:
                     # libera subito la memoria temporanea del singolo albero
-                    del indices, X_sample, y_sample, tree
+                    del indices
+                    del X_sample
+                    del y_sample
+                    del tree
                     gc.collect()
 
 
