@@ -95,6 +95,25 @@ message SubmitInferenceResponse {
   repeated double predicted_values = 5;
 }
 
+
+message DownloadModelRequest {
+  string model_id = 1;
+  string format = 2;        // pickle | pkl | joblib
+  bool include_bytes = 3;   // false -> ritorna solo artifact_uri; true -> ritorna anche payload
+  bool overwrite = 4;       // rigenera il pacchetto anche se esiste gia'
+}
+
+message DownloadModelResponse {
+  bool success = 1;
+  string error = 2;
+  string model_id = 3;
+  string format = 4;
+  string artifact_uri = 5;
+  string filename = 6;
+  int64 size_bytes = 7;
+  bytes payload = 8;
+}
+
 message TrainedTreeArtifact {
   string tree_id = 1;
   string experiment_id = 2;
@@ -169,6 +188,7 @@ service CoordinatorService {
   rpc SubmitTraining(SubmitTrainingRequest) returns (SubmitTrainingResponse);
   rpc ResumeTraining(ResumeTrainingRequest) returns (ResumeTrainingResponse);
   rpc SubmitInference(SubmitInferenceRequest) returns (SubmitInferenceResponse);
+  rpc DownloadModel(DownloadModelRequest) returns (DownloadModelResponse);
 }
 
 service WorkerService {

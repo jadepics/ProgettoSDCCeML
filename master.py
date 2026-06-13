@@ -13,7 +13,6 @@ import numpy as np
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
 
-
 from masterPackage.test_evaluator import TestEvaluator
 from masterPackage.data.data_preparation_service import DataPreparationService
 from masterPackage.data.dataset_loader import DatasetLoader
@@ -28,6 +27,7 @@ from masterPackage.fault_tolerance import (
 )
 from masterPackage.inference_coordinator import InferenceCoordinator
 from masterPackage.model_manifest_builder import ModelManifestBuilder
+from masterPackage.model_export_service import ModelExportService
 from masterPackage.model_selector import ModelSelector
 from masterPackage.retry_policy import RetryPolicy
 from masterPackage.shard_planner import ShardPlanner
@@ -49,9 +49,9 @@ from common.repositories import (
 from common.storage_layout import StorageLayout
 from common.enums import WorkerLivenessStatus
 
-#Valore precedente ai test: HEARTBEAT_TIMEOUT_SECONDS = 15.0
+# Valore precedente ai test: HEARTBEAT_TIMEOUT_SECONDS = 15.0
 HEARTBEAT_TIMEOUT_SECONDS = 6.0
-#Valore precedente ai test: DEFAULT_RPC_TIMEOUT_SECONDS = 600.0
+# Valore precedente ai test: DEFAULT_RPC_TIMEOUT_SECONDS = 600.0
 DEFAULT_RPC_TIMEOUT_SECONDS = 60.0
 GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
 
@@ -68,6 +68,8 @@ SUPPORTED_DATASET_SCENARIOS = {
     "clinical_only",
     "glucose_only",
 }
+
+
 # ============================================================
 # Utility
 # ============================================================
@@ -118,11 +120,11 @@ class WorkerRegistry:
             self._workers[worker_id] = WorkerInfo(worker_id, host, port)
 
     def heartbeat(
-        self,
-        worker_id: str,
-        running_tasks: int,
-        active_task_ids: Optional[list[str]] = None,
-        active_task_last_progress_ts: Optional[dict[str, float]] = None,
+            self,
+            worker_id: str,
+            running_tasks: int,
+            active_task_ids: Optional[list[str]] = None,
+            active_task_last_progress_ts: Optional[dict[str, float]] = None,
     ) -> bool:
         with self._lock:
             worker = self._workers.get(worker_id)
@@ -180,8 +182,8 @@ class WorkerRegistry:
             ]
 
     def get_retry_candidate(
-        self,
-        exclude_worker_id: str | None = None,
+            self,
+            exclude_worker_id: str | None = None,
     ) -> Optional[WorkerInfo]:
         candidates = [
             worker
@@ -195,6 +197,7 @@ class WorkerRegistry:
     def list_workers(self) -> list[WorkerInfo]:
         with self._lock:
             return list(self._workers.values())
+
 
 # ============================================================
 # Master coordinator
@@ -247,7 +250,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             heartbeat_timeout_seconds=HEARTBEAT_TIMEOUT_SECONDS,
 
             ###########################################################################
-            #introdotto temporaneamente per rendere il timeout per gli zombie più breve
+            # introdotto temporaneamente per rendere il timeout per gli zombie più breve
             ###########################################################################
             task_progress_timeout_seconds=8,
         )
@@ -263,17 +266,19 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         self.experiment_planner = ExperimentPlanner()
         self.model_selector = ModelSelector(selection_metric="auto")
         self.model_manifest_builder = ModelManifestBuilder()
+        self.model_export_service = ModelExportService(
+            model_repository=self.model_repository,
+            artifact_store=self.store,
+        )
         self.shard_planner = ShardPlanner(
             self.layout,
             max_running_tasks_per_worker=2,
         )
-        
+
         self.worker_client = WorkerClient(
             timeout_train_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,
             timeout_predict_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,
         )
-
-
 
         self.inference_coordinator = InferenceCoordinator(
             leadership_guard=self.leadership_guard,
@@ -314,11 +319,11 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             ),
             task_lease_manager=TaskLeaseManager(
                 task_ledger=self.task_ledger,
-                #lease_timeout_seconds=600.0,
+                # lease_timeout_seconds=600.0,
                 lease_timeout_seconds=20.0,
             ),
             worker_heartbeat_monitor=self.worker_heartbeat_monitor,
-        recovery_planner=self.recovery_planner)
+            recovery_planner=self.recovery_planner)
         self.training_job_service = TrainingJobService(
             leadership_guard=self.leadership_guard,
             job_repository=self.job_repository,
@@ -332,6 +337,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             test_evaluator=self.test_evaluator,
         )
         self._start_recovery_on_startup_if_enabled()
+
     # --------------------------------------------------------
     # RPC: worker lifecycle
     # --------------------------------------------------------
@@ -377,11 +383,10 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         if not self.consensus.is_leader():
             return rf_pb2.HeartbeatResponse(ok=False)
 
-
         active_task_progress = {
-        item.task_id: float(item.last_progress_ts)
-        for item in getattr(request, "active_tasks", [])
-    }
+            item.task_id: float(item.last_progress_ts)
+            for item in getattr(request, "active_tasks", [])
+        }
 
         ok = self.registry.heartbeat(
             worker_id=request.worker_id,
@@ -418,9 +423,9 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 )
         return rf_pb2.HeartbeatResponse(ok=ok)
 
-# --------------------------------------------------------------
-#               consenso
-# ----------------------------------------------------------
+    # --------------------------------------------------------------
+    #               consenso
+    # ----------------------------------------------------------
     def _build_consensus_service(self):
         backend = os.getenv("CONSENSUS_BACKEND", "memory").strip().lower()
 
@@ -569,9 +574,64 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 
         except Exception as exc:
             return self._failed_submit_inference_response(str(exc))
+
+    def DownloadModel(self, request, context):
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            return self._failed_download_model_response(f"Not leader: {exc}")
+
+        model_id = request.model_id.strip()
+        if not model_id:
+            return self._failed_download_model_response("model_id must be non-empty")
+
+        export_format = request.format.strip().lower() or "pickle"
+
+        try:
+            result = self.model_export_service.export_model(
+                model_id=model_id,
+                export_format=export_format,
+                overwrite=bool(getattr(request, "overwrite", False)),
+            )
+
+            payload = b""
+            if getattr(request, "include_bytes", False):
+                if result.size_bytes > GRPC_MAX_MESSAGE_LENGTH:
+                    return self._failed_download_model_response(
+                        "Export package is too large for unary gRPC payload. "
+                        f"Use artifact_uri instead: {result.artifact_uri}"
+                    )
+                payload = result.file_path.read_bytes()
+
+            return rf_pb2.DownloadModelResponse(
+                success=True,
+                error="",
+                model_id=result.model_id,
+                format=result.export_format,
+                artifact_uri=result.artifact_uri,
+                filename=result.filename,
+                size_bytes=result.size_bytes,
+                payload=payload,
+            )
+
+        except Exception as exc:
+            return self._failed_download_model_response(str(exc))
+
     # --------------------------------------------------------
     # Helpers
     # --------------------------------------------------------
+
+    def _failed_download_model_response(self, message: str) -> rf_pb2.DownloadModelResponse:
+        return rf_pb2.DownloadModelResponse(
+            success=False,
+            error=message,
+            model_id="",
+            format="",
+            artifact_uri="",
+            filename="",
+            size_bytes=0,
+            payload=b"",
+        )
 
     def _failed_submit_training_response(self, message: str) -> rf_pb2.SubmitTrainingResponse:
         return rf_pb2.SubmitTrainingResponse(
@@ -752,6 +812,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     def _generate_job_id(self) -> str:
         from common.ids import generate_job_id
         return generate_job_id()
+
     # --------------------------------------------------------
     # Startup recovery
     # --------------------------------------------------------
@@ -844,6 +905,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                 )
 
             time.sleep(poll_seconds)
+
     def _wait_for_at_least_one_worker(self) -> None:
         timeout_seconds = float(
             os.getenv("RECOVERY_WAIT_WORKERS_TIMEOUT_SECONDS", "60")
@@ -880,6 +942,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             "Recovery will still be attempted.",
             flush=True,
         )
+
     def _list_recoverable_jobs(self):
         jobs = self._list_all_jobs_from_repository()
 
@@ -925,14 +988,15 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             return str(status.value)
         return str(status)
 
+
 # ============================================================
 # Server bootstrap
 # ============================================================
 
 def serve(
-    host: str = "0.0.0.0",
-    port: int = 50051,
-    artifact_root: str = "/mnt/efs/gp_artifacts",
+        host: str = "0.0.0.0",
+        port: int = 50051,
+        artifact_root: str = "/mnt/efs/gp_artifacts",
 ):
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=32),
@@ -952,6 +1016,6 @@ if __name__ == "__main__":
     serve(
         host=os.getenv("MASTER_HOST", "0.0.0.0"),
         port=int(os.getenv("MASTER_PORT", "50051")),
-        #modificato questo codice da os.getenv("ARTIFACT_ROOT", "/mnt/efs/gp_artifacts") per salvare direttamente nel path condiviso di efs
-        artifact_root=os.getenv("ARTIFACT_ROOT","/mnt/efs/gp_artifacts")
+        # modificato questo codice da os.getenv("ARTIFACT_ROOT", "/mnt/efs/gp_artifacts") per salvare direttamente nel path condiviso di efs
+        artifact_root=os.getenv("ARTIFACT_ROOT", "/mnt/efs/gp_artifacts")
     )

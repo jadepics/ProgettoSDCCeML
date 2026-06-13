@@ -190,6 +190,54 @@ def submit_inference_with_leader_discovery(
 
     return None
 
+
+def download_model_with_leader_discovery(
+    request: rf_pb2.DownloadModelRequest,
+) -> Optional[rf_pb2.DownloadModelResponse]:
+    last_error = None
+
+    for master_address in load_master_addresses():
+        try:
+            print()
+            print(f"[CLIENT] Trying DownloadModel on master {master_address}")
+
+            with grpc.insecure_channel(
+                master_address,
+                options=GRPC_OPTIONS,
+            ) as channel:
+                stub = rf_pb2_grpc.CoordinatorServiceStub(channel)
+
+                response = stub.DownloadModel(
+                    request,
+                    timeout=120,
+                )
+
+            if response.success:
+                print(f"[CLIENT] DownloadModel accepted by leader {master_address}")
+                return response
+
+            if is_not_leader_message(response.error):
+                print(
+                    f"[CLIENT] Master {master_address} is not leader. "
+                    "Trying next candidate..."
+                )
+                last_error = RuntimeError(response.error)
+                continue
+
+            return response
+
+        except Exception as exc:
+            last_error = exc
+            print(f"[CLIENT] DownloadModel failed on {master_address}: {exc}")
+            continue
+
+    print()
+    print("[ERROR] No master leader accepted DownloadModel")
+    print(last_error)
+    print()
+
+    return None
+
 def resume_training_launcher():
     print()
     print("===================================")
@@ -970,6 +1018,98 @@ def submit_inference_launcher():
     )
 
 
+
+# =========================================================
+# DOWNLOAD MODEL
+# =========================================================
+
+def download_model_launcher():
+    print()
+    print("===================================")
+    print("DOWNLOAD TRAINED MODEL")
+    print("===================================")
+
+    model_id = input("\nInsert model_id: ").strip()
+    if not model_id:
+        print()
+        print("[ERROR] model_id cannot be empty")
+        print()
+        return
+
+    print()
+    print("CHOOSE FORMAT")
+    print("1 -> Pickle/Joblib bundle")
+    print("2 -> GO BACK")
+
+    choice = input("\nSelect option: ").strip()
+    if choice == "1":
+        export_format = "pickle"
+    elif choice == "2":
+        return
+    else:
+        print()
+        print("[ERROR] Invalid option")
+        print()
+        return
+
+    output_dir_raw = input("\nOutput folder [./downloaded_models]: ").strip()
+    output_dir = Path(output_dir_raw or "downloaded_models").resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    include_bytes = input("\nDownload bytes through gRPC? [y/N]: ").strip().lower() in {"y", "yes"}
+    overwrite = input("\nRegenerate export if already exists? [y/N]: ").strip().lower() in {"y", "yes"}
+
+    request = rf_pb2.DownloadModelRequest(
+        model_id=model_id,
+        format=export_format,
+        include_bytes=include_bytes,
+        overwrite=overwrite,
+    )
+
+    response = download_model_with_leader_discovery(request)
+    if response is None:
+        return
+
+    if not response.success:
+        print()
+        print("[ERROR] DownloadModel failed")
+        print(response.error)
+        print()
+        return
+
+    print()
+    print("artifact_uri:")
+    print(response.artifact_uri)
+
+    print()
+    print("size_bytes:")
+    print(response.size_bytes)
+
+    destination = output_dir / response.filename
+
+    if response.payload:
+        destination.write_bytes(response.payload)
+        print()
+        print("downloaded_file:")
+        print(destination)
+        print()
+        return
+
+    source_path = path_from_file_uri(response.artifact_uri)
+    if source_path.exists():
+        shutil.copy2(source_path, destination)
+        print()
+        print("downloaded_file:")
+        print(destination)
+        print()
+        return
+
+    print()
+    print("[INFO] Export created but not copied locally.")
+    print("The returned artifact_uri is not accessible from this client filesystem.")
+    print("Use scp/rsync from the machine that can access the shared storage.")
+    print()
+
 # =========================================================
 # RESET ARTIFACTS
 # =========================================================
@@ -1027,7 +1167,8 @@ def main():
         print("5 -> See validation metrics")
         print("6 -> Submit inference")
         print("7 -> Resume training job")
-        print("8 -> Eliminate shared artifacts")
+        print("8 -> Download trained model")
+        print("9 -> Eliminate shared artifacts")
         print("0 -> Exit")
 
         choice = input("\nSelect option: ").strip()
@@ -1054,6 +1195,9 @@ def main():
             resume_training_launcher()
 
         elif choice == "8":
+            download_model_launcher()
+
+        elif choice == "9":
             reset_shared_artifacts_launcher()
 
         elif choice == "0":
