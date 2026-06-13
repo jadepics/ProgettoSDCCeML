@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import inspect
+import os
 import threading
 import time
+from contextlib import nullcontext
+from pathlib import Path
 from typing import Optional
 
 from common.contracts import (
@@ -12,6 +16,7 @@ from common.contracts import (
     TreeArtifactMetadata,
 )
 from common.enums import ExperimentStatus, JobStatus
+from masterPackage.Metrics import Scalability_Metrics_Collector
 
 
 class TrainingJobService:
@@ -21,6 +26,7 @@ class TrainingJobService:
     - persistire lo stato del job tramite JobRepository
     - orchestrare data preparation, planning, training, validation,
       model selection e manifest build
+    - raccogliere metriche di scalabilità tramite Scalability_Metrics_Collector
     - NON fare lavoro RPC diretto
     - NON sostituire TrainingOrchestrator / ValidationCoordinator
     """
@@ -36,7 +42,8 @@ class TrainingJobService:
         validation_coordinator,
         model_selector,
         model_manifest_builder,
-        test_evaluator = None,
+        test_evaluator=None,
+        scalability_baseline_time_seconds: Optional[float] = None,
     ) -> None:
         self.leadership_guard = leadership_guard
         self.job_repository = job_repository
@@ -47,7 +54,8 @@ class TrainingJobService:
         self.validation_coordinator = validation_coordinator
         self.model_selector = model_selector
         self.model_manifest_builder = model_manifest_builder
-        self.test_evaluator=test_evaluator
+        self.test_evaluator = test_evaluator
+        self.scalability_baseline_time_seconds = scalability_baseline_time_seconds
 
     # --------------------------------------------------------
     # public API
@@ -81,7 +89,6 @@ class TrainingJobService:
 
         return job_id
 
-
     def resume_training_job(
         self,
         job_id: str,
@@ -109,10 +116,10 @@ class TrainingJobService:
         job_record = self._load_job_or_raise(job_id)
 
         allowed_statuses = {
-            JobStatus.PENDING,
-            JobStatus.RUNNING,
-            JobStatus.VALIDATING,
-            JobStatus.FAILED,
+            self._status_value(JobStatus.PENDING),
+            self._status_value(JobStatus.RUNNING),
+            self._status_value(JobStatus.VALIDATING),
+            self._status_value(JobStatus.FAILED),
         }
 
         status = self._status_value(job_record.status)
@@ -144,16 +151,19 @@ class TrainingJobService:
             return
 
         self._run_training_job(job_id, True)
+
     # --------------------------------------------------------
     # internal workflow
     # --------------------------------------------------------
 
     def _run_training_job(
-            self,
-            job_id: str,
-            resume: bool = False,
+        self,
+        job_id: str,
+        resume: bool = False,
     ) -> None:
         current_experiment_id: Optional[str] = None
+        metrics_collector: Optional[Scalability_Metrics_Collector] = None
+        training_request: Optional[TrainingRequest] = None
 
         try:
             self.leadership_guard.require_leader()
@@ -161,20 +171,62 @@ class TrainingJobService:
             job_record = self._load_job_or_raise(job_id)
             training_request = job_record.training_request
 
-            prepared_dataset = self._load_or_prepare_dataset(
-                job_id=job_id,
-                training_request=training_request,
+            metrics_collector = self._build_scalability_metrics_collector(job_id)
+
+            self._metrics_event(
+                metrics_collector,
+                "job_started",
                 resume=resume,
+                task_type=training_request.task_type,
+                n_estimators_total=training_request.n_estimators_total,
+                validation_ratio=training_request.validation_ratio,
+                test_ratio=training_request.test_ratio,
+                global_random_seed=training_request.global_random_seed,
             )
 
-            experiments = self._load_or_plan_experiments(
-                job_id=job_id,
-                training_request=training_request,
+            with self._metrics_timer(
+                metrics_collector,
+                "data_preparation",
                 resume=resume,
+            ):
+                prepared_dataset = self._load_or_prepare_dataset(
+                    job_id=job_id,
+                    training_request=training_request,
+                    resume=resume,
+                )
+
+            self._metrics_event(
+                metrics_collector,
+                "dataset_ready",
+                resume=resume,
+                n_train=getattr(prepared_dataset, "n_train", None),
+                n_validation=getattr(prepared_dataset, "n_validation", None),
+                n_test=getattr(prepared_dataset, "n_test", None),
+                n_features=getattr(prepared_dataset, "n_features", None),
             )
+
+            with self._metrics_timer(
+                metrics_collector,
+                "experiment_planning",
+                resume=resume,
+            ):
+                experiments = self._load_or_plan_experiments(
+                    job_id=job_id,
+                    training_request=training_request,
+                    resume=resume,
+                )
 
             if not experiments:
                 raise RuntimeError("No experiments available for training")
+
+            self._metrics_event(
+                metrics_collector,
+                "experiments_ready",
+                experiment_count=len(experiments),
+                experiment_ids=[
+                    experiment.experiment_id for experiment in experiments
+                ],
+            )
 
             artifacts_by_experiment_id: dict[str, list[TreeArtifactMetadata]] = {}
 
@@ -195,14 +247,40 @@ class TrainingJobService:
                     ),
                 )
 
-                tree_artifacts = self.training_orchestrator.run_experiment(
-                    job_id=job_id,
+                worker_count = self._safe_worker_count()
+
+                self._metrics_event(
+                    metrics_collector,
+                    "experiment_started",
                     experiment_id=experiment.experiment_id,
-                    forest_config=experiment.forest_config,
+                    n_estimators=experiment.forest_config.n_estimators,
+                    worker_count=worker_count,
                 )
+
+                with self._metrics_timer(
+                    metrics_collector,
+                    "training",
+                    experiment_id=experiment.experiment_id,
+                    n_estimators=experiment.forest_config.n_estimators,
+                    worker_count=worker_count,
+                ):
+                    tree_artifacts = self._run_experiment_with_optional_metrics(
+                        job_id=job_id,
+                        experiment_id=experiment.experiment_id,
+                        forest_config=experiment.forest_config,
+                        metrics_collector=metrics_collector,
+                    )
 
                 tree_artifacts = list(tree_artifacts)
                 artifacts_by_experiment_id[experiment.experiment_id] = tree_artifacts
+
+                self._metrics_event(
+                    metrics_collector,
+                    "experiment_training_completed",
+                    experiment_id=experiment.experiment_id,
+                    completed_tree_count=len(tree_artifacts),
+                    expected_tree_count=experiment.forest_config.n_estimators,
+                )
 
                 if len(tree_artifacts) != experiment.forest_config.n_estimators:
                     raise RuntimeError(
@@ -217,14 +295,43 @@ class TrainingJobService:
                 ) or experiment
 
                 if refreshed_experiment.validation_metrics is None:
-                    validation_result = self._validate_experiment(
+                    self.job_repository.mark_running(
                         job_id=job_id,
-                        experiment=experiment,
-                        tree_artifacts=tree_artifacts,
+                        message=f"Validating experiment {experiment.experiment_id}",
                     )
+
+                    with self._metrics_timer(
+                        metrics_collector,
+                        "validation",
+                        experiment_id=experiment.experiment_id,
+                        validation_rows=getattr(prepared_dataset, "n_validation", None),
+                    ):
+                        validation_result = self._validate_experiment(
+                            job_id=job_id,
+                            experiment=experiment,
+                            tree_artifacts=tree_artifacts,
+                        )
+
                     validation_metrics = validation_result.metrics
+
+                    self._metrics_event(
+                        metrics_collector,
+                        "experiment_validation_completed",
+                        experiment_id=experiment.experiment_id,
+                        validation_metrics=(
+                            validation_metrics.to_dict()
+                            if hasattr(validation_metrics, "to_dict")
+                            else validation_metrics
+                        ),
+                    )
                 else:
                     validation_metrics = refreshed_experiment.validation_metrics
+
+                    self._metrics_event(
+                        metrics_collector,
+                        "experiment_validation_reused",
+                        experiment_id=experiment.experiment_id,
+                    )
 
                 self.job_repository.update_experiment_status(
                     job_id=job_id,
@@ -232,6 +339,13 @@ class TrainingJobService:
                     status=ExperimentStatus.COMPLETED,
                     completed_tree_count=len(tree_artifacts),
                     validation_metrics=validation_metrics,
+                )
+
+                self._metrics_event(
+                    metrics_collector,
+                    "experiment_completed",
+                    experiment_id=experiment.experiment_id,
+                    completed_tree_count=len(tree_artifacts),
                 )
 
             completed_experiments = self.job_repository.list_experiments(job_id)
@@ -243,15 +357,27 @@ class TrainingJobService:
                     experiment.status,
                     ExperimentStatus.COMPLETED,
                 )
-                   and experiment.validation_metrics is not None
+                and experiment.validation_metrics is not None
             ]
 
             if not completed_experiments:
                 raise RuntimeError("No completed experiments with validation metrics found")
 
-            winning_experiment = self._select_best_experiment(completed_experiments)
+            with self._metrics_timer(
+                metrics_collector,
+                "model_selection",
+                completed_experiment_count=len(completed_experiments),
+            ):
+                winning_experiment = self._select_best_experiment(completed_experiments)
+
             if winning_experiment is None:
                 raise RuntimeError("ModelSelector did not return a winning experiment")
+
+            self._metrics_event(
+                metrics_collector,
+                "winning_experiment_selected",
+                experiment_id=winning_experiment.experiment_id,
+            )
 
             self.job_repository.set_selected_experiment(
                 job_id=job_id,
@@ -264,13 +390,25 @@ class TrainingJobService:
             )
 
             if not selected_tree_artifacts:
-                selected_tree_artifacts = list(
-                    self.training_orchestrator.run_experiment(
-                        job_id=job_id,
-                        experiment_id=winning_experiment.experiment_id,
-                        forest_config=winning_experiment.forest_config,
-                    )
+                self._metrics_event(
+                    metrics_collector,
+                    "selected_experiment_artifacts_reloaded",
+                    experiment_id=winning_experiment.experiment_id,
                 )
+
+                with self._metrics_timer(
+                    metrics_collector,
+                    "selected_experiment_recovery",
+                    experiment_id=winning_experiment.experiment_id,
+                ):
+                    selected_tree_artifacts = list(
+                        self._run_experiment_with_optional_metrics(
+                            job_id=job_id,
+                            experiment_id=winning_experiment.experiment_id,
+                            forest_config=winning_experiment.forest_config,
+                            metrics_collector=metrics_collector,
+                        )
+                    )
 
             if len(selected_tree_artifacts) != winning_experiment.forest_config.n_estimators:
                 raise RuntimeError(
@@ -283,16 +421,27 @@ class TrainingJobService:
             if current_job.prepared_dataset is None:
                 raise RuntimeError(f"Job '{job_id}' has no prepared dataset")
 
-            manifest = self._build_model_manifest(
-                job_record=current_job,
-                experiment_record=winning_experiment,
-                tree_artifacts=selected_tree_artifacts,
-            )
+            with self._metrics_timer(
+                metrics_collector,
+                "manifest_build",
+                experiment_id=winning_experiment.experiment_id,
+                tree_count=len(selected_tree_artifacts),
+            ):
+                manifest = self._build_model_manifest(
+                    job_record=current_job,
+                    experiment_record=winning_experiment,
+                    tree_artifacts=selected_tree_artifacts,
+                )
 
-            self.model_repository.save(manifest)
+            with self._metrics_timer(
+                metrics_collector,
+                "model_publish",
+                model_id=manifest.model_id,
+            ):
+                self.model_repository.save(manifest)
 
-            if hasattr(self.model_repository, "mark_ready"):
-                self.model_repository.mark_ready(manifest.model_id)
+                if hasattr(self.model_repository, "mark_ready"):
+                    self.model_repository.mark_ready(manifest.model_id)
 
             self.job_repository.mark_completed(
                 job_id=job_id,
@@ -305,12 +454,40 @@ class TrainingJobService:
                 ),
             )
 
+            self._metrics_event(
+                metrics_collector,
+                "job_completed",
+                model_id=manifest.model_id,
+                selected_experiment_id=winning_experiment.experiment_id,
+            )
+
+            self._write_scalability_summary(
+                metrics_collector=metrics_collector,
+                worker_count=self._safe_worker_count(),
+                n_estimators_total=training_request.n_estimators_total,
+            )
+
         except Exception as exc:
+            self._metrics_event(
+                metrics_collector,
+                "job_failed",
+                error_message=str(exc),
+                experiment_id=current_experiment_id,
+            )
+
+            if training_request is not None:
+                self._write_scalability_summary(
+                    metrics_collector=metrics_collector,
+                    worker_count=self._safe_worker_count(),
+                    n_estimators_total=training_request.n_estimators_total,
+                )
+
             self._mark_job_failed(
                 job_id=job_id,
                 error_message=str(exc),
                 experiment_id=current_experiment_id,
             )
+
     def _load_or_prepare_dataset(
         self,
         job_id: str,
@@ -399,6 +576,205 @@ class TrainingJobService:
         if hasattr(status, "value"):
             return str(status.value)
         return str(status)
+
+    # --------------------------------------------------------
+    # scalability metrics helpers
+    # --------------------------------------------------------
+
+    def _build_scalability_metrics_collector(
+        self,
+        job_id: str,
+    ) -> Scalability_Metrics_Collector:
+        artifact_root = self._resolve_artifact_root()
+        baseline_time_seconds = self._resolve_scalability_baseline_time_seconds()
+
+        metrics_dir = (
+            artifact_root
+            / "jobs"
+            / job_id
+            / "metrics"
+        )
+
+        return Scalability_Metrics_Collector(
+            job_id=job_id,
+            metrics_dir=metrics_dir,
+            baseline_time_seconds=baseline_time_seconds,
+        )
+
+    def _resolve_artifact_root(self) -> Path:
+        candidate_paths = [
+            "training_orchestrator.task_ledger.artifact_store.layout.root",
+            "training_orchestrator.artifact_store.layout.root",
+            "job_repository.artifact_store.layout.root",
+            "model_repository.artifact_store.layout.root",
+        ]
+
+        for candidate_path in candidate_paths:
+            value = self._deep_getattr(self, candidate_path)
+            if value is not None:
+                return Path(value)
+
+        env_value = os.getenv("SHARED_STORAGE_ROOT")
+        if env_value:
+            return Path(env_value)
+
+        default_efs_root = Path("/mnt/efs/gp_artifacts")
+        if default_efs_root.exists():
+            return default_efs_root
+
+        return Path("gp_artifacts")
+
+    def _resolve_scalability_baseline_time_seconds(self) -> Optional[float]:
+        if self.scalability_baseline_time_seconds is not None:
+            return self.scalability_baseline_time_seconds
+
+        env_value = os.getenv("SCALABILITY_BASELINE_SECONDS")
+        if not env_value:
+            return None
+
+        try:
+            return float(env_value)
+        except ValueError:
+            return None
+
+    def _deep_getattr(
+        self,
+        root_object,
+        dotted_path: str,
+    ):
+        current = root_object
+
+        for part in dotted_path.split("."):
+            if not hasattr(current, part):
+                return None
+            current = getattr(current, part)
+
+        return current
+
+    def _metrics_timer(
+        self,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+        name: str,
+        **payload,
+    ):
+        if metrics_collector is None:
+            return nullcontext()
+
+        return metrics_collector.timer(
+            name,
+            **payload,
+        )
+
+    def _metrics_event(
+        self,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+        event: str,
+        **payload,
+    ) -> None:
+        if metrics_collector is None:
+            return
+
+        try:
+            metrics_collector.record_event(
+                event,
+                **payload,
+            )
+        except Exception as exc:
+            print(
+                "[TrainingJobService] Failed to record scalability event "
+                f"'{event}': {exc}"
+            )
+
+    def _write_scalability_summary(
+        self,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+        worker_count: int,
+        n_estimators_total: int,
+    ) -> None:
+        if metrics_collector is None:
+            return
+
+        try:
+            metrics_collector.write_summary(
+                worker_count=worker_count,
+                n_estimators_total=n_estimators_total,
+            )
+        except Exception as exc:
+            print(
+                "[TrainingJobService] Failed to write scalability summary: "
+                f"{exc}"
+            )
+
+    def _run_experiment_with_optional_metrics(
+        self,
+        job_id: str,
+        experiment_id: str,
+        forest_config: ForestConfiguration,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+    ):
+        run_experiment = self.training_orchestrator.run_experiment
+
+        kwargs = {
+            "job_id": job_id,
+            "experiment_id": experiment_id,
+            "forest_config": forest_config,
+        }
+
+        if self._method_accepts_parameter(
+            run_experiment,
+            "metrics_collector",
+        ):
+            kwargs["metrics_collector"] = metrics_collector
+
+        return run_experiment(**kwargs)
+
+    def _method_accepts_parameter(
+        self,
+        method,
+        parameter_name: str,
+    ) -> bool:
+        try:
+            return parameter_name in inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+
+    def _safe_worker_count(self) -> int:
+        worker_registry = getattr(
+            self.training_orchestrator,
+            "worker_registry",
+            None,
+        )
+
+        if worker_registry is None:
+            worker_registry = getattr(
+                self.training_orchestrator,
+                "_worker_registry",
+                None,
+            )
+
+        if worker_registry is None:
+            return 0
+
+        for attribute_name in (
+            "alive_workers",
+            "get_alive_workers",
+            "list_alive_workers",
+            "available_workers",
+            "workers",
+        ):
+            attribute = getattr(worker_registry, attribute_name, None)
+
+            if attribute is None:
+                continue
+
+            try:
+                workers = attribute() if callable(attribute) else attribute
+                return len(workers)
+            except Exception:
+                continue
+
+        return 0
+
     # --------------------------------------------------------
     # planning helpers
     # --------------------------------------------------------
@@ -505,10 +881,10 @@ class TrainingJobService:
     # --------------------------------------------------------
 
     def _build_model_manifest(
-            self,
-            job_record: TrainingJobRecord,
-            experiment_record: ExperimentRecord,
-            tree_artifacts: list[TreeArtifactMetadata],
+        self,
+        job_record: TrainingJobRecord,
+        experiment_record: ExperimentRecord,
+        tree_artifacts: list[TreeArtifactMetadata],
     ):
         from common.enums import ModelStatus
         from common.ids import generate_model_id
@@ -560,7 +936,7 @@ class TrainingJobService:
         self,
         job_id: str,
         error_message: str,
-            experiment_id: Optional[str] = None,
+        experiment_id: Optional[str] = None,
     ) -> None:
         try:
             if experiment_id is not None:

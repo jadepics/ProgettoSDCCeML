@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from typing import Optional, Protocol
 
 from common.contracts import (
@@ -15,6 +16,7 @@ from common.contracts import (
 )
 from common.enums import ExperimentStatus, JobStatus, TaskStatus, TreeStatus
 from common.ids import generate_tree_id
+from masterPackage.Metrics import Scalability_Metrics_Collector
 from masterPackage.retry_policy import RetryPolicy
 from masterPackage.task_lease_manager import TaskLeaseManager
 
@@ -37,7 +39,7 @@ class WorkerRegistryLike(Protocol):
         exclude_worker_id: str | None = None,
     ) -> Optional[WorkerLike]:
         ...
-#todo verifica che questi puntini abbiano senso
+
 
 class TrainingOrchestrator:
     def __init__(
@@ -79,10 +81,24 @@ class TrainingOrchestrator:
         job_id: str,
         experiment_id: str,
         forest_config: ForestConfiguration,
+        metrics_collector: Optional[Scalability_Metrics_Collector] = None,
     ) -> list[TreeArtifactMetadata]:
         self.leadership_guard.require_leader()
 
+        experiment_started_at = time.time()
+
+        self._metrics_event(
+            metrics_collector,
+            "orchestrator_experiment_started",
+            job_id=job_id,
+            experiment_id=experiment_id,
+            n_estimators=forest_config.n_estimators,
+            max_parallel_shards=self.max_parallel_shards,
+            lease_timeout_seconds=self.lease_timeout_seconds,
+        )
+
         job_record = self.job_repository.load(job_id)
+
         if job_record is None:
             raise ValueError(f"Job '{job_id}' not found")
 
@@ -112,7 +128,18 @@ class TrainingOrchestrator:
         last_completed_count = -1
 
         for recovery_round in range(1, max_recovery_rounds + 1):
+            round_started_at = time.time()
+
             self.leadership_guard.require_leader()
+
+            self._metrics_event(
+                metrics_collector,
+                "recovery_round_started",
+                job_id=job_id,
+                experiment_id=experiment_id,
+                recovery_round=recovery_round,
+                max_recovery_rounds=max_recovery_rounds,
+            )
 
             artifact_by_tree_id.update(
                 self._collect_persisted_completed_artifacts(
@@ -137,6 +164,17 @@ class TrainingOrchestrator:
             )
 
             completed_count = len(completed_tree_ids)
+
+            self._metrics_event(
+                metrics_collector,
+                "recovery_state_observed",
+                job_id=job_id,
+                experiment_id=experiment_id,
+                recovery_round=recovery_round,
+                completed_tree_count=completed_count,
+                missing_tree_count=len(missing_tree_ids),
+                expected_tree_count=forest_config.n_estimators,
+            )
 
             print(
                 "[TrainingOrchestrator] resume/recovery state:",
@@ -197,13 +235,46 @@ class TrainingOrchestrator:
                     ),
                 )
 
+                self._metrics_event(
+                    metrics_collector,
+                    "orchestrator_experiment_completed",
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    completed_tree_count=len(final_artifacts),
+                    expected_tree_count=forest_config.n_estimators,
+                    elapsed_time_seconds=time.time() - experiment_started_at,
+                )
+
                 return final_artifacts
 
             alive_workers = self._alive_workers_for_scheduling()
             self._log_alive_workers(alive_workers)
 
+            self._metrics_event(
+                metrics_collector,
+                "alive_workers_observed",
+                job_id=job_id,
+                experiment_id=experiment_id,
+                recovery_round=recovery_round,
+                worker_count=len(alive_workers),
+                workers=[
+                    self._format_worker(worker)
+                    for worker in alive_workers
+                ],
+            )
+
             if not alive_workers:
                 stale_ids = self._stale_worker_ids()
+
+                self._metrics_event(
+                    metrics_collector,
+                    "no_alive_workers",
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    recovery_round=recovery_round,
+                    stale_worker_ids=stale_ids,
+                )
+
                 if stale_ids:
                     raise RuntimeError(
                         f"No alive workers available during scheduling. "
@@ -244,10 +315,21 @@ class TrainingOrchestrator:
                     )
                 )
 
+                self._metrics_event(
+                    metrics_collector,
+                    "recovery_plan_created",
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    recovery_round=recovery_round,
+                    recover_now_tree_count=len(recovery_plan.recover_now_tree_ids),
+                    deferred_tree_count=len(recovery_plan.deferred_tree_ids),
+                    recovery_shard_count=len(recovery_plan.recovery_shards),
+                )
+
                 if (
-                        recovery_plan.deferred_tree_ids
-                        and not recovery_plan.recover_now_tree_ids
-                        and recovery_round < force_after_rounds
+                    recovery_plan.deferred_tree_ids
+                    and not recovery_plan.recover_now_tree_ids
+                    and recovery_round < force_after_rounds
                 ):
                     print(
                         "[TrainingOrchestrator] recovery deferred:",
@@ -257,13 +339,23 @@ class TrainingOrchestrator:
                         flush=True,
                     )
 
+                    self._metrics_event(
+                        metrics_collector,
+                        "recovery_deferred",
+                        job_id=job_id,
+                        experiment_id=experiment_id,
+                        recovery_round=recovery_round,
+                        deferred_tree_count=len(recovery_plan.deferred_tree_ids),
+                        sleep_seconds=deferred_sleep_seconds,
+                    )
+
                     time.sleep(deferred_sleep_seconds)
                     continue
 
                 if (
-                        recovery_plan.deferred_tree_ids
-                        and not recovery_plan.recover_now_tree_ids
-                        and recovery_round >= force_after_rounds
+                    recovery_plan.deferred_tree_ids
+                    and not recovery_plan.recover_now_tree_ids
+                    and recovery_round >= force_after_rounds
                 ):
                     print(
                         "[TrainingOrchestrator] forcing recovery of missing trees "
@@ -289,6 +381,16 @@ class TrainingOrchestrator:
                         flush=True,
                     )
 
+                    self._metrics_event(
+                        metrics_collector,
+                        "forced_missing_shard_plan_created",
+                        job_id=job_id,
+                        experiment_id=experiment_id,
+                        recovery_round=recovery_round,
+                        missing_tree_count=len(missing_tree_ids),
+                        planned_shard_count=len(shards),
+                    )
+
                 else:
                     missing_tree_ids = list(recovery_plan.recover_now_tree_ids)
                     shards = list(recovery_plan.recovery_shards)
@@ -298,6 +400,17 @@ class TrainingOrchestrator:
                         f"recover_now={len(recovery_plan.recover_now_tree_ids)}",
                         f"deferred={len(recovery_plan.deferred_tree_ids)}",
                         flush=True,
+                    )
+
+                    self._metrics_event(
+                        metrics_collector,
+                        "recovery_shards_selected",
+                        job_id=job_id,
+                        experiment_id=experiment_id,
+                        recovery_round=recovery_round,
+                        recover_now_tree_count=len(recovery_plan.recover_now_tree_ids),
+                        deferred_tree_count=len(recovery_plan.deferred_tree_ids),
+                        planned_shard_count=len(shards),
                     )
 
             else:
@@ -315,6 +428,18 @@ class TrainingOrchestrator:
                     f"is_initial_full_training_plan={is_initial_full_training_plan}",
                     flush=True,
                 )
+
+                self._metrics_event(
+                    metrics_collector,
+                    "initial_or_missing_shard_plan_created",
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    recovery_round=recovery_round,
+                    is_initial_full_training_plan=is_initial_full_training_plan,
+                    missing_tree_count=len(missing_tree_ids),
+                    planned_shard_count=len(shards),
+                )
+
             if not shards:
                 idle_rounds += 1
 
@@ -322,6 +447,17 @@ class TrainingOrchestrator:
                     "[TrainingOrchestrator] no shards planned:",
                     f"idle_rounds={idle_rounds}/{max_idle_rounds}",
                     flush=True,
+                )
+
+                self._metrics_event(
+                    metrics_collector,
+                    "no_shards_planned",
+                    job_id=job_id,
+                    experiment_id=experiment_id,
+                    recovery_round=recovery_round,
+                    idle_rounds=idle_rounds,
+                    max_idle_rounds=max_idle_rounds,
+                    missing_tree_count=len(missing_tree_ids),
                 )
 
                 if idle_rounds >= max_idle_rounds:
@@ -337,6 +473,27 @@ class TrainingOrchestrator:
 
             max_workers = self._effective_max_parallel_shards(
                 shard_count=len(shards),
+            )
+
+            self._record_training_plan(
+                metrics_collector=metrics_collector,
+                worker_count=len(alive_workers),
+                shard_count=len(shards),
+                n_estimators_total=forest_config.n_estimators,
+            )
+
+            self._metrics_event(
+                metrics_collector,
+                "training_round_scheduled",
+                job_id=job_id,
+                experiment_id=experiment_id,
+                recovery_round=recovery_round,
+                worker_count=len(alive_workers),
+                shard_count=len(shards),
+                missing_tree_count=len(missing_tree_ids),
+                expected_tree_count=forest_config.n_estimators,
+                max_parallel_shards=max_workers,
+                total_shard_tree_count=sum(shard.tree_count for shard in shards),
             )
 
             experiment.status = ExperimentStatus.RUNNING
@@ -379,10 +536,26 @@ class TrainingOrchestrator:
                         flush=True,
                     )
 
+                    self._metrics_event(
+                        metrics_collector,
+                        "shard_dispatched",
+                        job_id=job_id,
+                        experiment_id=experiment_id,
+                        recovery_round=recovery_round,
+                        task_id=shard.task_id,
+                        attempt_id=shard.attempt_id,
+                        worker_id=worker.worker_id,
+                        worker_host=worker.host,
+                        worker_port=worker.port,
+                        tree_start_index=shard.tree_start_index,
+                        tree_count=shard.tree_count,
+                    )
+
                     future = pool.submit(
                         self._execute_shard_with_retry,
                         worker,
                         shard,
+                        metrics_collector,
                     )
                     future_map[future] = shard
 
@@ -420,6 +593,18 @@ class TrainingOrchestrator:
                             job_id=initial_shard.job_id,
                             task_id=initial_shard.task_id,
                             attempt_id=initial_shard.attempt_id,
+                        )
+
+                        self._metrics_event(
+                            metrics_collector,
+                            "shard_executor_failure",
+                            job_id=job_id,
+                            experiment_id=experiment_id,
+                            task_id=initial_shard.task_id,
+                            attempt_id=initial_shard.attempt_id,
+                            worker_id=initial_shard.assigned_worker_id,
+                            tree_count=initial_shard.tree_count,
+                            error_message=error_message,
                         )
 
                         print(
@@ -468,6 +653,28 @@ class TrainingOrchestrator:
                             job_id=effective_shard.job_id,
                             task_id=effective_shard.task_id,
                             attempt_id=effective_shard.attempt_id,
+                        )
+
+                        self._record_shard_result(
+                            metrics_collector=metrics_collector,
+                            worker_id=final_result.worker_id,
+                            task_id=effective_shard.task_id,
+                            completed_tree_count=final_result.completed_tree_count,
+                            failed_tree_count=final_result.failed_tree_count,
+                            elapsed_time_seconds=final_result.elapsed_time_seconds,
+                        )
+
+                        self._metrics_event(
+                            metrics_collector,
+                            "shard_failed_permanently",
+                            job_id=job_id,
+                            experiment_id=experiment_id,
+                            task_id=effective_shard.task_id,
+                            attempt_id=effective_shard.attempt_id,
+                            worker_id=effective_shard.assigned_worker_id,
+                            completed_tree_count=final_result.completed_tree_count,
+                            failed_tree_count=final_result.failed_tree_count,
+                            error_message=final_result.error_message,
                         )
 
                         print(
@@ -523,6 +730,31 @@ class TrainingOrchestrator:
                     experiment.completed_tree_count = new_completed_count
                     self.job_repository.save_experiment(job_id, experiment)
 
+                    self._record_shard_result(
+                        metrics_collector=metrics_collector,
+                        worker_id=final_result.worker_id,
+                        task_id=effective_shard.task_id,
+                        completed_tree_count=final_result.completed_tree_count,
+                        failed_tree_count=final_result.failed_tree_count,
+                        elapsed_time_seconds=final_result.elapsed_time_seconds,
+                    )
+
+                    self._metrics_event(
+                        metrics_collector,
+                        "shard_completed",
+                        job_id=job_id,
+                        experiment_id=experiment_id,
+                        task_id=effective_shard.task_id,
+                        attempt_id=effective_shard.attempt_id,
+                        worker_id=effective_shard.assigned_worker_id,
+                        completed_tree_ids=completed_tree_ids_for_attempt,
+                        completed_tree_count=final_result.completed_tree_count,
+                        failed_tree_count=final_result.failed_tree_count,
+                        shard_elapsed_time_seconds=final_result.elapsed_time_seconds,
+                        durable_completed_tree_count=new_completed_count,
+                        expected_tree_count=forest_config.n_estimators,
+                    )
+
                     print(
                         "[TrainingOrchestrator] shard completed:",
                         f"task_id={effective_shard.task_id}",
@@ -565,6 +797,19 @@ class TrainingOrchestrator:
                 idle_rounds = 0
                 last_completed_count = durable_completed_count
 
+            self._metrics_event(
+                metrics_collector,
+                "recovery_round_completed",
+                job_id=job_id,
+                experiment_id=experiment_id,
+                recovery_round=recovery_round,
+                durable_completed_tree_count=durable_completed_count,
+                expected_tree_count=forest_config.n_estimators,
+                idle_rounds=idle_rounds,
+                had_failure=had_failure,
+                elapsed_time_seconds=time.time() - round_started_at,
+            )
+
             if had_failure and idle_rounds >= max_idle_rounds:
                 raise RuntimeError(
                     f"Training recovery made no progress for "
@@ -580,6 +825,17 @@ class TrainingOrchestrator:
             artifact_by_tree_id=artifact_by_tree_id,
         )
 
+        self._metrics_event(
+            metrics_collector,
+            "orchestrator_experiment_failed",
+            job_id=job_id,
+            experiment_id=experiment_id,
+            reason="max_recovery_rounds_exceeded",
+            final_artifact_count=len(final_artifacts),
+            expected_tree_count=forest_config.n_estimators,
+            elapsed_time_seconds=time.time() - experiment_started_at,
+        )
+
         raise RuntimeError(
             f"Training recovery exceeded max rounds "
             f"({max_recovery_rounds}). "
@@ -588,22 +844,25 @@ class TrainingOrchestrator:
         )
 
     def _is_current_attempt(
-            self,
-            shard: TrainingShard,
-            result: ShardTrainingResult,
+        self,
+        shard: TrainingShard,
+        result: ShardTrainingResult,
     ) -> bool:
         latest_attempt_id = self.task_ledger.latest_attempt_id(
             job_id=shard.job_id,
             task_id=shard.task_id,
         )
+
         if latest_attempt_id is None:
             return True
+
         return int(latest_attempt_id) == int(result.attempt_id)
 
     def _execute_shard_with_retry(
         self,
         worker: WorkerLike,
         shard: TrainingShard,
+        metrics_collector: Optional[Scalability_Metrics_Collector] = None,
     ) -> tuple[TrainingShard, ShardTrainingResult, list[ShardTrainingResult]]:
         observed_results: list[ShardTrainingResult] = []
 
@@ -611,6 +870,20 @@ class TrainingOrchestrator:
         current_shard = shard
 
         while True:
+            self._metrics_event(
+                metrics_collector,
+                "shard_attempt_started",
+                job_id=current_shard.job_id,
+                experiment_id=current_shard.experiment_id,
+                task_id=current_shard.task_id,
+                attempt_id=current_shard.attempt_id,
+                worker_id=current_worker.worker_id,
+                worker_host=current_worker.host,
+                worker_port=current_worker.port,
+                tree_start_index=current_shard.tree_start_index,
+                tree_count=current_shard.tree_count,
+            )
+
             print(
                 "[TrainingOrchestrator] starting attempt:",
                 f"task_id={current_shard.task_id}",
@@ -624,10 +897,9 @@ class TrainingOrchestrator:
             current_shard, result = self._dispatch_attempt(
                 worker=current_worker,
                 shard=current_shard,
+                metrics_collector=metrics_collector,
             )
 
-            # se è arrivato un risultato non allineato all'attempt corrente,
-            # lo ignoro e continuo a seguire lo stato persistito
             if not self._is_current_attempt(current_shard, result):
                 print(
                     "[TrainingOrchestrator] stale attempt ignored:",
@@ -635,7 +907,20 @@ class TrainingOrchestrator:
                     f"attempt_id={result.attempt_id}",
                     flush=True,
                 )
+
+                self._metrics_event(
+                    metrics_collector,
+                    "stale_attempt_ignored",
+                    job_id=current_shard.job_id,
+                    experiment_id=current_shard.experiment_id,
+                    task_id=current_shard.task_id,
+                    shard_attempt_id=current_shard.attempt_id,
+                    result_attempt_id=result.attempt_id,
+                    worker_id=result.worker_id,
+                )
+
                 observed_results.append(result)
+
                 return current_shard, result, observed_results
 
             observed_results.append(result)
@@ -651,6 +936,19 @@ class TrainingOrchestrator:
                     flush=True,
                 )
 
+                self._metrics_event(
+                    metrics_collector,
+                    "shard_attempt_succeeded",
+                    job_id=current_shard.job_id,
+                    experiment_id=current_shard.experiment_id,
+                    task_id=current_shard.task_id,
+                    attempt_id=current_shard.attempt_id,
+                    worker_id=current_worker.worker_id,
+                    completed_tree_count=result.completed_tree_count,
+                    failed_tree_count=result.failed_tree_count,
+                    elapsed_time_seconds=result.elapsed_time_seconds,
+                )
+
                 return current_shard, result, observed_results
 
             print(
@@ -662,6 +960,20 @@ class TrainingOrchestrator:
                 f"failed={result.failed_tree_count}",
                 f"error={result.error_message}",
                 flush=True,
+            )
+
+            self._metrics_event(
+                metrics_collector,
+                "shard_attempt_failed",
+                job_id=current_shard.job_id,
+                experiment_id=current_shard.experiment_id,
+                task_id=current_shard.task_id,
+                attempt_id=current_shard.attempt_id,
+                worker_id=current_worker.worker_id,
+                completed_tree_count=result.completed_tree_count,
+                failed_tree_count=result.failed_tree_count,
+                elapsed_time_seconds=result.elapsed_time_seconds,
+                error_message=result.error_message,
             )
 
             self.task_ledger.mark_partial_failure(
@@ -685,6 +997,17 @@ class TrainingOrchestrator:
             )
 
             if not should_retry:
+                self._metrics_event(
+                    metrics_collector,
+                    "shard_retry_not_allowed",
+                    job_id=current_shard.job_id,
+                    experiment_id=current_shard.experiment_id,
+                    task_id=current_shard.task_id,
+                    attempt_id=current_shard.attempt_id,
+                    worker_id=current_worker.worker_id,
+                    error_message=result.error_message,
+                )
+
                 return current_shard, result, observed_results
 
             retry_worker = self.worker_registry.get_retry_candidate(
@@ -698,10 +1021,40 @@ class TrainingOrchestrator:
                     f"attempt_id={current_shard.attempt_id}",
                     flush=True,
                 )
+
+                self._metrics_event(
+                    metrics_collector,
+                    "shard_retry_skipped_no_candidate",
+                    job_id=current_shard.job_id,
+                    experiment_id=current_shard.experiment_id,
+                    task_id=current_shard.task_id,
+                    attempt_id=current_shard.attempt_id,
+                    previous_worker_id=current_worker.worker_id,
+                )
+
                 return current_shard, result, observed_results
 
             backoff_seconds = self.retry_policy.backoff_seconds_for(
                 attempt_id=current_shard.attempt_id,
+            )
+
+            self._record_retry(
+                metrics_collector=metrics_collector,
+                task_id=current_shard.task_id,
+                worker_id=current_worker.worker_id,
+                reason=result.error_message or "training shard failure",
+            )
+
+            self._metrics_event(
+                metrics_collector,
+                "shard_retry_scheduled",
+                job_id=current_shard.job_id,
+                experiment_id=current_shard.experiment_id,
+                task_id=current_shard.task_id,
+                failed_attempt_id=current_shard.attempt_id,
+                previous_worker_id=current_worker.worker_id,
+                retry_worker_id=retry_worker.worker_id,
+                backoff_seconds=backoff_seconds,
             )
 
             if backoff_seconds > 0:
@@ -711,6 +1064,7 @@ class TrainingOrchestrator:
                     f"seconds={backoff_seconds}",
                     flush=True,
                 )
+
                 time.sleep(backoff_seconds)
 
             current_shard = self._build_retry_shard(
@@ -723,8 +1077,20 @@ class TrainingOrchestrator:
         self,
         worker: WorkerLike,
         shard: TrainingShard,
+        metrics_collector: Optional[Scalability_Metrics_Collector] = None,
     ) -> tuple[TrainingShard, ShardTrainingResult]:
         leased_shard = self.task_lease_manager.acquire(shard)
+
+        self._metrics_event(
+            metrics_collector,
+            "task_lease_acquired",
+            job_id=leased_shard.job_id,
+            experiment_id=leased_shard.experiment_id,
+            task_id=leased_shard.task_id,
+            attempt_id=leased_shard.attempt_id,
+            worker_id=worker.worker_id,
+            lease_expires_at_ts=leased_shard.lease_expires_at_ts,
+        )
 
         self.task_ledger.save(
             self._build_task_record(
@@ -739,18 +1105,38 @@ class TrainingOrchestrator:
             job_id=leased_shard.job_id,
         )
 
+        self._metrics_event(
+            metrics_collector,
+            "task_marked_running",
+            job_id=leased_shard.job_id,
+            experiment_id=leased_shard.experiment_id,
+            task_id=leased_shard.task_id,
+            attempt_id=leased_shard.attempt_id,
+            worker_id=worker.worker_id,
+        )
+
+        rpc_started_at = time.time()
+
         try:
             result = self.worker_client.train_shard(
                 worker.host,
                 worker.port,
                 leased_shard,
             )
+            rpc_success = True
+            rpc_error_message = None
+
         except Exception as exc:
+            rpc_success = False
+            rpc_error_message = str(exc)
+
             result = self._build_failed_result(
                 shard=leased_shard,
                 worker_id=worker.worker_id,
                 error_message=str(exc),
             )
+
+        rpc_latency_seconds = time.time() - rpc_started_at
 
         normalized = self._normalize_result_identity(
             shard=leased_shard,
@@ -758,7 +1144,219 @@ class TrainingOrchestrator:
             result=result,
         )
 
+        self._record_train_rpc(
+            metrics_collector=metrics_collector,
+            worker_id=worker.worker_id,
+            task_id=leased_shard.task_id,
+            tree_count=leased_shard.tree_count,
+            latency_seconds=rpc_latency_seconds,
+            request_bytes=None,
+            response_bytes=None,
+            success=rpc_success and normalized.success,
+        )
+
+        self._metrics_event(
+            metrics_collector,
+            "train_rpc_completed",
+            job_id=leased_shard.job_id,
+            experiment_id=leased_shard.experiment_id,
+            task_id=leased_shard.task_id,
+            attempt_id=leased_shard.attempt_id,
+            worker_id=worker.worker_id,
+            worker_host=worker.host,
+            worker_port=worker.port,
+            tree_count=leased_shard.tree_count,
+            latency_seconds=rpc_latency_seconds,
+            rpc_success=rpc_success,
+            result_success=normalized.success,
+            completed_tree_count=normalized.completed_tree_count,
+            failed_tree_count=normalized.failed_tree_count,
+            error_message=rpc_error_message or normalized.error_message,
+        )
+
         return leased_shard, normalized
+
+    # --------------------------------------------------------
+    # scalability metrics helpers
+    # --------------------------------------------------------
+
+    def _metrics_event(
+        self,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+        event: str,
+        **payload,
+    ) -> None:
+        if metrics_collector is None:
+            return
+
+        try:
+            metrics_collector.record_event(event, **payload)
+        except Exception as exc:
+            print(
+                "[TrainingOrchestrator] Failed to record scalability event "
+                f"'{event}': {exc}",
+                flush=True,
+            )
+
+    def _metrics_timer(
+        self,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+        name: str,
+        **payload,
+    ):
+        if metrics_collector is None:
+            return nullcontext()
+
+        try:
+            return metrics_collector.timer(name, **payload)
+        except Exception:
+            return nullcontext()
+
+    def _record_training_plan(
+        self,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+        worker_count: int,
+        shard_count: int,
+        n_estimators_total: int,
+    ) -> None:
+        if metrics_collector is None:
+            return
+
+        try:
+            metrics_collector.record_training_plan(
+                worker_count=worker_count,
+                shard_count=shard_count,
+                n_estimators_total=n_estimators_total,
+            )
+        except AttributeError:
+            self._metrics_event(
+                metrics_collector,
+                "training_plan_created",
+                worker_count=worker_count,
+                shard_count=shard_count,
+                n_estimators_total=n_estimators_total,
+            )
+        except Exception as exc:
+            print(
+                "[TrainingOrchestrator] Failed to record training plan metrics: "
+                f"{exc}",
+                flush=True,
+            )
+
+    def _record_train_rpc(
+        self,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+        worker_id: str,
+        task_id: str,
+        tree_count: int,
+        latency_seconds: float,
+        request_bytes: Optional[int],
+        response_bytes: Optional[int],
+        success: bool,
+    ) -> None:
+        if metrics_collector is None:
+            return
+
+        try:
+            metrics_collector.record_train_rpc(
+                worker_id=worker_id,
+                task_id=task_id,
+                tree_count=tree_count,
+                latency_seconds=latency_seconds,
+                request_bytes=request_bytes,
+                response_bytes=response_bytes,
+                success=success,
+            )
+        except AttributeError:
+            self._metrics_event(
+                metrics_collector,
+                "train_rpc_completed",
+                worker_id=worker_id,
+                task_id=task_id,
+                tree_count=tree_count,
+                latency_seconds=latency_seconds,
+                request_bytes=request_bytes,
+                response_bytes=response_bytes,
+                success=success,
+            )
+        except Exception as exc:
+            print(
+                "[TrainingOrchestrator] Failed to record train RPC metrics: "
+                f"{exc}",
+                flush=True,
+            )
+
+    def _record_shard_result(
+        self,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+        worker_id: str,
+        task_id: str,
+        completed_tree_count: int,
+        failed_tree_count: int,
+        elapsed_time_seconds: float,
+    ) -> None:
+        if metrics_collector is None:
+            return
+
+        try:
+            metrics_collector.record_shard_result(
+                worker_id=worker_id,
+                task_id=task_id,
+                completed_tree_count=completed_tree_count,
+                failed_tree_count=failed_tree_count,
+                elapsed_time_seconds=elapsed_time_seconds,
+            )
+        except AttributeError:
+            self._metrics_event(
+                metrics_collector,
+                "shard_result_recorded",
+                worker_id=worker_id,
+                task_id=task_id,
+                completed_tree_count=completed_tree_count,
+                failed_tree_count=failed_tree_count,
+                elapsed_time_seconds=elapsed_time_seconds,
+            )
+        except Exception as exc:
+            print(
+                "[TrainingOrchestrator] Failed to record shard result metrics: "
+                f"{exc}",
+                flush=True,
+            )
+
+    def _record_retry(
+        self,
+        metrics_collector: Optional[Scalability_Metrics_Collector],
+        task_id: str,
+        worker_id: str,
+        reason: str,
+    ) -> None:
+        if metrics_collector is None:
+            return
+
+        try:
+            metrics_collector.record_retry(
+                task_id=task_id,
+                worker_id=worker_id,
+                reason=reason,
+            )
+        except AttributeError:
+            self._metrics_event(
+                metrics_collector,
+                "shard_retry",
+                task_id=task_id,
+                worker_id=worker_id,
+                reason=reason,
+            )
+        except Exception as exc:
+            print(
+                "[TrainingOrchestrator] Failed to record retry metrics: "
+                f"{exc}",
+                flush=True,
+            )
+
+    # --------------------------------------------------------
+    # existing orchestration helpers
+    # --------------------------------------------------------
 
     def _alive_workers_for_scheduling(self) -> list[WorkerLike]:
         if self.worker_heartbeat_monitor is None:
@@ -773,6 +1371,7 @@ class TrainingOrchestrator:
         result: list[WorkerLike] = []
         for snapshot in snapshots:
             worker = worker_by_id.get(snapshot.worker_id)
+
             if worker is not None:
                 result.append(worker)
 
@@ -809,6 +1408,7 @@ class TrainingOrchestrator:
         )
 
         self.job_repository.save_experiment(job_id, experiment)
+
         return experiment
 
     def _completed_tree_ids(
@@ -822,20 +1422,11 @@ class TrainingOrchestrator:
         )
 
     def _durable_completed_tree_ids(
-            self,
-            job_id: str,
-            experiment_id: str,
-            forest_config: ForestConfiguration,
+        self,
+        job_id: str,
+        experiment_id: str,
+        forest_config: ForestConfiguration,
     ) -> list[str]:
-        """
-        Ritorna gli alberi completati guardando sia TaskLedger sia artifact
-        persistiti su storage condiviso.
-
-        Questo è importante per recovery post-crash master:
-        un worker può avere scritto tree_N.json/tree_N.joblib prima che il master
-        abbia aggiornato il TaskLedger.
-        """
-
         expected_tree_ids = self._expected_tree_ids(
             experiment_id=experiment_id,
             forest_config=forest_config,
@@ -866,9 +1457,9 @@ class TrainingOrchestrator:
                 continue
 
             if not self._tree_artifact_exists(
-                    job_id=job_id,
-                    experiment_id=experiment_id,
-                    tree_index=metadata.tree_index,
+                job_id=job_id,
+                experiment_id=experiment_id,
+                tree_index=metadata.tree_index,
             ):
                 continue
 
@@ -881,28 +1472,28 @@ class TrainingOrchestrator:
         ]
 
     def _tree_artifact_exists(
-            self,
-            job_id: str,
-            experiment_id: str,
-            tree_index: int,
+        self,
+        job_id: str,
+        experiment_id: str,
+        tree_index: int,
     ) -> bool:
         artifact_path = (
-                self.task_ledger.artifact_store.layout.root
-                / "jobs"
-                / job_id
-                / "experiments"
-                / experiment_id
-                / "trees"
-                / f"tree_{tree_index}.joblib"
+            self.task_ledger.artifact_store.layout.root
+            / "jobs"
+            / job_id
+            / "experiments"
+            / experiment_id
+            / "trees"
+            / f"tree_{tree_index}.joblib"
         )
 
         return self.task_ledger.artifact_store.exists(artifact_path)
 
     def _missing_tree_ids(
-            self,
-            job_id: str,
-            experiment_id: str,
-            forest_config: ForestConfiguration,
+        self,
+        job_id: str,
+        experiment_id: str,
+        forest_config: ForestConfiguration,
     ) -> list[str]:
         expected_tree_ids = self._expected_tree_ids(
             experiment_id=experiment_id,
@@ -1103,16 +1694,16 @@ class TrainingOrchestrator:
                 artifact_by_tree_id[artifact.tree_id] = artifact
 
     def _collect_persisted_completed_artifacts(
-            self,
-            job_id: str,
-            experiment_id: str,
-            forest_config: ForestConfiguration,
+        self,
+        job_id: str,
+        experiment_id: str,
+        forest_config: ForestConfiguration,
     ) -> dict[str, TreeArtifactMetadata]:
         result: dict[str, TreeArtifactMetadata] = {}
 
         for tree_id in self._expected_tree_ids(
-                experiment_id=experiment_id,
-                forest_config=forest_config,
+            experiment_id=experiment_id,
+            forest_config=forest_config,
         ):
             metadata = self._load_tree_metadata(
                 job_id=job_id,
@@ -1150,6 +1741,7 @@ class TrainingOrchestrator:
                 final_artifacts.append(artifact)
 
         final_artifacts.sort(key=lambda item: item.tree_index)
+
         return final_artifacts
 
     def _load_tree_metadata(
@@ -1177,6 +1769,7 @@ class TrainingOrchestrator:
             return None
 
         payload = self.task_ledger.artifact_store.read_json(metadata_path)
+
         return TreeArtifactMetadata.from_dict(payload)
 
     def _tree_index_from_tree_id(
