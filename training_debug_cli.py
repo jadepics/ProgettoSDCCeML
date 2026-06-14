@@ -40,6 +40,53 @@ def load_env_file(path: Path) -> None:
 ARTIFACT_ROOT = Path("/mnt/efs/gp_artifacts").resolve()
 dataset_path = Path(ARTIFACT_ROOT / "datasets" / "diabetes_dataset.csv").resolve()
 
+DATASETS_ROOT = ARTIFACT_ROOT / "datasets"
+
+DISTRIBUTED_TRAINING_PRESETS = {
+    "real_classification": {
+        "label": "real diabetes classification",
+        "dataset_path": DATASETS_ROOT / "diabetes_dataset.csv",
+        "task_type": "classification",
+        "target_column": "diagnosed_diabetes",
+        "dataset_scenario": "baseline_no_leakage",
+        "leakage_columns": [
+            "diabetes_stage",
+            "diabetes_risk_score",
+        ],
+        "criterion": "gini",
+    },
+    "real_regression": {
+        "label": "real diabetes regression",
+        "dataset_path": DATASETS_ROOT / "diabetes_dataset.csv",
+        "task_type": "regression",
+        "target_column": "diabetes_risk_score",
+        "dataset_scenario": "baseline_no_leakage",
+        "leakage_columns": [
+            "diagnosed_diabetes",
+            "diabetes_stage",
+        ],
+        "criterion": "squared_error",
+    },
+    "synthetic_classification": {
+        "label": "synthetic classification 100000x40",
+        "dataset_path": DATASETS_ROOT / "synthetic_classification_100000_samples_40_features.csv",
+        "task_type": "classification",
+        "target_column": "target",
+        "dataset_scenario": "baseline_original",
+        "leakage_columns": [],
+        "criterion": "gini",
+    },
+    "synthetic_regression": {
+        "label": "synthetic regression 100000x40",
+        "dataset_path": DATASETS_ROOT / "synthetic_regression_100000_samples_40_features.csv",
+        "task_type": "regression",
+        "target_column": "target",
+        "dataset_scenario": "baseline_original",
+        "leakage_columns": [],
+        "criterion": "squared_error",
+    },
+}
+
 DEFAULT_MASTER_HOST = "172.31.37.47"
 DEFAULT_MASTER_PORT = "50051"
 
@@ -288,6 +335,83 @@ def _n_estimators_total() -> int:
     except Exception:
         return 0
 
+def choose_distributed_training_preset(task_type: str) -> Optional[dict[str, Any]]:
+    matching_presets = [
+        (key, config)
+        for key, config in DISTRIBUTED_TRAINING_PRESETS.items()
+        if config["task_type"] == task_type
+    ]
+
+    print()
+    print("CHOOSE DISTRIBUTED TRAINING DATASET")
+    print("=" * 80)
+
+    for index, (_, config) in enumerate(matching_presets, start=1):
+        print(f"{index} -> {config['label']}")
+
+    print(f"{len(matching_presets) + 1} -> CUSTOM")
+    print(f"{len(matching_presets) + 2} -> GO BACK")
+
+    choice = input("\nSelect option: ").strip()
+
+    try:
+        selected_index = int(choice)
+    except ValueError:
+        print()
+        print("[ERROR] Insert a valid number")
+        print()
+        return None
+
+    if 1 <= selected_index <= len(matching_presets):
+        return matching_presets[selected_index - 1][1]
+
+    if selected_index == len(matching_presets) + 1:
+        dataset_path_value = input(
+            "\nDataset path on EFS "
+            "[/mnt/efs/gp_artifacts/datasets/...]: "
+        ).strip()
+
+        target_column = input("Target column: ").strip()
+
+        dataset_scenario = input(
+            "Dataset scenario [baseline_original]: "
+        ).strip()
+
+        if not dataset_scenario:
+            dataset_scenario = "baseline_original"
+
+        leakage_columns_raw = input(
+            "Leakage/drop columns separated by comma [empty]: "
+        ).strip()
+
+        leakage_columns = [
+            item.strip()
+            for item in leakage_columns_raw.split(",")
+            if item.strip()
+        ]
+
+        if task_type == "classification":
+            criterion = "gini"
+        else:
+            criterion = "squared_error"
+
+        return {
+            "label": "custom",
+            "dataset_path": Path(dataset_path_value),
+            "task_type": task_type,
+            "target_column": target_column,
+            "dataset_scenario": dataset_scenario,
+            "leakage_columns": leakage_columns,
+            "criterion": criterion,
+        }
+
+    if selected_index == len(matching_presets) + 2:
+        return None
+
+    print()
+    print("[ERROR] Invalid option")
+    print()
+    return None
 
 def print_submit_training_response(
     response: Optional[rf_pb2.SubmitTrainingResponse],
@@ -315,22 +439,9 @@ def print_submit_training_response(
 # =========================================================
 
 def _submit_training_regression():
-    print("CHOOSE TRAINING TYPE")
-    print("1 -> PREDICT HBA1C")
-    print("2 -> EXIT")
+    preset = choose_distributed_training_preset("regression")
 
-    choice = input("\nSelect option: ").strip()
-
-    if choice == "1":
-        pass
-
-    elif choice == "2":
-        return
-
-    else:
-        print()
-        print("[ERROR] Invalid option")
-        print()
+    if preset is None:
         return
 
     n_estimators_total = _n_estimators_total()
@@ -341,59 +452,21 @@ def _submit_training_regression():
 
     response = submit_training_with_leader_discovery(
         submit_training_regression.main,
-        dataset_path,
+        preset["dataset_path"],
         n_estimators_total,
+        preset["dataset_scenario"],
+        preset["leakage_columns"],
+        preset["target_column"],
+        preset["criterion"],
     )
 
     print_submit_training_response(response)
 
 
 def _submit_training_classification():
-    print("CHOOSE TRAINING TYPE")
-    print("1 -> BASELINE ORIGINAL")
-    print("2 -> BASELINE NO LEAKAGE")
-    print("3 -> NO DIAGNOSTIC FEATURES")
-    print("4 -> NO DIAGNOSTIC EXTENDED")
-    print("5 -> CLINICAL ONLY")
-    print("6 -> GLUCOSE ONLY")
-    print("7 -> GO BACK")
+    preset = choose_distributed_training_preset("classification")
 
-    choice = input("\nSelect option: ").strip()
-
-    if choice == "1":
-        dataset_scenario = "baseline_original"
-        leakage_columns = []
-
-    elif choice == "2":
-        dataset_scenario = "baseline_no_leakage"
-        leakage_columns = [
-            "diabetes_stage",
-            "diabetes_risk_score",
-        ]
-
-    elif choice == "3":
-        dataset_scenario = "no_diagnostic_features"
-        leakage_columns = []
-
-    elif choice == "4":
-        dataset_scenario = "no_diagnostic_extended"
-        leakage_columns = []
-
-    elif choice == "5":
-        dataset_scenario = "clinical_only"
-        leakage_columns = []
-
-    elif choice == "6":
-        dataset_scenario = "glucose_only"
-        leakage_columns = []
-
-    elif choice == "7":
-        return
-
-    else:
-        print()
-        print("[ERROR] Invalid option")
-        print()
+    if preset is None:
         return
 
     n_estimators_total = _n_estimators_total()
@@ -404,14 +477,15 @@ def _submit_training_classification():
 
     response = submit_training_with_leader_discovery(
         submit_training_classification.main,
-        dataset_path,
+        preset["dataset_path"],
         n_estimators_total,
-        dataset_scenario,
-        leakage_columns,
+        preset["dataset_scenario"],
+        preset["leakage_columns"],
+        preset["target_column"],
+        preset["criterion"],
     )
 
     print_submit_training_response(response)
-
 
 def submit_training_launcher():
     print()

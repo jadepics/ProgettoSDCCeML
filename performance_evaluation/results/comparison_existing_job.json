@@ -1,0 +1,186 @@
+{
+  "comparison_type": "existing_distributed_job_vs_local_baseline",
+  "metric_name": "accuracy",
+  "compatibility_check": {
+    "same_task_type": true,
+    "same_target_column": true,
+    "same_dataset_scenario": true,
+    "same_n_estimators": true,
+    "same_max_depth": true,
+    "same_max_features": true
+  },
+  "local": {
+    "mode": "local_non_distributed",
+    "dataset_url": "Dataset/diabetes_dataset.csv",
+    "dataset_scenario": "baseline_no_leakage",
+    "target_column": "diagnosed_diabetes",
+    "task_type": "classification",
+    "n_estimators": 48,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "criterion": "gini",
+    "n_jobs": 1,
+    "n_train": 60000,
+    "n_validation": 20000,
+    "n_test": 20000,
+    "training_time_seconds": 3.610474899993278,
+    "validation_inference_time_seconds": 0.16507579991593957,
+    "test_inference_time_seconds": 0.17261240002699196,
+    "validation_metric": 0.916,
+    "test_metric": 0.91485,
+    "validation_metrics": {
+      "accuracy": 0.916,
+      "classification_report": {
+        "0": {
+          "precision": 0.826869376357431,
+          "recall": 0.9992500937382827,
+          "f1-score": 0.9049235993208828,
+          "support": 8001.0
+        },
+        "1": {
+          "precision": 0.9994192236956733,
+          "recall": 0.8604883740311693,
+          "f1-score": 0.9247648902821317,
+          "support": 11999.0
+        },
+        "accuracy": 0.916,
+        "macro avg": {
+          "precision": 0.9131443000265521,
+          "recall": 0.929869233884726,
+          "f1-score": 0.9148442448015073,
+          "support": 20000.0
+        },
+        "weighted avg": {
+          "precision": 0.9303906572680094,
+          "recall": 0.916,
+          "f1-score": 0.9168273818330841,
+          "support": 20000.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          7995,
+          6
+        ],
+        [
+          1674,
+          10325
+        ]
+      ],
+      "labels": [
+        0,
+        1
+      ]
+    },
+    "test_metrics": {
+      "accuracy": 0.91485,
+      "classification_report": {
+        "0": {
+          "precision": 0.8250232270052648,
+          "recall": 0.999,
+          "f1-score": 0.9037145926386612,
+          "support": 8000.0
+        },
+        "1": {
+          "precision": 0.9992242800349074,
+          "recall": 0.85875,
+          "f1-score": 0.923676780352261,
+          "support": 12000.0
+        },
+        "accuracy": 0.91485,
+        "macro avg": {
+          "precision": 0.9121237535200861,
+          "recall": 0.928875,
+          "f1-score": 0.9136956864954611,
+          "support": 20000.0
+        },
+        "weighted avg": {
+          "precision": 0.9295438588230504,
+          "recall": 0.91485,
+          "f1-score": 0.9156919052668211,
+          "support": 20000.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          7992,
+          8
+        ],
+        [
+          1695,
+          10305
+        ]
+      ],
+      "labels": [
+        0,
+        1
+      ]
+    }
+  },
+  "distributed": {
+    "mode": "distributed",
+    "job_id": "job_af645a3fd97b4a66b6bbc18c46eb74f6",
+    "job_status": "COMPLETED",
+    "experiment_id": "job_af645a3fd97b4a66b6bbc18c46eb74f6_exp_000",
+    "experiment_status": "COMPLETED",
+    "model_id": "model_ef5b3010ad724f1fb8c455f064c3a75a",
+    "dataset_uri": "/mnt/efs/gp_artifacts/datasets/diabetes_dataset.csv",
+    "dataset_scenario": "baseline_no_leakage",
+    "target_column": "diagnosed_diabetes",
+    "task_type": "classification",
+    "n_estimators": 48,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "criterion": "gini",
+    "worker_count": 6,
+    "assigned_workers": [
+      "worker1",
+      "worker2",
+      "worker3",
+      "worker4",
+      "worker5",
+      "worker6"
+    ],
+    "n_train": 60000,
+    "n_validation": 20000,
+    "n_test": 20000,
+    "training_wall_time_seconds": 66.41842699050903,
+    "validation_metric": 0.91075,
+    "validation_accuracy": 0.91075,
+    "validation_r2": null,
+    "validation_mae": null,
+    "validation_rmse": null,
+    "validation_confusion_matrix": [
+      [
+        7933,
+        68
+      ],
+      [
+        1717,
+        10282
+      ]
+    ],
+    "expected_tree_count": 48,
+    "completed_tree_count": 48,
+    "saved_tree_joblib_count": 48,
+    "tree_distribution_by_worker": {
+      "worker1": 3,
+      "worker2": 8,
+      "worker3": 8,
+      "worker4": 13,
+      "worker5": 8,
+      "worker6": 8
+    },
+    "tree_training_time_sum_seconds": 6.119168281555176,
+    "tree_training_time_avg_seconds": 0.1274826725323995,
+    "tree_training_time_max_seconds": 0.22651028633117676
+  },
+  "comparison": {
+    "local_validation_metric": 0.916,
+    "distributed_validation_metric": 0.91075,
+    "validation_metric_delta_distributed_minus_local": -0.005250000000000088,
+    "local_training_time_seconds": 3.610474899993278,
+    "distributed_training_wall_time_seconds": 66.41842699050903,
+    "training_time_ratio_local_over_distributed": 0.05435953640560025
+  }
+}
