@@ -16,7 +16,9 @@ from common.contracts import (
 )
 from common.enums import ExperimentStatus, JobStatus, TaskStatus, TreeStatus
 from common.ids import generate_tree_id
-from masterPackage.Metrics import Scalability_Metrics_Collector
+from masterPackage.Metrics.Scalability_Metrics_Collector import (
+    ScalabilityMetricsCollector,
+)
 from masterPackage.retry_policy import RetryPolicy
 from masterPackage.task_lease_manager import TaskLeaseManager
 
@@ -81,7 +83,7 @@ class TrainingOrchestrator:
         job_id: str,
         experiment_id: str,
         forest_config: ForestConfiguration,
-        metrics_collector: Optional[Scalability_Metrics_Collector] = None,
+        metrics_collector: Optional[ScalabilityMetricsCollector] = None,
     ) -> list[TreeArtifactMetadata]:
         self.leadership_guard.require_leader()
 
@@ -862,7 +864,7 @@ class TrainingOrchestrator:
         self,
         worker: WorkerLike,
         shard: TrainingShard,
-        metrics_collector: Optional[Scalability_Metrics_Collector] = None,
+        metrics_collector: Optional[ScalabilityMetricsCollector] = None,
     ) -> tuple[TrainingShard, ShardTrainingResult, list[ShardTrainingResult]]:
         observed_results: list[ShardTrainingResult] = []
 
@@ -1077,7 +1079,7 @@ class TrainingOrchestrator:
         self,
         worker: WorkerLike,
         shard: TrainingShard,
-        metrics_collector: Optional[Scalability_Metrics_Collector] = None,
+        metrics_collector: Optional[ScalabilityMetricsCollector] = None,
     ) -> tuple[TrainingShard, ShardTrainingResult]:
         leased_shard = self.task_lease_manager.acquire(shard)
 
@@ -1182,7 +1184,7 @@ class TrainingOrchestrator:
 
     def _metrics_event(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         event: str,
         **payload,
     ) -> None:
@@ -1200,7 +1202,7 @@ class TrainingOrchestrator:
 
     def _metrics_timer(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         name: str,
         **payload,
     ):
@@ -1214,7 +1216,7 @@ class TrainingOrchestrator:
 
     def _record_training_plan(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         worker_count: int,
         shard_count: int,
         n_estimators_total: int,
@@ -1245,7 +1247,7 @@ class TrainingOrchestrator:
 
     def _record_train_rpc(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         worker_id: str,
         task_id: str,
         tree_count: int,
@@ -1288,7 +1290,7 @@ class TrainingOrchestrator:
 
     def _record_shard_result(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         worker_id: str,
         task_id: str,
         completed_tree_count: int,
@@ -1325,7 +1327,7 @@ class TrainingOrchestrator:
 
     def _record_retry(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         task_id: str,
         worker_id: str,
         reason: str,

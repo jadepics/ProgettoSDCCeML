@@ -16,8 +16,9 @@ from common.contracts import (
     TreeArtifactMetadata,
 )
 from common.enums import ExperimentStatus, JobStatus
-from masterPackage.Metrics import Scalability_Metrics_Collector
-
+from masterPackage.Metrics.Scalability_Metrics_Collector import (
+    ScalabilityMetricsCollector,
+)
 
 class TrainingJobService:
     """
@@ -162,7 +163,7 @@ class TrainingJobService:
         resume: bool = False,
     ) -> None:
         current_experiment_id: Optional[str] = None
-        metrics_collector: Optional[Scalability_Metrics_Collector] = None
+        metrics_collector: Optional[ScalabilityMetricsCollector] = None
         training_request: Optional[TrainingRequest] = None
 
         try:
@@ -584,7 +585,7 @@ class TrainingJobService:
     def _build_scalability_metrics_collector(
         self,
         job_id: str,
-    ) -> Scalability_Metrics_Collector:
+    ) -> ScalabilityMetricsCollector:
         artifact_root = self._resolve_artifact_root()
         baseline_time_seconds = self._resolve_scalability_baseline_time_seconds()
 
@@ -595,7 +596,7 @@ class TrainingJobService:
             / "metrics"
         )
 
-        return Scalability_Metrics_Collector(
+        return ScalabilityMetricsCollector(
             job_id=job_id,
             metrics_dir=metrics_dir,
             baseline_time_seconds=baseline_time_seconds,
@@ -653,7 +654,7 @@ class TrainingJobService:
 
     def _metrics_timer(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         name: str,
         **payload,
     ):
@@ -667,7 +668,7 @@ class TrainingJobService:
 
     def _metrics_event(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         event: str,
         **payload,
     ) -> None:
@@ -687,7 +688,7 @@ class TrainingJobService:
 
     def _write_scalability_summary(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         worker_count: int,
         n_estimators_total: int,
     ) -> None:
@@ -710,7 +711,7 @@ class TrainingJobService:
         job_id: str,
         experiment_id: str,
         forest_config: ForestConfiguration,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
     ):
         run_experiment = self.training_orchestrator.run_experiment
 

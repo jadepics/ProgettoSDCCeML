@@ -16,8 +16,9 @@ from common.contracts import (
     TreeArtifactMetadata,
 )
 from common.enums import TreeStatus
-from masterPackage.Metrics import Scalability_Metrics_Collector
-
+from masterPackage.Metrics.Scalability_Metrics_Collector import (
+    ScalabilityMetricsCollector,
+)
 
 GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
 
@@ -62,7 +63,7 @@ class WorkerClient:
         worker_host: str,
         worker_port: int,
         shard: TrainingShard,
-        metrics_collector: Optional[Scalability_Metrics_Collector] = None,
+        metrics_collector: Optional[ScalabilityMetricsCollector] = None,
     ) -> ShardTrainingResult:
         request = self._build_train_shard_request(shard)
         request_bytes = self._safe_proto_size(request)
@@ -158,7 +159,7 @@ class WorkerClient:
         features: np.ndarray,
         tree_artifact_uris: Sequence[str],
         class_labels: Sequence[str] | None = None,
-        metrics_collector: Optional[Scalability_Metrics_Collector] = None,
+        metrics_collector: Optional[ScalabilityMetricsCollector] = None,
     ) -> PredictionShardResult:
         request = self._build_predict_shard_request(
             model_id=model_id,
@@ -414,7 +415,7 @@ class WorkerClient:
 
     def _metrics_event(
         self,
-        metrics_collector: Optional[Scalability_Metrics_Collector],
+        metrics_collector: Optional[ScalabilityMetricsCollector],
         event: str,
         **payload,
     ) -> None:
