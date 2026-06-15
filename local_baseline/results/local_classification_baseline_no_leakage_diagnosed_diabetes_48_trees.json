@@ -1,0 +1,201 @@
+{
+  "mode": "local_non_distributed",
+  "dataset_path_resolved": "C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\Dataset\\diabetes_dataset.csv",
+  "config": {
+    "dataset_url": "Dataset/diabetes_dataset.csv",
+    "target_column": "diagnosed_diabetes",
+    "task_type": "classification",
+    "dataset_scenario": "baseline_no_leakage",
+    "extra_drop_columns": [],
+    "n_estimators": 48,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "min_samples_split": 2,
+    "min_samples_leaf": 1,
+    "classification_criterion": "gini",
+    "regression_criterion": "squared_error",
+    "bootstrap": true,
+    "class_weight": null,
+    "validation_ratio": 0.2,
+    "test_ratio": 0.2,
+    "random_seed": 42,
+    "n_jobs": 1,
+    "output_json": "local_baseline\\results\\local_classification_baseline_no_leakage_diagnosed_diabetes_48_trees.json"
+  },
+  "n_samples_total": 100000,
+  "n_features_input": 28,
+  "feature_names_input": [
+    "age",
+    "gender",
+    "ethnicity",
+    "education_level",
+    "income_level",
+    "employment_status",
+    "smoking_status",
+    "alcohol_consumption_per_week",
+    "physical_activity_minutes_per_week",
+    "diet_score",
+    "sleep_hours_per_day",
+    "screen_time_hours_per_day",
+    "family_history_diabetes",
+    "hypertension_history",
+    "cardiovascular_history",
+    "bmi",
+    "waist_to_hip_ratio",
+    "systolic_bp",
+    "diastolic_bp",
+    "heart_rate",
+    "cholesterol_total",
+    "hdl_cholesterol",
+    "ldl_cholesterol",
+    "triglycerides",
+    "glucose_fasting",
+    "glucose_postprandial",
+    "insulin_level",
+    "hba1c"
+  ],
+  "n_features_after_preprocessing": 46,
+  "feature_names_after_preprocessing": [
+    "numeric__age",
+    "numeric__alcohol_consumption_per_week",
+    "numeric__physical_activity_minutes_per_week",
+    "numeric__diet_score",
+    "numeric__sleep_hours_per_day",
+    "numeric__screen_time_hours_per_day",
+    "numeric__family_history_diabetes",
+    "numeric__hypertension_history",
+    "numeric__cardiovascular_history",
+    "numeric__bmi",
+    "numeric__waist_to_hip_ratio",
+    "numeric__systolic_bp",
+    "numeric__diastolic_bp",
+    "numeric__heart_rate",
+    "numeric__cholesterol_total",
+    "numeric__hdl_cholesterol",
+    "numeric__ldl_cholesterol",
+    "numeric__triglycerides",
+    "numeric__glucose_fasting",
+    "numeric__glucose_postprandial",
+    "numeric__insulin_level",
+    "numeric__hba1c",
+    "categorical__gender_Female",
+    "categorical__gender_Male",
+    "categorical__gender_Other",
+    "categorical__ethnicity_Asian",
+    "categorical__ethnicity_Black",
+    "categorical__ethnicity_Hispanic",
+    "categorical__ethnicity_Other",
+    "categorical__ethnicity_White",
+    "categorical__education_level_Graduate",
+    "categorical__education_level_Highschool",
+    "categorical__education_level_No formal",
+    "categorical__education_level_Postgraduate",
+    "categorical__income_level_High",
+    "categorical__income_level_Low",
+    "categorical__income_level_Lower-Middle",
+    "categorical__income_level_Middle",
+    "categorical__income_level_Upper-Middle",
+    "categorical__employment_status_Employed",
+    "categorical__employment_status_Retired",
+    "categorical__employment_status_Student",
+    "categorical__employment_status_Unemployed",
+    "categorical__smoking_status_Current",
+    "categorical__smoking_status_Former",
+    "categorical__smoking_status_Never"
+  ],
+  "n_train": 60000,
+  "n_validation": 20000,
+  "n_test": 20000,
+  "training_time_seconds": 2.5601145999971777,
+  "validation_inference_time_seconds": 0.13197770004626364,
+  "test_inference_time_seconds": 0.12838729994837195,
+  "total_time_seconds": 3.748537000035867,
+  "validation_metrics": {
+    "accuracy": 0.9161,
+    "classification_report": {
+      "0": {
+        "precision": 0.8334563864571247,
+        "recall": 0.9876265466816648,
+        "f1-score": 0.9040155588605423,
+        "support": 8001.0
+      },
+      "1": {
+        "precision": 0.9905884589789904,
+        "recall": 0.8684057004750396,
+        "f1-score": 0.9254818367528199,
+        "support": 11999.0
+      },
+      "accuracy": 0.9161,
+      "macro avg": {
+        "precision": 0.9120224227180576,
+        "recall": 0.9280161235783522,
+        "f1-score": 0.9147486978066811,
+        "support": 20000.0
+      },
+      "weighted avg": {
+        "precision": 0.927727773366618,
+        "recall": 0.9161,
+        "f1-score": 0.9168942522820142,
+        "support": 20000.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        7902,
+        99
+      ],
+      [
+        1579,
+        10420
+      ]
+    ],
+    "labels": [
+      0,
+      1
+    ]
+  },
+  "test_metrics": {
+    "accuracy": 0.9152,
+    "classification_report": {
+      "0": {
+        "precision": 0.832349219738507,
+        "recall": 0.98675,
+        "f1-score": 0.9029970258522078,
+        "support": 8000.0
+      },
+      "1": {
+        "precision": 0.9899201217192849,
+        "recall": 0.8675,
+        "f1-score": 0.9246757861076568,
+        "support": 12000.0
+      },
+      "accuracy": 0.9152,
+      "macro avg": {
+        "precision": 0.9111346707288959,
+        "recall": 0.927125,
+        "f1-score": 0.9138364059799322,
+        "support": 20000.0
+      },
+      "weighted avg": {
+        "precision": 0.9268917609269738,
+        "recall": 0.9152,
+        "f1-score": 0.9160042820054772,
+        "support": 20000.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        7894,
+        106
+      ],
+      [
+        1590,
+        10410
+      ]
+    ],
+    "labels": [
+      0,
+      1
+    ]
+  }
+}
