@@ -8,6 +8,8 @@ import random
 import threading
 import urllib.error
 import urllib.request
+import json
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -297,11 +299,15 @@ class RaftConsensusService(ConsensusService):
 
     def _persist_state(self) -> None:
         payload = {
-            "tasks": {
-                task_id: task.to_dict()
-                for task_id, task in self._tasks.items()
-            }
+            "node_id": self.node_id,
+            "term": self._term,
+            "voted_for": self._voted_for,
+            "leader_id": self._leader_id,
+            "log_index": self._log_index,
+            "updated_at": time.time(),
         }
+
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
 
         tmp_path = self._state_path.with_name(
             f".{self._state_path.name}.tmp.{time.time_ns()}.{threading.get_ident()}"

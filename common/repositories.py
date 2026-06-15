@@ -26,10 +26,7 @@ from common.contracts import ModelManifest
 
 
 class JsonFileStore:
-    """Small atomic JSON store suitable for the first project milestone.
-
-    The purpose is not performance; it is deterministic persistence and recoverability.
-    """
+    """Small atomic JSON store suitable for durable JSON persistence."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -38,12 +35,6 @@ class JsonFileStore:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # IMPORTANT:
-        # Do not use a shared fixed temp path such as job_record.json.tmp.
-        # Multiple master processes or concurrent gRPC handlers can try to persist
-        # the same record at the same time, especially during long jobs.
-        # A unique temp file avoids races where one writer renames/removes the
-        # temp file while another writer is still trying to replace it.
         temp_path = path.with_name(
             f".{path.name}.tmp.{time.time_ns()}.{threading.get_ident()}"
         )
@@ -53,6 +44,7 @@ class JsonFileStore:
                 with temp_path.open("w", encoding="utf-8") as handle:
                     json.dump(payload, handle, indent=2, sort_keys=True)
                     handle.flush()
+
                 temp_path.replace(path)
             finally:
                 if temp_path.exists():
