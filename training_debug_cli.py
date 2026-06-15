@@ -54,6 +54,53 @@ DISTRIBUTED_TRAINING_PRESETS = {
             "diabetes_risk_score",
         ],
         "criterion": "gini",
+    },    "real_classification_no_diagnostic_features": {
+        "label": "real diabetes classification - no diagnostic features",
+        "dataset_path": DATASETS_ROOT / "diabetes_dataset.csv",
+        "task_type": "classification",
+        "target_column": "diagnosed_diabetes",
+        "dataset_scenario": "no_diagnostic_features",
+        "leakage_columns": [
+            "diabetes_stage",
+            "diabetes_risk_score",
+        ],
+        "criterion": "gini",
+    },
+    "real_classification_no_diagnostic_extended": {
+        "label": "real diabetes classification - no diagnostic extended",
+        "dataset_path": DATASETS_ROOT / "diabetes_dataset.csv",
+        "task_type": "classification",
+        "target_column": "diagnosed_diabetes",
+        "dataset_scenario": "no_diagnostic_extended",
+        "leakage_columns": [
+            "diabetes_stage",
+            "diabetes_risk_score",
+        ],
+        "criterion": "gini",
+    },
+    "real_classification_clinical_only": {
+        "label": "real diabetes classification - clinical only",
+        "dataset_path": DATASETS_ROOT / "diabetes_dataset.csv",
+        "task_type": "classification",
+        "target_column": "diagnosed_diabetes",
+        "dataset_scenario": "clinical_only",
+        "leakage_columns": [
+            "diabetes_stage",
+            "diabetes_risk_score",
+        ],
+        "criterion": "gini",
+    },
+    "real_classification_glucose_only": {
+        "label": "real diabetes classification - glucose only",
+        "dataset_path": DATASETS_ROOT / "diabetes_dataset.csv",
+        "task_type": "classification",
+        "target_column": "diagnosed_diabetes",
+        "dataset_scenario": "glucose_only",
+        "leakage_columns": [
+            "diabetes_stage",
+            "diabetes_risk_score",
+        ],
+        "criterion": "gini",
     },
     "real_classification_noise_10": {
         "label": "real diabetes classification - diagnostic noise 10%",
