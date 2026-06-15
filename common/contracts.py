@@ -88,6 +88,7 @@ class DatasetPreparationMetadata:
     final_row_count: int = 0
 
     scenario_report_uri: Optional[str] = None
+    scenario_parameters: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
