@@ -4,14 +4,12 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
 
 from .contracts import (
     DatasetSchema,
     ExperimentRecord,
     ForestConfiguration,
     HyperparameterSpace,
-    ModelManifest,
     PreparedDataset,
     TaskRecord,
     TrainingJobRecord,
@@ -173,6 +171,15 @@ def _validation_metrics_from_dict(data: dict[str, Any] | None) -> ValidationMetr
 
         accuracy=data.get("accuracy"),
         balanced_accuracy=data.get("balanced_accuracy"),
+
+        macro_precision=data.get("macro_precision"),
+        macro_recall=data.get("macro_recall"),
+        macro_f1=data.get("macro_f1"),
+
+        weighted_precision=data.get("weighted_precision"),
+        weighted_recall=data.get("weighted_recall"),
+        weighted_f1=data.get("weighted_f1"),
+
         classification_report=data.get("classification_report"),
         confusion_matrix=data.get("confusion_matrix"),
 

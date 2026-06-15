@@ -223,9 +223,18 @@ class ValidationMetrics:
 
     # Classification metrics
     accuracy: Optional[float] = None
+    balanced_accuracy: Optional[float] = None
+
+    macro_precision: Optional[float] = None
+    macro_recall: Optional[float] = None
+    macro_f1: Optional[float] = None
+
+    weighted_precision: Optional[float] = None
+    weighted_recall: Optional[float] = None
+    weighted_f1: Optional[float] = None
+
     classification_report: Optional[dict[str, Any]] = None
     confusion_matrix: Optional[list[list[int]]] = None
-    balanced_accuracy: Optional[float] = None
 
     # Regression metrics
     mae: Optional[float] = None
@@ -238,7 +247,6 @@ class ValidationMetrics:
     feature_importances_by_name: dict[str, float] = field(default_factory=dict)
 
     evaluated_at: float = field(default_factory=time.time)
-
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
