@@ -9,8 +9,10 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
     classification_report,
     confusion_matrix,
+    f1_score,
     mean_absolute_error,
     mean_squared_error,
     r2_score,
@@ -267,6 +269,9 @@ class ValidationCoordinator:
                 y_pred_for_metrics,
             ).tolist()
             accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
+            balanced_accuracy = float(balanced_accuracy_score(y_true_for_metrics, y_pred_for_metrics))
+            macro_f1 = float(f1_score(y_true_for_metrics, y_pred_for_metrics, average="macro", zero_division=0))
+            weighted_f1 = float(f1_score(y_true_for_metrics, y_pred_for_metrics, average="weighted", zero_division=0))
         else:
             y_true_for_metrics = [str(item) for item in y_true.tolist()]
             y_pred_for_metrics = predicted_labels
@@ -282,6 +287,9 @@ class ValidationCoordinator:
                 y_pred_for_metrics,
             ).tolist()
             accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
+            balanced_accuracy = float(balanced_accuracy_score(y_true_for_metrics, y_pred_for_metrics))
+            macro_f1 = float(f1_score(y_true_for_metrics, y_pred_for_metrics, average="macro", zero_division=0))
+            weighted_f1 = float(f1_score(y_true_for_metrics, y_pred_for_metrics, average="weighted", zero_division=0))
 
         feature_importances = self._aggregate_feature_importances(
             tree_artifacts=tree_artifacts,
@@ -295,6 +303,9 @@ class ValidationCoordinator:
         metrics = ValidationMetrics(
             experiment_id=experiment_id,
             accuracy=accuracy,
+            balanced_accuracy=balanced_accuracy,
+            macro_f1=macro_f1,
+            weighted_f1=weighted_f1,
             classification_report=report,
             confusion_matrix=confusion,
             feature_importances=feature_importances,

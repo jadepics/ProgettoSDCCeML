@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from common.contracts import PreparedDataset, DatasetPreparationMetadata
@@ -32,7 +33,31 @@ class DataPreparationService:
     DEFAULT_LEAKAGE_COLUMNS_BY_TARGET: dict[str, list[str]] = {
         "diagnosed_diabetes": [
             "diabetes_stage",
+            "diabetes_risk_score",
         ],
+        "diabetes_stage": [
+            "diagnosed_diabetes",
+            "diabetes_risk_score",
+        ],
+    }
+
+    DIAGNOSTIC_MARKER_COLUMNS: list[str] = [
+        "hba1c",
+        "glucose_fasting",
+        "glucose_postprandial",
+        "insulin_level",
+    ]
+
+    DIAGNOSTIC_NOISE_STD_FRACTION_BY_SCENARIO: dict[str, float] = {
+        "diagnostic_noise_10pct": 0.10,
+        "diagnostic_noise_25pct": 0.25,
+        "diagnostic_noise_50pct": 0.50,
+    }
+
+    BINARY_IMBALANCE_BY_SCENARIO: dict[str, tuple[str, float]] = {
+        "imbalance_positive_80": ("1", 0.80),
+        "imbalance_positive_90": ("1", 0.90),
+        "imbalance_negative_80": ("0", 0.80),
     }
 
     DROP_COLUMNS_BY_SCENARIO: dict[str, list[str]] = {
@@ -54,6 +79,10 @@ class DataPreparationService:
             "glucose_fasting",
             "glucose_postprandial",
             "insulin_level",
+        ],
+        "stage_multiclass_no_leakage": [
+            "diagnosed_diabetes",
+            "diabetes_risk_score",
         ],
     }
 
@@ -84,6 +113,8 @@ class DataPreparationService:
         "baseline_original",
         *DROP_COLUMNS_BY_SCENARIO.keys(),
         *KEEP_COLUMNS_BY_SCENARIO.keys(),
+        *DIAGNOSTIC_NOISE_STD_FRACTION_BY_SCENARIO.keys(),
+        *BINARY_IMBALANCE_BY_SCENARIO.keys(),
     }
 
     def __init__(
@@ -118,6 +149,7 @@ class DataPreparationService:
             target_column=target_column,
             dataset_scenario=dataset_scenario,
             leakage_columns=leakage_columns,
+            random_seed=random_seed,
         )
 
         df = self._encode_categorical_features(df, target_column)
@@ -176,6 +208,7 @@ class DataPreparationService:
         target_column: str,
         dataset_scenario: str,
         leakage_columns: list[str] | None,
+        random_seed: int,
     ) -> tuple[pd.DataFrame, dict[str, Any]]:
         scenario = self._normalize_dataset_scenario(dataset_scenario)
 
@@ -195,6 +228,7 @@ class DataPreparationService:
         missing_requested_keep_columns: list[str] = []
 
         requested_leakage_columns = leakage_columns
+        scenario_parameters: dict[str, Any] = {}
 
         if scenario == "baseline_original":
             scenario_type = "none"
@@ -223,6 +257,53 @@ class DataPreparationService:
                 target_column=target_column,
                 requested_columns=requested_drop_columns,
             )
+
+        elif scenario in self.DIAGNOSTIC_NOISE_STD_FRACTION_BY_SCENARIO:
+            scenario_type = "diagnostic_noise"
+
+            requested_drop_columns = self._resolve_leakage_columns(
+                target_column=target_column,
+                leakage_columns=leakage_columns,
+            )
+
+            df, dropped_columns, missing_requested_drop_columns = self._drop_columns(
+                df=df,
+                target_column=target_column,
+                requested_columns=requested_drop_columns,
+            )
+
+            noise_fraction = self.DIAGNOSTIC_NOISE_STD_FRACTION_BY_SCENARIO[scenario]
+            df, noise_report = self._add_diagnostic_marker_noise(
+                df=df,
+                target_column=target_column,
+                std_fraction=noise_fraction,
+                random_seed=random_seed,
+            )
+            scenario_parameters.update(noise_report)
+
+        elif scenario in self.BINARY_IMBALANCE_BY_SCENARIO:
+            scenario_type = "binary_class_imbalance"
+
+            requested_drop_columns = self._resolve_leakage_columns(
+                target_column=target_column,
+                leakage_columns=leakage_columns,
+            )
+
+            df, dropped_columns, missing_requested_drop_columns = self._drop_columns(
+                df=df,
+                target_column=target_column,
+                requested_columns=requested_drop_columns,
+            )
+
+            target_label, target_ratio = self.BINARY_IMBALANCE_BY_SCENARIO[scenario]
+            df, imbalance_report = self._apply_binary_class_imbalance(
+                df=df,
+                target_column=target_column,
+                target_label=target_label,
+                target_ratio=target_ratio,
+                random_seed=random_seed,
+            )
+            scenario_parameters.update(imbalance_report)
 
         elif scenario in self.KEEP_COLUMNS_BY_SCENARIO:
             scenario_type = "keep_columns"
@@ -267,6 +348,8 @@ class DataPreparationService:
                 df_columns_before=original_columns,
                 requested_columns=requested_leakage_columns,
             ),
+
+            "scenario_parameters": scenario_parameters,
         }
 
         return df, report
@@ -290,7 +373,7 @@ class DataPreparationService:
         target_column: str,
         leakage_columns: list[str] | None,
     ) -> list[str]:
-        if leakage_columns is not None:
+        if leakage_columns:
             return list(dict.fromkeys(leakage_columns))
 
         return self.DEFAULT_LEAKAGE_COLUMNS_BY_TARGET.get(target_column, [])
@@ -349,6 +432,118 @@ class DataPreparationService:
 
         return df, kept_columns, missing_columns
 
+    def _add_diagnostic_marker_noise(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        std_fraction: float,
+        random_seed: int,
+    ) -> tuple[pd.DataFrame, dict[str, Any]]:
+        rng = np.random.default_rng(random_seed)
+        df = df.copy()
+
+        noisy_columns = [
+            column
+            for column in self.DIAGNOSTIC_MARKER_COLUMNS
+            if column in df.columns and column != target_column
+        ]
+
+        column_reports: dict[str, dict[str, float]] = {}
+        for column in noisy_columns:
+            values = pd.to_numeric(df[column], errors="coerce")
+            std = float(values.std(ddof=0))
+            noise_std = std * std_fraction
+
+            if not np.isfinite(noise_std) or noise_std <= 0.0:
+                continue
+
+            min_value = float(values.min())
+            max_value = float(values.max())
+            noise = rng.normal(loc=0.0, scale=noise_std, size=len(df))
+            perturbed = values.to_numpy(dtype=float) + noise
+            perturbed = np.clip(perturbed, min_value, max_value)
+            df[column] = perturbed
+
+            column_reports[column] = {
+                "original_std": std,
+                "noise_std": noise_std,
+                "min_value": min_value,
+                "max_value": max_value,
+            }
+
+        return df, {
+            "noise_std_fraction": std_fraction,
+            "noisy_columns": noisy_columns,
+            "noise_column_reports": column_reports,
+            "random_seed": random_seed,
+        }
+
+    def _apply_binary_class_imbalance(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        target_label: str,
+        target_ratio: float,
+        random_seed: int,
+    ) -> tuple[pd.DataFrame, dict[str, Any]]:
+        if target_column not in df.columns:
+            raise ValueError(f"Target column '{target_column}' not found")
+
+        if not 0.0 < target_ratio < 1.0:
+            raise ValueError("target_ratio must be between 0 and 1")
+
+        target_as_str = df[target_column].astype(str)
+        labels = sorted(target_as_str.unique().tolist())
+        if len(labels) != 2:
+            raise ValueError(
+                "Binary class imbalance scenarios require exactly 2 target classes; "
+                f"found {labels}"
+            )
+
+        if target_label not in labels:
+            raise ValueError(
+                f"Target imbalance label '{target_label}' not found in classes {labels}"
+            )
+
+        other_label = next(label for label in labels if label != target_label)
+        target_df = df[target_as_str == target_label]
+        other_df = df[target_as_str == other_label]
+
+        target_count = len(target_df)
+        other_count = len(other_df)
+        desired_other_count = int(round(target_count * (1.0 - target_ratio) / target_ratio))
+
+        if desired_other_count <= other_count:
+            sampled_target_df = target_df
+            sampled_other_df = other_df.sample(
+                n=max(1, desired_other_count),
+                random_state=random_seed,
+            )
+        else:
+            desired_target_count = int(round(other_count * target_ratio / (1.0 - target_ratio)))
+            sampled_target_df = target_df.sample(
+                n=min(target_count, max(1, desired_target_count)),
+                random_state=random_seed,
+            )
+            sampled_other_df = other_df
+
+        result = pd.concat([sampled_target_df, sampled_other_df], axis=0)
+        result = result.sample(frac=1.0, random_state=random_seed).reset_index(drop=True)
+
+        final_counts = result[target_column].astype(str).value_counts().to_dict()
+
+        return result, {
+            "target_label": target_label,
+            "other_label": other_label,
+            "requested_target_ratio": target_ratio,
+            "original_class_counts": {
+                target_label: target_count,
+                other_label: other_count,
+            },
+            "final_class_counts": final_counts,
+            "random_seed": random_seed,
+        }
+
     def _missing_requested_columns(
         self,
         df_columns_before: list[str],
@@ -390,6 +585,7 @@ class DataPreparationService:
             final_row_count=scenario_report["final_row_count"],
 
             scenario_report_uri=scenario_report_uri,
+            scenario_parameters=scenario_report.get("scenario_parameters", {}),
         )
 
     def _persist_schema(self, job_id: str, schema_payload: dict) -> None:

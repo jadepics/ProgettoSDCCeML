@@ -12,13 +12,23 @@ class ModelSelector:
     - supportare sia classification che regression
 
     selection_metric:
-    - "auto"     -> accuracy per classification, r2 per regression
-    - "accuracy" -> forza accuracy
-    - "r2"       -> forza r2
+    - "auto"              -> accuracy per classification, r2 per regression
+    - "accuracy"          -> forza accuracy
+    - "balanced_accuracy" -> forza balanced accuracy
+    - "macro_f1"          -> forza macro F1
+    - "weighted_f1"       -> forza weighted F1
+    - "r2"                -> forza r2
     """
 
     def __init__(self, selection_metric: str = "auto") -> None:
-        allowed = {"auto", "accuracy", "r2"}
+        allowed = {
+            "auto",
+            "accuracy",
+            "balanced_accuracy",
+            "macro_f1",
+            "weighted_f1",
+            "r2",
+        }
         if selection_metric not in allowed:
             raise ValueError(
                 f"Unsupported selection_metric '{selection_metric}'. "
@@ -69,8 +79,31 @@ class ModelSelector:
                     f"Experiment '{experiment.experiment_id}' has no accuracy "
                     "inside validation_metrics"
                 )
-
             return float(metrics.accuracy)
+
+        if metric_name == "balanced_accuracy":
+            if metrics.balanced_accuracy is None:
+                raise ValueError(
+                    f"Experiment '{experiment.experiment_id}' has no balanced_accuracy "
+                    "inside validation_metrics"
+                )
+            return float(metrics.balanced_accuracy)
+
+        if metric_name == "macro_f1":
+            if metrics.macro_f1 is None:
+                raise ValueError(
+                    f"Experiment '{experiment.experiment_id}' has no macro_f1 "
+                    "inside validation_metrics"
+                )
+            return float(metrics.macro_f1)
+
+        if metric_name == "weighted_f1":
+            if metrics.weighted_f1 is None:
+                raise ValueError(
+                    f"Experiment '{experiment.experiment_id}' has no weighted_f1 "
+                    "inside validation_metrics"
+                )
+            return float(metrics.weighted_f1)
 
         if metric_name == "r2":
             if metrics.r2 is not None:
@@ -87,6 +120,7 @@ class ModelSelector:
             )
 
         raise ValueError(f"Unsupported resolved metric '{metric_name}'")
+
     def _resolve_metric_name(self, experiment: ExperimentRecord) -> str:
         if self.selection_metric != "auto":
             return self.selection_metric
