@@ -224,6 +224,7 @@ class ValidationMetrics:
     accuracy: Optional[float] = None
     classification_report: Optional[dict[str, Any]] = None
     confusion_matrix: Optional[list[list[int]]] = None
+    balanced_accuracy: Optional[float] = None
 
     # Regression metrics
     mae: Optional[float] = None

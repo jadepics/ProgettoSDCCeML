@@ -172,6 +172,7 @@ def _validation_metrics_from_dict(data: dict[str, Any] | None) -> ValidationMetr
         experiment_id=data["experiment_id"],
 
         accuracy=data.get("accuracy"),
+        balanced_accuracy=data.get("balanced_accuracy"),
         classification_report=data.get("classification_report"),
         confusion_matrix=data.get("confusion_matrix"),
 
