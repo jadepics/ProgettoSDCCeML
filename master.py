@@ -67,6 +67,13 @@ SUPPORTED_DATASET_SCENARIOS = {
     "no_diagnostic_extended",
     "clinical_only",
     "glucose_only",
+    "diagnostic_noise_10pct",
+    "diagnostic_noise_25pct",
+    "diagnostic_noise_50pct",
+    "imbalance_positive_80",
+    "imbalance_positive_90",
+    "imbalance_negative_80",
+    "stage_multiclass_no_leakage",
 }
 
 
