@@ -50,9 +50,9 @@ from common.storage_layout import StorageLayout
 from common.enums import WorkerLivenessStatus
 
 # Valore precedente ai test: HEARTBEAT_TIMEOUT_SECONDS = 15.0
-HEARTBEAT_TIMEOUT_SECONDS = 6.0
+HEARTBEAT_TIMEOUT_SECONDS = 30.00
 # Valore precedente ai test: DEFAULT_RPC_TIMEOUT_SECONDS = 600.0
-DEFAULT_RPC_TIMEOUT_SECONDS = 60.0
+DEFAULT_RPC_TIMEOUT_SECONDS = 900.0
 GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
 
 GRPC_OPTIONS = [
@@ -259,7 +259,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             ###########################################################################
             # introdotto temporaneamente per rendere il timeout per gli zombie più breve
             ###########################################################################
-            task_progress_timeout_seconds=8,
+            task_progress_timeout_seconds=300,
         )
 
         # data prep
@@ -327,7 +327,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             task_lease_manager=TaskLeaseManager(
                 task_ledger=self.task_ledger,
                 # lease_timeout_seconds=600.0,
-                lease_timeout_seconds=20.0,
+                lease_timeout_seconds=900.0,
             ),
             worker_heartbeat_monitor=self.worker_heartbeat_monitor,
             recovery_planner=self.recovery_planner)
