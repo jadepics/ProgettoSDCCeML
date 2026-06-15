@@ -37,11 +37,26 @@ class JsonFileStore:
     def write_json(self, path: str | Path, payload: dict[str, Any]) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_suffix(path.suffix + ".tmp")
+
+        # IMPORTANT:
+        # Do not use a shared fixed temp path such as job_record.json.tmp.
+        # Multiple master processes or concurrent gRPC handlers can try to persist
+        # the same record at the same time, especially during long jobs.
+        # A unique temp file avoids races where one writer renames/removes the
+        # temp file while another writer is still trying to replace it.
+        temp_path = path.with_name(
+            f".{path.name}.tmp.{time.time_ns()}.{threading.get_ident()}"
+        )
+
         with self._lock:
-            with temp_path.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
-            temp_path.replace(path)
+            try:
+                with temp_path.open("w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2, sort_keys=True)
+                    handle.flush()
+                temp_path.replace(path)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
 
     def read_json(self, path: str | Path) -> dict[str, Any]:
         path = Path(path)
@@ -50,7 +65,6 @@ class JsonFileStore:
 
     def exists(self, path: str | Path) -> bool:
         return Path(path).exists()
-
 
 class SharedArtifactStore:
     def __init__(self, root: str | Path, json_store: Optional[JsonFileStore] = None):

@@ -297,18 +297,22 @@ class RaftConsensusService(ConsensusService):
 
     def _persist_state(self) -> None:
         payload = {
-            "node_id": self.node_id,
-            "term": self._term,
-            "voted_for": self._voted_for,
-            "leader_id": self._leader_id,
-            "log_index": self._log_index,
-            "updated_at": time.time(),
+            "tasks": {
+                task_id: task.to_dict()
+                for task_id, task in self._tasks.items()
+            }
         }
 
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._state_path.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(payload, indent=2))
-        tmp_path.replace(self._state_path)
+        tmp_path = self._state_path.with_name(
+            f".{self._state_path.name}.tmp.{time.time_ns()}.{threading.get_ident()}"
+        )
+
+        try:
+            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp_path.replace(self._state_path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     def _start_rpc_server(self) -> None:
         service = self
