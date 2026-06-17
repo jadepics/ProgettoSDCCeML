@@ -3,11 +3,14 @@
   "dataset_path_resolved": "C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\\diabetes_dataset.csv",
   "config": {
     "dataset_url": "Dataset/diabetes_dataset.csv",
-    "target_column": "diagnosed_diabetes",
+    "target_column": "diabetes_stage",
     "task_type": "classification",
-    "dataset_scenario": "baseline_no_leakage",
-    "extra_drop_columns": [],
-    "n_estimators": 240,
+    "dataset_scenario": "stage_multiclass_no_leakage",
+    "extra_drop_columns": [
+      "diagnosed_diabetes",
+      "diabetes_risk_score"
+    ],
+    "n_estimators": 600,
     "max_depth": 5,
     "max_features": "sqrt",
     "min_samples_split": 2,
@@ -20,7 +23,7 @@
     "test_ratio": 0.2,
     "random_seed": 42,
     "n_jobs": 1,
-    "output_json": "local_baseline\\results\\local_classification_baseline_no_leakage_diagnosed_diabetes_240_trees.json"
+    "output_json": "local_baseline\\results\\local_classification_stage_multiclass_no_leakage_diabetes_stage_600_trees.json"
   },
   "n_samples_total": 100000,
   "n_features_input": 28,
@@ -106,96 +109,192 @@
   "n_train": 60000,
   "n_validation": 20000,
   "n_test": 20000,
-  "training_time_seconds": 8.24874379998073,
-  "validation_inference_time_seconds": 0.2381272999336943,
-  "test_inference_time_seconds": 0.234679099987261,
-  "total_time_seconds": 9.453346899943426,
+  "training_time_seconds": 23.216137600014918,
+  "validation_inference_time_seconds": 0.6876625999575481,
+  "test_inference_time_seconds": 0.699080300051719,
+  "total_time_seconds": 25.743737799930386,
   "validation_metrics": {
-    "accuracy": 0.91565,
+    "accuracy": 0.82715,
     "classification_report": {
-      "0": {
-        "precision": 0.8356368275568786,
-        "recall": 0.9823772028496438,
-        "f1-score": 0.903084965818349,
-        "support": 8001.0
+      "Gestational": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 56.0
       },
-      "1": {
-        "precision": 0.9866905795733434,
-        "recall": 0.871155929660805,
-        "f1-score": 0.9253308546895056,
-        "support": 11999.0
+      "No Diabetes": {
+        "precision": 0.9666666666666667,
+        "recall": 0.03634085213032581,
+        "f1-score": 0.07004830917874397,
+        "support": 1596.0
       },
-      "accuracy": 0.91565,
+      "Pre-Diabetes": {
+        "precision": 0.6585051546391752,
+        "recall": 0.9627885068299576,
+        "f1-score": 0.7820929787641094,
+        "support": 6369.0
+      },
+      "Type 1": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 24.0
+      },
+      "Type 2": {
+        "precision": 0.9741249529544599,
+        "recall": 0.8659974905897114,
+        "f1-score": 0.9168843820572997,
+        "support": 11955.0
+      },
+      "accuracy": 0.82715,
       "macro avg": {
-        "precision": 0.911163703565111,
-        "recall": 0.9267665662552245,
-        "f1-score": 0.9142079102539273,
+        "precision": 0.5198593548520604,
+        "recall": 0.37302536990999896,
+        "f1-score": 0.35380513400003066,
         "support": 20000.0
       },
       "weighted avg": {
-        "precision": 0.9262615260791567,
-        "recall": 0.91565,
-        "f1-score": 0.9164313868465993,
+        "precision": 0.8691241571233739,
+        "recall": 0.82715,
+        "f1-score": 0.8027150035346453,
         "support": 20000.0
       }
     },
     "confusion_matrix": [
       [
-        7860,
-        141
+        0,
+        0,
+        26,
+        0,
+        30
       ],
       [
-        1546,
-        10453
+        0,
+        58,
+        1538,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        6132,
+        0,
+        237
+      ],
+      [
+        0,
+        0,
+        16,
+        0,
+        8
+      ],
+      [
+        0,
+        2,
+        1600,
+        0,
+        10353
       ]
     ],
     "labels": [
-      0,
-      1
+      "Gestational",
+      "No Diabetes",
+      "Pre-Diabetes",
+      "Type 1",
+      "Type 2"
     ]
   },
   "test_metrics": {
-    "accuracy": 0.91515,
+    "accuracy": 0.8296,
     "classification_report": {
-      "0": {
-        "precision": 0.8350877192982457,
-        "recall": 0.98175,
-        "f1-score": 0.9024992818155703,
-        "support": 8000.0
+      "Gestational": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 56.0
       },
-      "1": {
-        "precision": 0.9862199150542709,
-        "recall": 0.87075,
-        "f1-score": 0.9248948882496127,
-        "support": 12000.0
+      "No Diabetes": {
+        "precision": 0.9166666666666666,
+        "recall": 0.041353383458646614,
+        "f1-score": 0.07913669064748201,
+        "support": 1596.0
       },
-      "accuracy": 0.91515,
+      "Pre-Diabetes": {
+        "precision": 0.6617837139164153,
+        "recall": 0.9646726330664155,
+        "f1-score": 0.7850252347792755,
+        "support": 6369.0
+      },
+      "Type 1": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 24.0
+      },
+      "Type 2": {
+        "precision": 0.9753851935362645,
+        "recall": 0.8684232538686742,
+        "f1-score": 0.9188017168901279,
+        "support": 11955.0
+      },
+      "accuracy": 0.8296,
       "macro avg": {
-        "precision": 0.9106538171762583,
-        "recall": 0.92625,
-        "f1-score": 0.9136970850325915,
+        "precision": 0.5107671148238693,
+        "recall": 0.37488985407874725,
+        "f1-score": 0.3565927284633771,
         "support": 20000.0
       },
       "weighted avg": {
-        "precision": 0.9257670367518607,
-        "recall": 0.91515,
-        "f1-score": 0.9159366456759958,
+        "precision": 0.8669315231329845,
+        "recall": 0.8296,
+        "f1-score": 0.8055201202002032,
         "support": 20000.0
       }
     },
     "confusion_matrix": [
       [
-        7854,
-        146
+        0,
+        2,
+        29,
+        0,
+        25
       ],
       [
-        1551,
-        10449
+        0,
+        66,
+        1530,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        6144,
+        0,
+        225
+      ],
+      [
+        0,
+        0,
+        12,
+        0,
+        12
+      ],
+      [
+        0,
+        4,
+        1569,
+        0,
+        10382
       ]
     ],
     "labels": [
-      0,
-      1
+      "Gestational",
+      "No Diabetes",
+      "Pre-Diabetes",
+      "Type 1",
+      "Type 2"
     ]
   }
 }

@@ -5,9 +5,9 @@
     "dataset_url": "Dataset/diabetes_dataset.csv",
     "target_column": "diagnosed_diabetes",
     "task_type": "classification",
-    "dataset_scenario": "baseline_no_leakage",
+    "dataset_scenario": "baseline_original",
     "extra_drop_columns": [],
-    "n_estimators": 240,
+    "n_estimators": 600,
     "max_depth": 5,
     "max_features": "sqrt",
     "min_samples_split": 2,
@@ -20,10 +20,10 @@
     "test_ratio": 0.2,
     "random_seed": 42,
     "n_jobs": 1,
-    "output_json": "local_baseline\\results\\local_classification_baseline_no_leakage_diagnosed_diabetes_240_trees.json"
+    "output_json": "local_baseline\\results\\local_classification_baseline_original_diagnosed_diabetes_600_trees.json"
   },
   "n_samples_total": 100000,
-  "n_features_input": 28,
+  "n_features_input": 30,
   "feature_names_input": [
     "age",
     "gender",
@@ -52,9 +52,11 @@
     "glucose_fasting",
     "glucose_postprandial",
     "insulin_level",
-    "hba1c"
+    "hba1c",
+    "diabetes_risk_score",
+    "diabetes_stage"
   ],
-  "n_features_after_preprocessing": 46,
+  "n_features_after_preprocessing": 52,
   "feature_names_after_preprocessing": [
     "numeric__age",
     "numeric__alcohol_consumption_per_week",
@@ -78,6 +80,7 @@
     "numeric__glucose_postprandial",
     "numeric__insulin_level",
     "numeric__hba1c",
+    "numeric__diabetes_risk_score",
     "categorical__gender_Female",
     "categorical__gender_Male",
     "categorical__gender_Other",
@@ -101,52 +104,57 @@
     "categorical__employment_status_Unemployed",
     "categorical__smoking_status_Current",
     "categorical__smoking_status_Former",
-    "categorical__smoking_status_Never"
+    "categorical__smoking_status_Never",
+    "categorical__diabetes_stage_Gestational",
+    "categorical__diabetes_stage_No Diabetes",
+    "categorical__diabetes_stage_Pre-Diabetes",
+    "categorical__diabetes_stage_Type 1",
+    "categorical__diabetes_stage_Type 2"
   ],
   "n_train": 60000,
   "n_validation": 20000,
   "n_test": 20000,
-  "training_time_seconds": 8.24874379998073,
-  "validation_inference_time_seconds": 0.2381272999336943,
-  "test_inference_time_seconds": 0.234679099987261,
-  "total_time_seconds": 9.453346899943426,
+  "training_time_seconds": 18.419297600048594,
+  "validation_inference_time_seconds": 0.47102270007599145,
+  "test_inference_time_seconds": 0.4598087000194937,
+  "total_time_seconds": 19.998481400078163,
   "validation_metrics": {
-    "accuracy": 0.91565,
+    "accuracy": 0.9995,
     "classification_report": {
       "0": {
-        "precision": 0.8356368275568786,
-        "recall": 0.9823772028496438,
-        "f1-score": 0.903084965818349,
+        "precision": 0.9987517163899639,
+        "recall": 1.0,
+        "f1-score": 0.999375468398701,
         "support": 8001.0
       },
       "1": {
-        "precision": 0.9866905795733434,
-        "recall": 0.871155929660805,
-        "f1-score": 0.9253308546895056,
+        "precision": 1.0,
+        "recall": 0.9991665972164347,
+        "f1-score": 0.9995831248957813,
         "support": 11999.0
       },
-      "accuracy": 0.91565,
+      "accuracy": 0.9995,
       "macro avg": {
-        "precision": 0.911163703565111,
-        "recall": 0.9267665662552245,
-        "f1-score": 0.9142079102539273,
+        "precision": 0.9993758581949819,
+        "recall": 0.9995832986082174,
+        "f1-score": 0.9994792966472411,
         "support": 20000.0
       },
       "weighted avg": {
-        "precision": 0.9262615260791567,
-        "recall": 0.91565,
-        "f1-score": 0.9164313868465993,
+        "precision": 0.9995006241418051,
+        "recall": 0.9995,
+        "f1-score": 0.9995000519141242,
         "support": 20000.0
       }
     },
     "confusion_matrix": [
       [
-        7860,
-        141
+        8001,
+        0
       ],
       [
-        1546,
-        10453
+        10,
+        11989
       ]
     ],
     "labels": [
@@ -155,42 +163,42 @@
     ]
   },
   "test_metrics": {
-    "accuracy": 0.91515,
+    "accuracy": 0.9997,
     "classification_report": {
       "0": {
-        "precision": 0.8350877192982457,
-        "recall": 0.98175,
-        "f1-score": 0.9024992818155703,
+        "precision": 0.9992505620784412,
+        "recall": 1.0,
+        "f1-score": 0.9996251405722854,
         "support": 8000.0
       },
       "1": {
-        "precision": 0.9862199150542709,
-        "recall": 0.87075,
-        "f1-score": 0.9248948882496127,
+        "precision": 1.0,
+        "recall": 0.9995,
+        "f1-score": 0.9997499374843711,
         "support": 12000.0
       },
-      "accuracy": 0.91515,
+      "accuracy": 0.9997,
       "macro avg": {
-        "precision": 0.9106538171762583,
-        "recall": 0.92625,
-        "f1-score": 0.9136970850325915,
+        "precision": 0.9996252810392205,
+        "recall": 0.99975,
+        "f1-score": 0.9996875390283282,
         "support": 20000.0
       },
       "weighted avg": {
-        "precision": 0.9257670367518607,
-        "recall": 0.91515,
-        "f1-score": 0.9159366456759958,
+        "precision": 0.9997002248313765,
+        "recall": 0.9997,
+        "f1-score": 0.9997000187195368,
         "support": 20000.0
       }
     },
     "confusion_matrix": [
       [
-        7854,
-        146
+        8000,
+        0
       ],
       [
-        1551,
-        10449
+        6,
+        11994
       ]
     ],
     "labels": [

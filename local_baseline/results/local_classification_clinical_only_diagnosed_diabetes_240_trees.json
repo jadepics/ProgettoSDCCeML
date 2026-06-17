@@ -1,0 +1,153 @@
+{
+  "mode": "local_non_distributed",
+  "dataset_path_resolved": "C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\\diabetes_dataset.csv",
+  "config": {
+    "dataset_url": "Dataset/diabetes_dataset.csv",
+    "target_column": "diagnosed_diabetes",
+    "task_type": "classification",
+    "dataset_scenario": "clinical_only",
+    "extra_drop_columns": [],
+    "n_estimators": 240,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "min_samples_split": 2,
+    "min_samples_leaf": 1,
+    "classification_criterion": "gini",
+    "regression_criterion": "squared_error",
+    "bootstrap": true,
+    "class_weight": null,
+    "validation_ratio": 0.2,
+    "test_ratio": 0.2,
+    "random_seed": 42,
+    "n_jobs": 1,
+    "output_json": "local_baseline\\results\\local_classification_clinical_only_diagnosed_diabetes_240_trees.json"
+  },
+  "n_samples_total": 100000,
+  "n_features_input": 13,
+  "feature_names_input": [
+    "family_history_diabetes",
+    "hypertension_history",
+    "cardiovascular_history",
+    "bmi",
+    "waist_to_hip_ratio",
+    "systolic_bp",
+    "diastolic_bp",
+    "heart_rate",
+    "cholesterol_total",
+    "hdl_cholesterol",
+    "ldl_cholesterol",
+    "triglycerides",
+    "insulin_level"
+  ],
+  "n_features_after_preprocessing": 13,
+  "feature_names_after_preprocessing": [
+    "numeric__family_history_diabetes",
+    "numeric__hypertension_history",
+    "numeric__cardiovascular_history",
+    "numeric__bmi",
+    "numeric__waist_to_hip_ratio",
+    "numeric__systolic_bp",
+    "numeric__diastolic_bp",
+    "numeric__heart_rate",
+    "numeric__cholesterol_total",
+    "numeric__hdl_cholesterol",
+    "numeric__ldl_cholesterol",
+    "numeric__triglycerides",
+    "numeric__insulin_level"
+  ],
+  "n_train": 60000,
+  "n_validation": 20000,
+  "n_test": 20000,
+  "training_time_seconds": 5.931807799963281,
+  "validation_inference_time_seconds": 0.21579339995514601,
+  "test_inference_time_seconds": 0.2140151000348851,
+  "total_time_seconds": 6.958065000013448,
+  "validation_metrics": {
+    "accuracy": 0.61775,
+    "classification_report": {
+      "0": {
+        "precision": 0.604093567251462,
+        "recall": 0.12910886139232597,
+        "f1-score": 0.2127484296158995,
+        "support": 8001.0
+      },
+      "1": {
+        "precision": 0.6190267905959541,
+        "recall": 0.9435786315526293,
+        "f1-score": 0.7475981379378652,
+        "support": 11999.0
+      },
+      "accuracy": 0.61775,
+      "macro avg": {
+        "precision": 0.6115601789237081,
+        "recall": 0.5363437464724776,
+        "f1-score": 0.48017328377688234,
+        "support": 20000.0
+      },
+      "weighted avg": {
+        "precision": 0.61305275459699,
+        "recall": 0.61775,
+        "f1-score": 0.5336315121236629,
+        "support": 20000.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        1033,
+        6968
+      ],
+      [
+        677,
+        11322
+      ]
+    ],
+    "labels": [
+      0,
+      1
+    ]
+  },
+  "test_metrics": {
+    "accuracy": 0.60725,
+    "classification_report": {
+      "0": {
+        "precision": 0.5421756835369401,
+        "recall": 0.1165,
+        "f1-score": 0.1917892787323799,
+        "support": 8000.0
+      },
+      "1": {
+        "precision": 0.6133690717138012,
+        "recall": 0.9344166666666667,
+        "f1-score": 0.7405964135926819,
+        "support": 12000.0
+      },
+      "accuracy": 0.60725,
+      "macro avg": {
+        "precision": 0.5777723776253707,
+        "recall": 0.5254583333333334,
+        "f1-score": 0.46619284616253087,
+        "support": 20000.0
+      },
+      "weighted avg": {
+        "precision": 0.5848917164430568,
+        "recall": 0.60725,
+        "f1-score": 0.5210735596485612,
+        "support": 20000.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        932,
+        7068
+      ],
+      [
+        787,
+        11213
+      ]
+    ],
+    "labels": [
+      0,
+      1
+    ]
+  }
+}

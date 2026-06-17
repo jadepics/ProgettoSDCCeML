@@ -7,7 +7,7 @@
     "task_type": "classification",
     "dataset_scenario": "baseline_no_leakage",
     "extra_drop_columns": [],
-    "n_estimators": 240,
+    "n_estimators": 600,
     "max_depth": 5,
     "max_features": "sqrt",
     "min_samples_split": 2,
@@ -20,7 +20,7 @@
     "test_ratio": 0.2,
     "random_seed": 42,
     "n_jobs": 1,
-    "output_json": "local_baseline\\results\\local_classification_baseline_no_leakage_diagnosed_diabetes_240_trees.json"
+    "output_json": "local_baseline\\results\\local_classification_baseline_no_leakage_diagnosed_diabetes_600_trees.json"
   },
   "n_samples_total": 100000,
   "n_features_input": 28,
@@ -106,47 +106,47 @@
   "n_train": 60000,
   "n_validation": 20000,
   "n_test": 20000,
-  "training_time_seconds": 8.24874379998073,
-  "validation_inference_time_seconds": 0.2381272999336943,
-  "test_inference_time_seconds": 0.234679099987261,
-  "total_time_seconds": 9.453346899943426,
+  "training_time_seconds": 19.711176399956457,
+  "validation_inference_time_seconds": 0.5448678999673575,
+  "test_inference_time_seconds": 0.5478265000274405,
+  "total_time_seconds": 21.442009199992754,
   "validation_metrics": {
-    "accuracy": 0.91565,
+    "accuracy": 0.9165,
     "classification_report": {
       "0": {
-        "precision": 0.8356368275568786,
-        "recall": 0.9823772028496438,
-        "f1-score": 0.903084965818349,
+        "precision": 0.8352928715178477,
+        "recall": 0.9856267966504187,
+        "f1-score": 0.9042540993005389,
         "support": 8001.0
       },
       "1": {
-        "precision": 0.9866905795733434,
-        "recall": 0.871155929660805,
-        "f1-score": 0.9253308546895056,
+        "precision": 0.9891088171228336,
+        "recall": 0.8704058671555963,
+        "f1-score": 0.9259686142388509,
         "support": 11999.0
       },
-      "accuracy": 0.91565,
+      "accuracy": 0.9165,
       "macro avg": {
-        "precision": 0.911163703565111,
-        "recall": 0.9267665662552245,
-        "f1-score": 0.9142079102539273,
+        "precision": 0.9122008443203407,
+        "recall": 0.9280163319030075,
+        "f1-score": 0.9151113567696949,
         "support": 20000.0
       },
       "weighted avg": {
-        "precision": 0.9262615260791567,
-        "recall": 0.91565,
-        "f1-score": 0.9164313868465993,
+        "precision": 0.9275747480835591,
+        "recall": 0.9165,
+        "f1-score": 0.9172817225377792,
         "support": 20000.0
       }
     },
     "confusion_matrix": [
       [
-        7860,
-        141
+        7886,
+        115
       ],
       [
-        1546,
-        10453
+        1555,
+        10444
       ]
     ],
     "labels": [
@@ -155,42 +155,42 @@
     ]
   },
   "test_metrics": {
-    "accuracy": 0.91515,
+    "accuracy": 0.91535,
     "classification_report": {
       "0": {
-        "precision": 0.8350877192982457,
-        "recall": 0.98175,
-        "f1-score": 0.9024992818155703,
+        "precision": 0.8339510748702743,
+        "recall": 0.984375,
+        "f1-score": 0.9029410078541535,
         "support": 8000.0
       },
       "1": {
-        "precision": 0.9862199150542709,
-        "recall": 0.87075,
-        "f1-score": 0.9248948882496127,
+        "precision": 0.988159515013735,
+        "recall": 0.8693333333333333,
+        "f1-score": 0.924945693132952,
         "support": 12000.0
       },
-      "accuracy": 0.91515,
+      "accuracy": 0.91535,
       "macro avg": {
-        "precision": 0.9106538171762583,
-        "recall": 0.92625,
-        "f1-score": 0.9136970850325915,
+        "precision": 0.9110552949420047,
+        "recall": 0.9268541666666666,
+        "f1-score": 0.9139433504935528,
         "support": 20000.0
       },
       "weighted avg": {
-        "precision": 0.9257670367518607,
-        "recall": 0.91515,
-        "f1-score": 0.9159366456759958,
+        "precision": 0.9264761389563507,
+        "recall": 0.91535,
+        "f1-score": 0.9161438190214327,
         "support": 20000.0
       }
     },
     "confusion_matrix": [
       [
-        7854,
-        146
+        7875,
+        125
       ],
       [
-        1551,
-        10449
+        1568,
+        10432
       ]
     ],
     "labels": [

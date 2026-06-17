@@ -20,7 +20,7 @@ from local_baseline.local_baseline_runner import (
 DEFAULT_DATASET_PATH = "Dataset/diabetes_dataset.csv"
 DEFAULT_OUTPUT_DIR = "local_baseline/results"
 
-DEFAULT_N_ESTIMATORS = 48
+DEFAULT_N_ESTIMATORS = 240
 DEFAULT_MAX_DEPTH = 5
 DEFAULT_MAX_FEATURES = "sqrt"
 DEFAULT_MIN_SAMPLES_SPLIT = 2
@@ -31,6 +31,56 @@ DEFAULT_TEST_RATIO = 0.2
 DEFAULT_RANDOM_SEED = 42
 DEFAULT_LOCAL_N_JOBS = 1
 
+CLASSIFICATION_SCENARIO_CHOICES = [
+    ("baseline_original", "BASELINE ORIGINAL"),
+    ("baseline_no_leakage", "BASELINE NO LEAKAGE"),
+    ("diagnostic_noise_10pct", "DIAGNOSTIC NOISE 10%"),
+    ("diagnostic_noise_25pct", "DIAGNOSTIC NOISE 25%"),
+    ("diagnostic_noise_50pct", "DIAGNOSTIC NOISE 50%"),
+    ("imbalance_positive_80", "IMBALANCE POSITIVE 80%"),
+    ("imbalance_positive_90", "IMBALANCE POSITIVE 90%"),
+    ("imbalance_negative_80", "IMBALANCE NEGATIVE 80%"),
+    ("stage_multiclass_no_leakage", "STAGE MULTICLASS NO LEAKAGE"),
+    ("no_diagnostic_features", "NO DIAGNOSTIC FEATURES"),
+    ("no_diagnostic_extended", "NO DIAGNOSTIC EXTENDED"),
+    ("clinical_only", "CLINICAL ONLY"),
+    ("glucose_only", "GLUCOSE ONLY"),
+]
+
+
+def default_classification_target_column(dataset_scenario: str) -> str:
+    if dataset_scenario == "stage_multiclass_no_leakage":
+        return "diabetes_stage"
+
+    return "diagnosed_diabetes"
+
+
+def default_classification_drop_columns(
+    dataset_scenario: str,
+    target_column: str,
+) -> list[str]:
+    """
+    Drop automatici coerenti con gli scenari distribuiti.
+
+    Nota:
+    il target viene già rimosso automaticamente dal runner.
+    Queste colonne servono solo come protezione ulteriore da leakage,
+    soprattutto se il runner locale non applica già internamente
+    tutte le regole dello scenario.
+    """
+    if target_column == "diabetes_stage":
+        return [
+            "diagnosed_diabetes",
+            "diabetes_risk_score",
+        ]
+
+    if target_column == "diagnosed_diabetes":
+        return [
+            "diabetes_stage",
+            "diabetes_risk_score",
+        ]
+
+    return []
 
 def ask(label: str, default: str | None = None) -> str:
     if default is None:
@@ -227,18 +277,15 @@ def print_result_summary(result: dict) -> None:
 def run_quick_classification_flow() -> None:
     dataset_scenario = ask_choice(
         "CHOOSE CLASSIFICATION DATASET SCENARIO",
-        [
-            ("baseline_original", "BASELINE ORIGINAL"),
-            ("baseline_no_leakage", "BASELINE NO LEAKAGE"),
-            ("no_diagnostic_features", "NO DIAGNOSTIC FEATURES"),
-            ("no_diagnostic_extended", "NO DIAGNOSTIC EXTENDED"),
-            ("clinical_only", "CLINICAL ONLY"),
-            ("glucose_only", "GLUCOSE ONLY"),
-        ],
+        CLASSIFICATION_SCENARIO_CHOICES,
     )
 
     dataset_url = ask("Dataset path", DEFAULT_DATASET_PATH)
-    target_column = ask("Target column", "diagnosed_diabetes")
+
+    default_target = default_classification_target_column(dataset_scenario)
+
+    target_column = ask("Target column", default_target)
+
     n_estimators = ask_int("Number of trees", DEFAULT_N_ESTIMATORS)
 
     output_default = build_default_output_path(
@@ -250,12 +297,17 @@ def run_quick_classification_flow() -> None:
 
     output_json = ask("Output JSON path", output_default)
 
+    extra_drop_columns = default_classification_drop_columns(
+        dataset_scenario=dataset_scenario,
+        target_column=target_column,
+    )
+
     config = LocalBaselineConfig(
         dataset_url=dataset_url,
         target_column=target_column,
         task_type="classification",
         dataset_scenario=dataset_scenario,
-        extra_drop_columns=[],
+        extra_drop_columns=extra_drop_columns,
 
         n_estimators=n_estimators,
         max_depth=DEFAULT_MAX_DEPTH,
@@ -270,7 +322,7 @@ def run_quick_classification_flow() -> None:
 
         # Importante:
         # class_weight=None per avvicinarci al training distribuito,
-        # dove non abbiamo visto class_weight="balanced" negli artifact.
+        # dove non abbiamo class_weight="balanced" negli artifact.
         class_weight=None,
 
         validation_ratio=DEFAULT_VALIDATION_RATIO,
@@ -283,11 +335,14 @@ def run_quick_classification_flow() -> None:
         output_json=output_json,
     )
 
+    print()
+    print("[INFO] Classification extra drop columns used to reduce leakage:")
+    print(extra_drop_columns)
+
     print_quick_configuration(config)
 
     result = run_local_baseline(config)
     print_result_summary(result)
-
 
 def run_quick_regression_flow() -> None:
     dataset_url = ask("Dataset path", DEFAULT_DATASET_PATH)
