@@ -22,38 +22,7 @@ DISTRIBUTED_JOBS_ROOT = (
 RESULTS_ROOT = PROJECT_ROOT / "performance_evaluation" / "results"
 
 
-LOCAL_BASELINE_OPTIONS = {
-    "real_classification": {
-        "label": "real classification baseline",
-        "path": (
-            "local_baseline/results/"
-            "local_classification_baseline_no_leakage_"
-            "diagnosed_diabetes_48_trees.json"
-        ),
-    },
-    "real_regression": {
-        "label": "real regression baseline",
-        "path": (
-            "local_baseline/results/"
-            "local_regression_baseline_no_leakage_"
-            "diabetes_risk_score_48_trees.json"
-        ),
-    },
-    "synthetic_classification": {
-        "label": "synthetic classification baseline",
-        "path": (
-            "local_baseline/results/"
-            "local_classification_synthetic_100000x40_48_trees.json"
-        ),
-    },
-    "synthetic_regression": {
-        "label": "synthetic regression baseline",
-        "path": (
-            "local_baseline/results/"
-            "local_regression_synthetic_100000x40_48_trees.json"
-        ),
-    },
-}
+LOCAL_BASELINE_RESULTS_ROOT = PROJECT_ROOT / "local_baseline" / "results"
 
 
 def ask(label: str, default: str | None = None) -> str:
@@ -102,6 +71,64 @@ def load_json(path_value: str | Path) -> dict[str, Any]:
 
     return json.loads(path.read_text(encoding="utf-8"))
 
+def safe_identifier(value: str) -> str:
+    result = []
+
+    for char in value:
+        if char.isalnum() or char in {"_", "-"}:
+            result.append(char)
+        else:
+            result.append("_")
+
+    safe_value = "".join(result).strip("_")
+    return safe_value or "baseline"
+
+
+def build_local_baseline_label(path: Path, local_result: dict[str, Any]) -> str:
+    config = local_result.get("config") or {}
+
+    task_type = config.get("task_type", "?")
+    dataset_scenario = config.get("dataset_scenario", "?")
+    target_column = config.get("target_column", "?")
+    n_estimators = config.get("n_estimators", "?")
+
+    relative_path = path.relative_to(PROJECT_ROOT).as_posix()
+
+    return (
+        f"{task_type} | "
+        f"{dataset_scenario} | "
+        f"target={target_column} | "
+        f"trees={n_estimators} | "
+        f"{relative_path}"
+    )
+
+
+def list_available_local_baselines() -> list[tuple[str, str]]:
+    if not LOCAL_BASELINE_RESULTS_ROOT.exists():
+        return []
+
+    choices: list[tuple[str, str]] = []
+
+    for path in sorted(LOCAL_BASELINE_RESULTS_ROOT.glob("*.json")):
+        if not path.is_file():
+            continue
+
+        try:
+            local_result = load_json(path)
+        except Exception:
+            continue
+
+        config = local_result.get("config")
+
+        if not isinstance(config, dict):
+            continue
+
+        relative_path = path.relative_to(PROJECT_ROOT).as_posix()
+        label = build_local_baseline_label(path, local_result)
+
+        choices.append((relative_path, label))
+
+    return choices
 
 def resolve_output_path(path_value: str | Path) -> Path:
     path = Path(path_value)
@@ -661,11 +688,17 @@ def main() -> None:
 
     print_available_jobs()
 
-    local_choices = [
-        (key, value["label"])
-        for key, value in LOCAL_BASELINE_OPTIONS.items()
-    ]
-    local_choices.append(("custom", "custom local JSON path"))
+    local_choices = list_available_local_baselines()
+
+    if local_choices:
+        local_choices.append(("custom", "custom local JSON path"))
+    else:
+        print()
+        print(
+            "[WARN] No local baseline JSON files found under: "
+            f"{LOCAL_BASELINE_RESULTS_ROOT}"
+        )
+        local_choices = [("custom", "custom local JSON path")]
 
     local_option_key = ask_choice(
         "CHOOSE LOCAL BASELINE",
@@ -675,7 +708,7 @@ def main() -> None:
     if local_option_key == "custom":
         local_json_path = ask("Local baseline JSON")
     else:
-        local_json_path = LOCAL_BASELINE_OPTIONS[local_option_key]["path"]
+        local_json_path = local_option_key
 
     default_job_id = None
     available_job_ids = list_available_job_ids()
