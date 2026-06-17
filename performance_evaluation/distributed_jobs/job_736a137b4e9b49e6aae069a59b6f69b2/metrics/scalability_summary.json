@@ -1,0 +1,27 @@
+{
+  "job_id": "job_736a137b4e9b49e6aae069a59b6f69b2",
+  "worker_count": 6,
+  "n_estimators_total": 240,
+  "total_time_seconds": 33.752222299575806,
+  "training_time_seconds": 28.72896409034729,
+  "timings": {
+    "data_preparation": 1.5225155353546143,
+    "experiment_planning": 0.08299064636230469,
+    "training": 28.72896409034729,
+    "validation": 1.4533979892730713,
+    "model_selection": 0.008365154266357422,
+    "manifest_build": 1.401353120803833,
+    "model_publish": 0.16390657424926758
+  },
+  "counters": {
+    "completed_tree_count": 240,
+    "failed_tree_count": 0,
+    "retry_count": 0,
+    "train_rpc_count": 6,
+    "predict_rpc_count": 0
+  },
+  "throughput_trees_per_second": 8.353938528561082,
+  "baseline_time_seconds": null,
+  "speedup": null,
+  "efficiency": null
+}

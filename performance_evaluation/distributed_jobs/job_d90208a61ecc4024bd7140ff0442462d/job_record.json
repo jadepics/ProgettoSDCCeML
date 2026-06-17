@@ -1,0 +1,153 @@
+{
+  "created_at": 1781522868.0905294,
+  "experiment_ids": [
+    "job_d90208a61ecc4024bd7140ff0442462d_exp_000"
+  ],
+  "job_id": "job_d90208a61ecc4024bd7140ff0442462d",
+  "message": "Training completed after normal execution. Selected experiment job_d90208a61ecc4024bd7140ff0442462d_exp_000",
+  "model_id": "model_1bf110e67d9a45f6908d0305dd850775",
+  "prepared_dataset": {
+    "class_labels": null,
+    "dataset_id": "job_d90208a61ecc4024bd7140ff0442462d_prepared_dataset",
+    "n_features": 52,
+    "n_test": 20000,
+    "n_train": 60000,
+    "n_validation": 20000,
+    "preparation_metadata": {
+      "dataset_scenario": "baseline_no_leakage",
+      "dropped_columns": [
+        "diagnosed_diabetes",
+        "diabetes_stage"
+      ],
+      "final_column_count": 29,
+      "final_row_count": 100000,
+      "kept_columns": [],
+      "missing_requested_drop_columns": [],
+      "missing_requested_keep_columns": [],
+      "missing_requested_leakage_columns": [],
+      "original_column_count": 31,
+      "original_row_count": 100000,
+      "requested_drop_columns": [
+        "diagnosed_diabetes",
+        "diabetes_stage"
+      ],
+      "requested_keep_columns": null,
+      "requested_leakage_columns": [
+        "diagnosed_diabetes",
+        "diabetes_stage"
+      ],
+      "scenario_parameters": {},
+      "scenario_report_uri": "file:///mnt/efs/gp_artifacts/jobs/job_d90208a61ecc4024bd7140ff0442462d/prepared_dataset/dataset_scenario_report.json",
+      "scenario_type": "drop_columns"
+    },
+    "schema": {
+      "dataset_uri": "/mnt/efs/gp_artifacts/datasets/diabetes_dataset.csv",
+      "feature_names": [
+        "age",
+        "alcohol_consumption_per_week",
+        "physical_activity_minutes_per_week",
+        "diet_score",
+        "sleep_hours_per_day",
+        "screen_time_hours_per_day",
+        "family_history_diabetes",
+        "hypertension_history",
+        "cardiovascular_history",
+        "bmi",
+        "waist_to_hip_ratio",
+        "systolic_bp",
+        "diastolic_bp",
+        "heart_rate",
+        "cholesterol_total",
+        "hdl_cholesterol",
+        "ldl_cholesterol",
+        "triglycerides",
+        "glucose_fasting",
+        "glucose_postprandial",
+        "insulin_level",
+        "hba1c",
+        "gender_Female",
+        "gender_Male",
+        "gender_Other",
+        "gender_nan",
+        "ethnicity_Asian",
+        "ethnicity_Black",
+        "ethnicity_Hispanic",
+        "ethnicity_Other",
+        "ethnicity_White",
+        "ethnicity_nan",
+        "education_level_Graduate",
+        "education_level_Highschool",
+        "education_level_No formal",
+        "education_level_Postgraduate",
+        "education_level_nan",
+        "income_level_High",
+        "income_level_Low",
+        "income_level_Lower-Middle",
+        "income_level_Middle",
+        "income_level_Upper-Middle",
+        "income_level_nan",
+        "employment_status_Employed",
+        "employment_status_Retired",
+        "employment_status_Student",
+        "employment_status_Unemployed",
+        "employment_status_nan",
+        "smoking_status_Current",
+        "smoking_status_Former",
+        "smoking_status_Never",
+        "smoking_status_nan"
+      ],
+      "label_mapping": null,
+      "preprocessing_uri": null,
+      "target_column": "diabetes_risk_score",
+      "task_type": "regression"
+    },
+    "test_features_uri": "file:///mnt/efs/gp_artifacts/jobs/job_d90208a61ecc4024bd7140ff0442462d/prepared_dataset/test_features.parquet",
+    "test_labels_uri": "file:///mnt/efs/gp_artifacts/jobs/job_d90208a61ecc4024bd7140ff0442462d/prepared_dataset/test_labels.parquet",
+    "train_features_uri": "file:///mnt/efs/gp_artifacts/jobs/job_d90208a61ecc4024bd7140ff0442462d/prepared_dataset/train_features.parquet",
+    "train_labels_uri": "file:///mnt/efs/gp_artifacts/jobs/job_d90208a61ecc4024bd7140ff0442462d/prepared_dataset/train_labels.parquet",
+    "validation_features_uri": "file:///mnt/efs/gp_artifacts/jobs/job_d90208a61ecc4024bd7140ff0442462d/prepared_dataset/validation_features.parquet",
+    "validation_labels_uri": "file:///mnt/efs/gp_artifacts/jobs/job_d90208a61ecc4024bd7140ff0442462d/prepared_dataset/validation_labels.parquet"
+  },
+  "selected_experiment_id": "job_d90208a61ecc4024bd7140ff0442462d_exp_000",
+  "status": "COMPLETED",
+  "training_request": {
+    "bootstrap": true,
+    "created_at": 1781522868.0905216,
+    "dataset_scenario": "baseline_no_leakage",
+    "dataset_uri": "/mnt/efs/gp_artifacts/datasets/diabetes_dataset.csv",
+    "global_random_seed": 42,
+    "hyperparameter_space": {
+      "bootstrap": true,
+      "criterion_candidates": [
+        "squared_error"
+      ],
+      "global_random_seed": 42,
+      "max_depth_candidates": [
+        5
+      ],
+      "max_features_candidates": [
+        "sqrt"
+      ],
+      "min_samples_leaf_candidates": [
+        1
+      ],
+      "min_samples_split_candidates": [
+        2
+      ],
+      "n_estimators_candidates": [
+        240
+      ]
+    },
+    "job_id": "job_d90208a61ecc4024bd7140ff0442462d",
+    "leakage_columns": [
+      "diagnosed_diabetes",
+      "diabetes_stage"
+    ],
+    "n_estimators_total": 240,
+    "target_column": "diabetes_risk_score",
+    "task_type": "regression",
+    "test_ratio": 0.2,
+    "validation_ratio": 0.2
+  },
+  "updated_at": 1781522892.6460023
+}

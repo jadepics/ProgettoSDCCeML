@@ -1,0 +1,200 @@
+{
+  "comparison_type": "offline_existing_distributed_job_vs_local_baseline",
+  "metric_name": "accuracy",
+  "compatibility_check": {
+    "same_task_type": true,
+    "same_target_column": true,
+    "same_dataset_scenario": true,
+    "same_n_estimators": true,
+    "same_max_depth": true,
+    "same_max_features": true,
+    "same_criterion": true,
+    "same_bootstrap": true,
+    "same_train_size": true,
+    "same_validation_size": true,
+    "same_test_size": true
+  },
+  "local": {
+    "mode": "local_non_distributed",
+    "dataset_url": "Dataset/synthetic_classification_100000_samples_40_features.csv",
+    "dataset_path_resolved": "C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\Dataset\\synthetic_classification_100000_samples_40_features.csv",
+    "dataset_scenario": "baseline_original",
+    "target_column": "target",
+    "task_type": "classification",
+    "n_estimators": 240,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "criterion": "gini",
+    "bootstrap": true,
+    "class_weight": null,
+    "n_jobs": 1,
+    "n_train": 60000,
+    "n_validation": 20000,
+    "n_test": 20000,
+    "n_features_input": 40,
+    "n_features_after_preprocessing": 40,
+    "training_time_seconds": 85.52592629997525,
+    "validation_inference_time_seconds": 0.39432530000340194,
+    "test_inference_time_seconds": 0.4068692000582814,
+    "validation_metric": 0.84785,
+    "test_metric": 0.8454,
+    "validation_metrics": {
+      "accuracy": 0.84785,
+      "classification_report": {
+        "0": {
+          "precision": 0.8698149329929802,
+          "recall": 0.8180454136240872,
+          "f1-score": 0.8431362441362957,
+          "support": 9997.0
+        },
+        "1": {
+          "precision": 0.8283638422343839,
+          "recall": 0.8776367089873038,
+          "f1-score": 0.8522887238483569,
+          "support": 10003.0
+        },
+        "accuracy": 0.84785,
+        "macro avg": {
+          "precision": 0.849089387613682,
+          "recall": 0.8478410613056955,
+          "f1-score": 0.8477124839923262,
+          "support": 20000.0
+        },
+        "weighted avg": {
+          "precision": 0.8490831699500683,
+          "recall": 0.84785,
+          "f1-score": 0.8477138568642829,
+          "support": 20000.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          8178,
+          1819
+        ],
+        [
+          1224,
+          8779
+        ]
+      ],
+      "labels": [
+        0,
+        1
+      ]
+    },
+    "test_metrics": {
+      "accuracy": 0.8454,
+      "classification_report": {
+        "0": {
+          "precision": 0.8685811892815203,
+          "recall": 0.8138441532459738,
+          "f1-score": 0.8403222474695311,
+          "support": 9997.0
+        },
+        "1": {
+          "precision": 0.8249788394620521,
+          "recall": 0.8769369189243227,
+          "f1-score": 0.8501647606125218,
+          "support": 10003.0
+        },
+        "accuracy": 0.8454,
+        "macro avg": {
+          "precision": 0.8467800143717862,
+          "recall": 0.8453905360851482,
+          "f1-score": 0.8452435040410264,
+          "support": 20000.0
+        },
+        "weighted avg": {
+          "precision": 0.8467734740193132,
+          "recall": 0.8454,
+          "f1-score": 0.8452449804179978,
+          "support": 20000.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          8136,
+          1861
+        ],
+        [
+          1231,
+          8772
+        ]
+      ],
+      "labels": [
+        0,
+        1
+      ]
+    }
+  },
+  "distributed": {
+    "mode": "distributed",
+    "job_id": "job_736a137b4e9b49e6aae069a59b6f69b2",
+    "job_dir": "C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\performance_evaluation\\distributed_jobs\\job_736a137b4e9b49e6aae069a59b6f69b2",
+    "job_status": "COMPLETED",
+    "experiment_id": "job_736a137b4e9b49e6aae069a59b6f69b2_exp_000",
+    "experiment_status": "COMPLETED",
+    "model_id": "model_e0900e88d8834d2694470e77dd9ab56d",
+    "dataset_uri": "/mnt/efs/gp_artifacts/datasets/synthetic_classification_100000_samples_40_features.csv",
+    "dataset_scenario": "baseline_original",
+    "target_column": "target",
+    "task_type": "classification",
+    "n_estimators": 240,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "criterion": "gini",
+    "bootstrap": true,
+    "worker_count": 6,
+    "assigned_workers": [
+      "worker1",
+      "worker2",
+      "worker3",
+      "worker4",
+      "worker5",
+      "worker6"
+    ],
+    "n_train": 60000,
+    "n_validation": 20000,
+    "n_test": 20000,
+    "n_features": 40,
+    "training_wall_time_seconds": 33.76303768157959,
+    "validation_metric": 0.8491,
+    "validation_accuracy": 0.8491,
+    "validation_r2": null,
+    "validation_mae": null,
+    "validation_mse": null,
+    "validation_rmse": null,
+    "validation_confusion_matrix": [
+      [
+        8090,
+        1907
+      ],
+      [
+        1111,
+        8892
+      ]
+    ],
+    "expected_tree_count": 240,
+    "completed_tree_count": 240,
+    "saved_tree_joblib_count": 240,
+    "tree_distribution_by_worker": {
+      "worker1": 40,
+      "worker2": 40,
+      "worker3": 40,
+      "worker4": 40,
+      "worker5": 40,
+      "worker6": 40
+    },
+    "tree_training_time_sum_seconds": 70.81331396102905,
+    "tree_training_time_avg_seconds": 0.29505547483762107,
+    "tree_training_time_max_seconds": 0.40253543853759766
+  },
+  "comparison": {
+    "local_validation_metric": 0.84785,
+    "distributed_validation_metric": 0.8491,
+    "validation_metric_delta_distributed_minus_local": 0.0012499999999999734,
+    "local_training_time_seconds": 85.52592629997525,
+    "distributed_training_wall_time_seconds": 33.76303768157959,
+    "training_time_ratio_local_over_distributed": 2.5331229703492117
+  }
+}

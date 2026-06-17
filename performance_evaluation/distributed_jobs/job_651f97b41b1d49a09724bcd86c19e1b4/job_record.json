@@ -1,0 +1,128 @@
+{
+  "created_at": 1781458704.57981,
+  "experiment_ids": [
+    "job_651f97b41b1d49a09724bcd86c19e1b4_exp_000"
+  ],
+  "job_id": "job_651f97b41b1d49a09724bcd86c19e1b4",
+  "message": "Training completed after normal execution. Selected experiment job_651f97b41b1d49a09724bcd86c19e1b4_exp_000",
+  "model_id": "model_3d2ed230427647e88181f1c4a05cd0f3",
+  "prepared_dataset": {
+    "class_labels": null,
+    "dataset_id": "job_651f97b41b1d49a09724bcd86c19e1b4_prepared_dataset",
+    "n_features": 40,
+    "n_test": 20000,
+    "n_train": 60000,
+    "n_validation": 20000,
+    "preparation_metadata": {
+      "dataset_scenario": "baseline_original",
+      "dropped_columns": [],
+      "final_column_count": 41,
+      "final_row_count": 100000,
+      "kept_columns": [],
+      "missing_requested_drop_columns": [],
+      "missing_requested_keep_columns": [],
+      "missing_requested_leakage_columns": [],
+      "original_column_count": 41,
+      "original_row_count": 100000,
+      "requested_drop_columns": null,
+      "requested_keep_columns": null,
+      "requested_leakage_columns": null,
+      "scenario_report_uri": "file:///mnt/efs/gp_artifacts/jobs/job_651f97b41b1d49a09724bcd86c19e1b4/prepared_dataset/dataset_scenario_report.json",
+      "scenario_type": "none"
+    },
+    "schema": {
+      "dataset_uri": "/mnt/efs/gp_artifacts/datasets/synthetic_regression_100000_samples_40_features.csv",
+      "feature_names": [
+        "f_000",
+        "f_001",
+        "f_002",
+        "f_003",
+        "f_004",
+        "f_005",
+        "f_006",
+        "f_007",
+        "f_008",
+        "f_009",
+        "f_010",
+        "f_011",
+        "f_012",
+        "f_013",
+        "f_014",
+        "f_015",
+        "f_016",
+        "f_017",
+        "f_018",
+        "f_019",
+        "f_020",
+        "f_021",
+        "f_022",
+        "f_023",
+        "f_024",
+        "f_025",
+        "f_026",
+        "f_027",
+        "f_028",
+        "f_029",
+        "f_030",
+        "f_031",
+        "f_032",
+        "f_033",
+        "f_034",
+        "f_035",
+        "f_036",
+        "f_037",
+        "f_038",
+        "f_039"
+      ],
+      "label_mapping": null,
+      "preprocessing_uri": null,
+      "target_column": "target",
+      "task_type": "regression"
+    },
+    "test_features_uri": "file:///mnt/efs/gp_artifacts/jobs/job_651f97b41b1d49a09724bcd86c19e1b4/prepared_dataset/test_features.parquet",
+    "test_labels_uri": "file:///mnt/efs/gp_artifacts/jobs/job_651f97b41b1d49a09724bcd86c19e1b4/prepared_dataset/test_labels.parquet",
+    "train_features_uri": "file:///mnt/efs/gp_artifacts/jobs/job_651f97b41b1d49a09724bcd86c19e1b4/prepared_dataset/train_features.parquet",
+    "train_labels_uri": "file:///mnt/efs/gp_artifacts/jobs/job_651f97b41b1d49a09724bcd86c19e1b4/prepared_dataset/train_labels.parquet",
+    "validation_features_uri": "file:///mnt/efs/gp_artifacts/jobs/job_651f97b41b1d49a09724bcd86c19e1b4/prepared_dataset/validation_features.parquet",
+    "validation_labels_uri": "file:///mnt/efs/gp_artifacts/jobs/job_651f97b41b1d49a09724bcd86c19e1b4/prepared_dataset/validation_labels.parquet"
+  },
+  "selected_experiment_id": "job_651f97b41b1d49a09724bcd86c19e1b4_exp_000",
+  "status": "COMPLETED",
+  "training_request": {
+    "bootstrap": true,
+    "created_at": 1781458704.5798018,
+    "dataset_scenario": "baseline_original",
+    "dataset_uri": "/mnt/efs/gp_artifacts/datasets/synthetic_regression_100000_samples_40_features.csv",
+    "global_random_seed": 42,
+    "hyperparameter_space": {
+      "bootstrap": true,
+      "criterion_candidates": [
+        "squared_error"
+      ],
+      "global_random_seed": 42,
+      "max_depth_candidates": [
+        5
+      ],
+      "max_features_candidates": [
+        "sqrt"
+      ],
+      "min_samples_leaf_candidates": [
+        1
+      ],
+      "min_samples_split_candidates": [
+        2
+      ],
+      "n_estimators_candidates": [
+        48
+      ]
+    },
+    "job_id": "job_651f97b41b1d49a09724bcd86c19e1b4",
+    "leakage_columns": null,
+    "n_estimators_total": 48,
+    "target_column": "target",
+    "task_type": "regression",
+    "test_ratio": 0.2,
+    "validation_ratio": 0.2
+  },
+  "updated_at": 1781458718.190609
+}

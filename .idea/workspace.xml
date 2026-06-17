@@ -7,19 +7,24 @@
     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="fix test evaluator">
+    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="Modifica timeout">
+      <change afterPath="$PROJECT_DIR$/Dataset/synthetic_classification_100000_samples_40_features.csv" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/Dataset/synthetic_classification_100000_samples_40_features.metadata.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/Dataset/synthetic_regression_100000_samples_40_features.csv" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/Dataset/synthetic_regression_100000_samples_40_features.metadata.json" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/common/contracts.py" beforeDir="false" afterPath="$PROJECT_DIR$/common/contracts.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/master.py" beforeDir="false" afterPath="$PROJECT_DIR$/master.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/masterPackage/data/data_preparation_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/masterPackage/data/data_preparation_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/training_debug_cli.py" beforeDir="false" afterPath="$PROJECT_DIR$/training_debug_cli.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="CopilotPersistence">
+    <persistenceIdMap>
+      <entry key="_C:/Users/PC/Desktop/materie/ISW/Mvn/ProgettoSDCCeML" value="3AWp9QFcSCr26GObyiuq4gjJYSa" />
+    </persistenceIdMap>
   </component>
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
@@ -39,8 +44,8 @@
 }</component>
   <component name="GithubPullRequestsUISettings">{
   &quot;selectedUrlAndAccountId&quot;: {
-    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,
-    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
+    &quot;url&quot;: &quot;https://github.com/jadepics/ProgettoSDCCeML.git&quot;,
+    &quot;accountId&quot;: &quot;64b32a3e-6402-44ac-8316-64089203d618&quot;
   }
 }</component>
   <component name="KubernetesApiPersistence">{}</component>
@@ -61,17 +66,22 @@
   <component name="PropertiesComponent">{
   &quot;keyToString&quot;: {
     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;Python.Start_Master_Worker.executor&quot;: &quot;Run&quot;,
+    &quot;Python.compare_existing_job_cli.executor&quot;: &quot;Run&quot;,
+    &quot;Python.local_baseline_cli.executor&quot;: &quot;Run&quot;,
+    &quot;Python.submit_training_regression.executor&quot;: &quot;Run&quot;,
+    &quot;Python.synthetic_dataset_cli.executor&quot;: &quot;Run&quot;,
+    &quot;Python.training_debug_cli.executor&quot;: &quot;Run&quot;,
     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;SHELLCHECK.PATH&quot;: &quot;C:\\Users\\PC\\AppData\\Roaming\\JetBrains\\PyCharm2026.1\\plugins\\Shell Script\\shellcheck.exe&quot;,
     &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
     &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
     &quot;git-widget-placeholder&quot;: &quot;master&quot;,
     &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
     &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,
+    &quot;last_opened_file_path&quot;: &quot;C:/Users/PC/Desktop/materie/ISW/Mvn/ProgettoSDCCeML/performance_evaluation/distributed_jobs&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
@@ -83,45 +93,22 @@
 }</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\performance_evaluation\distributed_jobs" />
       <recent name="C:\Users\micci\PycharmProjects\PythonProject1\Dataset" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\performance_evaluation\distributed_jobs\job_af645a3fd97b4a66b6bbc18c46eb74f6" />
+      <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\performance_evaluation" />
+      <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML" />
+      <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\boh" />
       <recent name="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\worker" />
     </key>
-  </component>
-  <component name="RunManager">
-    <configuration name="Start_Master_Worker" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
-      <module name="ProgSDCC&amp;ML" />
-      <option name="ENV_FILES" value="" />
-      <option name="INTERPRETER_OPTIONS" value="" />
-      <option name="PARENT_ENVS" value="true" />
-      <envs>
-        <env name="PYTHONUNBUFFERED" value="1" />
-      </envs>
-      <option name="SDK_HOME" value="" />
-      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
-      <option name="IS_MODULE_SDK" value="true" />
-      <option name="ADD_CONTENT_ROOTS" value="true" />
-      <option name="ADD_SOURCE_ROOTS" value="true" />
-      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/Start_Master_Worker.py" />
-      <option name="PARAMETERS" value="" />
-      <option name="SHOW_COMMAND_LINE" value="false" />
-      <option name="EMULATE_TERMINAL" value="false" />
-      <option name="MODULE_MODE" value="false" />
-      <option name="REDIRECT_INPUT" value="false" />
-      <option name="INPUT_FILE" value="" />
-      <method v="2" />
-    </configuration>
-    <recent_temporary>
-      <list>
-        <item itemvalue="Python.Start_Master_Worker" />
-      </list>
-    </recent_temporary>
   </component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
+        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.24374.152" />
+        <option value="bundled-python-sdk-c59985aa861c-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.24374.152" />
       </set>
     </attachedChunks>
   </component>
@@ -139,6 +126,49 @@
       <workItem from="1774720403281" duration="207000" />
       <workItem from="1774730844650" duration="5746000" />
       <workItem from="1774964855112" duration="688000" />
+      <workItem from="1779263574177" duration="624000" />
+      <workItem from="1779266908342" duration="2183000" />
+      <workItem from="1779277413235" duration="124000" />
+      <workItem from="1779277767156" duration="1430000" />
+      <workItem from="1779282016019" duration="4319000" />
+      <workItem from="1779364505669" duration="5140000" />
+      <workItem from="1779370545584" duration="1243000" />
+      <workItem from="1779377569243" duration="718000" />
+      <workItem from="1779439480187" duration="878000" />
+      <workItem from="1779441751102" duration="3017000" />
+      <workItem from="1779614781225" duration="335000" />
+      <workItem from="1779642332598" duration="4169000" />
+      <workItem from="1779728510992" duration="1472000" />
+      <workItem from="1779784048930" duration="16439000" />
+      <workItem from="1779888735354" duration="601000" />
+      <workItem from="1779962688140" duration="4957000" />
+      <workItem from="1779972775664" duration="1887000" />
+      <workItem from="1779975108322" duration="1664000" />
+      <workItem from="1780072526235" duration="12327000" />
+      <workItem from="1780135591851" duration="7076000" />
+      <workItem from="1780165392523" duration="202000" />
+      <workItem from="1780165648182" duration="5423000" />
+      <workItem from="1780218283708" duration="5762000" />
+      <workItem from="1780315250667" duration="595000" />
+      <workItem from="1780328703391" duration="4108000" />
+      <workItem from="1780642990702" duration="10000" />
+      <workItem from="1780643112020" duration="1677000" />
+      <workItem from="1780645173444" duration="4864000" />
+      <workItem from="1780826629839" duration="2568000" />
+      <workItem from="1780842941419" duration="2857000" />
+      <workItem from="1780871228325" duration="1802000" />
+      <workItem from="1780915643641" duration="1148000" />
+      <workItem from="1781165343765" duration="1019000" />
+      <workItem from="1781166852232" duration="3097000" />
+      <workItem from="1781253627449" duration="5255000" />
+      <workItem from="1781268867842" duration="5212000" />
+      <workItem from="1781286702703" duration="3008000" />
+      <workItem from="1781431922369" duration="3602000" />
+      <workItem from="1781447944852" duration="7075000" />
+      <workItem from="1781462137533" duration="394000" />
+      <workItem from="1781465799321" duration="728000" />
+      <workItem from="1781515326205" duration="11029000" />
+      <workItem from="1781535697356" duration="4855000" />
     </task>
     <task id="LOCAL-00001" summary="First commit">
       <option name="closed" value="true" />
@@ -180,180 +210,273 @@
       <option name="project" value="LOCAL" />
       <updated>1774886067552</updated>
     </task>
-    <task id="LOCAL-00006" summary="nuovi moduli master per toglierlo da versione monolitico">
+    <task id="LOCAL-00006" summary="introduzione Monitor.sh per l'analisi delle statistiche su log">
       <option name="closed" value="true" />
-      <created>1775141397577</created>
+      <created>1779267177978</created>
       <option name="number" value="00006" />
       <option name="presentableId" value="LOCAL-00006" />
       <option name="project" value="LOCAL" />
-      <updated>1775141397577</updated>
+      <updated>1779267177978</updated>
     </task>
-    <task id="LOCAL-00007" summary="snellito master">
+    <task id="LOCAL-00007" summary="Refactoring monitor.sh">
       <option name="closed" value="true" />
-      <created>1775162782981</created>
+      <created>1779267655059</created>
       <option name="number" value="00007" />
       <option name="presentableId" value="LOCAL-00007" />
       <option name="project" value="LOCAL" />
-      <updated>1775162782981</updated>
+      <updated>1779267655060</updated>
     </task>
-    <task id="LOCAL-00008" summary="resi coerenti: TrainingJobService&#10;TrainingOrchestrator&#10;JobRepository&#10;TaskLedger&#10;ModelRepository">
+    <task id="LOCAL-00008" summary="Correzione monitor.sh">
       <option name="closed" value="true" />
-      <created>1775828892586</created>
+      <created>1779277941088</created>
       <option name="number" value="00008" />
       <option name="presentableId" value="LOCAL-00008" />
       <option name="project" value="LOCAL" />
-      <updated>1775828892586</updated>
+      <updated>1779277941088</updated>
     </task>
-    <task id="LOCAL-00009" summary="aggiustato taskLedger">
+    <task id="LOCAL-00009" summary="monitor.sh in background">
       <option name="closed" value="true" />
-      <created>1775902855575</created>
+      <created>1779282339366</created>
       <option name="number" value="00009" />
       <option name="presentableId" value="LOCAL-00009" />
       <option name="project" value="LOCAL" />
-      <updated>1775902855575</updated>
+      <updated>1779282339366</updated>
     </task>
-    <task id="LOCAL-00010" summary="aggiunte nuove classi per gestione del retry di training">
+    <task id="LOCAL-00010" summary="update monitor.sh">
       <option name="closed" value="true" />
-      <created>1775922615845</created>
+      <created>1779366565339</created>
       <option name="number" value="00010" />
       <option name="presentableId" value="LOCAL-00010" />
       <option name="project" value="LOCAL" />
-      <updated>1775922615845</updated>
+      <updated>1779366565339</updated>
     </task>
-    <task id="LOCAL-00011" summary="iniziata fase di recovery safe">
+    <task id="LOCAL-00011" summary="introduzione feature importance">
       <option name="closed" value="true" />
-      <created>1775986225737</created>
+      <created>1779443662224</created>
       <option name="number" value="00011" />
       <option name="presentableId" value="LOCAL-00011" />
       <option name="project" value="LOCAL" />
-      <updated>1775986225737</updated>
+      <updated>1779443662224</updated>
     </task>
-    <task id="LOCAL-00012" summary="sistemato recovery, pronto per iniziare consenso">
+    <task id="LOCAL-00012" summary="completamento della fault tolerance su worker e master">
       <option name="closed" value="true" />
-      <created>1776198481945</created>
+      <created>1779792342651</created>
       <option name="number" value="00012" />
       <option name="presentableId" value="LOCAL-00012" />
       <option name="project" value="LOCAL" />
-      <updated>1776198481945</updated>
+      <updated>1779792342651</updated>
     </task>
-    <task id="LOCAL-00013" summary="sistemata coerenza e fault tolerance lato master">
+    <task id="LOCAL-00013" summary="testing fault tolerance sistema">
       <option name="closed" value="true" />
-      <created>1778151758584</created>
+      <created>1779798283775</created>
       <option name="number" value="00013" />
       <option name="presentableId" value="LOCAL-00013" />
       <option name="project" value="LOCAL" />
-      <updated>1778151758584</updated>
+      <updated>1779798283775</updated>
     </task>
-    <task id="LOCAL-00014" summary="ancora modifiche di coerenza">
+    <task id="LOCAL-00014" summary="Introduzione dell'iperparametro Numero degli alberi come parametro da cli">
       <option name="closed" value="true" />
-      <created>1778250295911</created>
+      <created>1779805159717</created>
       <option name="number" value="00014" />
       <option name="presentableId" value="LOCAL-00014" />
       <option name="project" value="LOCAL" />
-      <updated>1778250295911</updated>
+      <updated>1779805159717</updated>
     </task>
-    <task id="LOCAL-00015" summary="ancora modifiche di coerenza">
+    <task id="LOCAL-00015" summary="Sistemato worker.sh">
       <option name="closed" value="true" />
-      <created>1778322008249</created>
+      <created>1779976993221</created>
       <option name="number" value="00015" />
       <option name="presentableId" value="LOCAL-00015" />
       <option name="project" value="LOCAL" />
-      <updated>1778322008249</updated>
+      <updated>1779976993222</updated>
     </task>
-    <task id="LOCAL-00016" summary="non falliscono i training">
+    <task id="LOCAL-00016" summary="Sistemato update worker.sh">
       <option name="closed" value="true" />
-      <created>1778325421991</created>
+      <created>1780074164744</created>
       <option name="number" value="00016" />
       <option name="presentableId" value="LOCAL-00016" />
       <option name="project" value="LOCAL" />
-      <updated>1778325421991</updated>
+      <updated>1780074164744</updated>
     </task>
-    <task id="LOCAL-00017" summary="non distribuiva il train, ora ok">
+    <task id="LOCAL-00017" summary="update worker.sh">
       <option name="closed" value="true" />
-      <created>1778340670416</created>
+      <created>1780074564671</created>
       <option name="number" value="00017" />
       <option name="presentableId" value="LOCAL-00017" />
       <option name="project" value="LOCAL" />
-      <updated>1778340670416</updated>
+      <updated>1780074564671</updated>
     </task>
-    <task id="LOCAL-00018" summary="nuova classe per submit training regressione">
+    <task id="LOCAL-00018" summary="fault tollerance worker zombie">
       <option name="closed" value="true" />
-      <created>1778343692878</created>
+      <created>1780075709131</created>
       <option name="number" value="00018" />
       <option name="presentableId" value="LOCAL-00018" />
       <option name="project" value="LOCAL" />
-      <updated>1778343692878</updated>
+      <updated>1780075709131</updated>
     </task>
-    <task id="LOCAL-00019" summary="aggiunta inferenza e resa usabile da cli">
+    <task id="LOCAL-00019" summary="Fault tolerance worker zombie">
       <option name="closed" value="true" />
-      <created>1778774743502</created>
+      <created>1780087658962</created>
       <option name="number" value="00019" />
       <option name="presentableId" value="LOCAL-00019" />
       <option name="project" value="LOCAL" />
-      <updated>1778774743503</updated>
+      <updated>1780087658962</updated>
     </task>
-    <task id="LOCAL-00020" summary="aggiunta inferenza e resa usabile da cli fix">
+    <task id="LOCAL-00020" summary="Implementazione recovery storm con 16 alberi per worker per recover">
       <option name="closed" value="true" />
-      <created>1778776306527</created>
+      <created>1780173968854</created>
       <option name="number" value="00020" />
       <option name="presentableId" value="LOCAL-00020" />
       <option name="project" value="LOCAL" />
-      <updated>1778776306527</updated>
+      <updated>1780173968855</updated>
     </task>
-    <task id="LOCAL-00021" summary="aggiunto dataset no leak">
+    <task id="LOCAL-00021" summary="aggiunta loggers e tempo di timeout più breve">
       <option name="closed" value="true" />
-      <created>1778929646828</created>
+      <created>1780227221854</created>
       <option name="number" value="00021" />
       <option name="presentableId" value="LOCAL-00021" />
       <option name="project" value="LOCAL" />
-      <updated>1778929646828</updated>
+      <updated>1780227221855</updated>
     </task>
-    <task id="LOCAL-00022" summary="aggiunto dataset no leak, fix">
+    <task id="LOCAL-00022" summary="Tempo di timeout più breve per testing">
       <option name="closed" value="true" />
-      <created>1778944393739</created>
+      <created>1780644070262</created>
       <option name="number" value="00022" />
       <option name="presentableId" value="LOCAL-00022" />
       <option name="project" value="LOCAL" />
-      <updated>1778944393739</updated>
+      <updated>1780644070262</updated>
     </task>
-    <task id="LOCAL-00023" summary="fix test evaluator">
+    <task id="LOCAL-00023" summary="Tempo di timeout più breve per testing pt.2">
       <option name="closed" value="true" />
-      <created>1778949531622</created>
+      <created>1780650154467</created>
       <option name="number" value="00023" />
       <option name="presentableId" value="LOCAL-00023" />
       <option name="project" value="LOCAL" />
-      <updated>1778949531622</updated>
+      <updated>1780650154467</updated>
     </task>
-    <option name="localTasksCounter" value="24" />
+    <task id="LOCAL-00024" summary="Implementazione resume training e script per ottenere i job falliti">
+      <option name="closed" value="true" />
+      <created>1781169512638</created>
+      <option name="number" value="00024" />
+      <option name="presentableId" value="LOCAL-00024" />
+      <option name="project" value="LOCAL" />
+      <updated>1781169512638</updated>
+    </task>
+    <task id="LOCAL-00025" summary="test per allenamento locale e distribuito">
+      <option name="closed" value="true" />
+      <created>1781457122726</created>
+      <option name="number" value="00025" />
+      <option name="presentableId" value="LOCAL-00025" />
+      <option name="project" value="LOCAL" />
+      <updated>1781457122726</updated>
+    </task>
+    <task id="LOCAL-00026" summary="Risoluzione race condition">
+      <option name="closed" value="true" />
+      <created>1781519613723</created>
+      <option name="number" value="00026" />
+      <option name="presentableId" value="LOCAL-00026" />
+      <option name="project" value="LOCAL" />
+      <updated>1781519613724</updated>
+    </task>
+    <task id="LOCAL-00027" summary="Risoluzione race condition pt2">
+      <option name="closed" value="true" />
+      <created>1781521103009</created>
+      <option name="number" value="00027" />
+      <option name="presentableId" value="LOCAL-00027" />
+      <option name="project" value="LOCAL" />
+      <updated>1781521103009</updated>
+    </task>
+    <task id="LOCAL-00028" summary="Risoluzione metriche">
+      <option name="closed" value="true" />
+      <created>1781523534121</created>
+      <option name="number" value="00028" />
+      <option name="presentableId" value="LOCAL-00028" />
+      <option name="project" value="LOCAL" />
+      <updated>1781523534121</updated>
+    </task>
+    <task id="LOCAL-00029" summary="Risoluzione metriche pt2">
+      <option name="closed" value="true" />
+      <created>1781527448206</created>
+      <option name="number" value="00029" />
+      <option name="presentableId" value="LOCAL-00029" />
+      <option name="project" value="LOCAL" />
+      <updated>1781527448206</updated>
+    </task>
+    <task id="LOCAL-00030" summary="risultato di comparison e dataset sintetico">
+      <option name="closed" value="true" />
+      <created>1781531882405</created>
+      <option name="number" value="00030" />
+      <option name="presentableId" value="LOCAL-00030" />
+      <option name="project" value="LOCAL" />
+      <updated>1781531882405</updated>
+    </task>
+    <task id="LOCAL-00031" summary="risultato di comparison e dataset sintetico pt2">
+      <option name="closed" value="true" />
+      <created>1781531907035</created>
+      <option name="number" value="00031" />
+      <option name="presentableId" value="LOCAL-00031" />
+      <option name="project" value="LOCAL" />
+      <updated>1781531907035</updated>
+    </task>
+    <task id="LOCAL-00032" summary="Modifica timeout">
+      <option name="closed" value="true" />
+      <created>1781542076595</created>
+      <option name="number" value="00032" />
+      <option name="presentableId" value="LOCAL-00032" />
+      <option name="project" value="LOCAL" />
+      <updated>1781542076595</updated>
+    </task>
+    <option name="localTasksCounter" value="33" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
   </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="First commit" />
-    <MESSAGE value="Introduzione artifact_store, filesystem_stoere e paths" />
-    <MESSAGE value="refactoring worker.py e paths.py" />
-    <MESSAGE value="aggiunto commento" />
-    <MESSAGE value="ristrutturato master" />
-    <MESSAGE value="nuovi moduli master per toglierlo da versione monolitico" />
-    <MESSAGE value="snellito master" />
-    <MESSAGE value="resi coerenti: TrainingJobService&#10;TrainingOrchestrator&#10;JobRepository&#10;TaskLedger&#10;ModelRepository" />
-    <MESSAGE value="aggiustato taskLedger" />
-    <MESSAGE value="aggiunte nuove classi per gestione del retry di training" />
-    <MESSAGE value="iniziata fase di recovery safe" />
-    <MESSAGE value="sistemato recovery, pronto per iniziare consenso" />
-    <MESSAGE value="sistemata coerenza e fault tolerance lato master" />
-    <MESSAGE value="ancora modifiche di coerenza" />
-    <MESSAGE value="non falliscono i training" />
-    <MESSAGE value="non distribuiva il train, ora ok" />
-    <MESSAGE value="nuova classe per submit training regressione" />
-    <MESSAGE value="aggiunta inferenza e resa usabile da cli" />
-    <MESSAGE value="aggiunta inferenza e resa usabile da cli fix" />
-    <MESSAGE value="aggiunto dataset no leak" />
-    <MESSAGE value="aggiunto dataset no leak, fix" />
-    <MESSAGE value="fix test evaluator" />
-    <option name="LAST_COMMIT_MESSAGE" value="fix test evaluator" />
+    <MESSAGE value="monitor.sh in background" />
+    <MESSAGE value="update monitor.sh" />
+    <MESSAGE value="introduzione feature importance" />
+    <MESSAGE value="completamento della fault tolerance su worker e master" />
+    <MESSAGE value="testing fault tolerance sistema" />
+    <MESSAGE value="Introduzione dell'iperparametro Numero degli alberi come parametro da cli" />
+    <MESSAGE value="Sistemato worker.sh" />
+    <MESSAGE value="Sistemato update worker.sh" />
+    <MESSAGE value="update worker.sh" />
+    <MESSAGE value="fault tollerance worker zombie" />
+    <MESSAGE value="Fault tolerance worker zombie" />
+    <MESSAGE value="Implementazione recovery storm con 16 alberi per worker per recover" />
+    <MESSAGE value="aggiunta loggers e tempo di timeout più breve" />
+    <MESSAGE value="Tempo di timeout più breve per testing" />
+    <MESSAGE value="Tempo di timeout più breve per testing pt.2" />
+    <MESSAGE value="Implementazione resume training e script per ottenere i job falliti" />
+    <MESSAGE value="test per allenamento locale e distribuito" />
+    <MESSAGE value="Risoluzione race condition" />
+    <MESSAGE value="Risoluzione race condition pt2" />
+    <MESSAGE value="Risoluzione metriche" />
+    <MESSAGE value="Risoluzione metriche pt2" />
+    <MESSAGE value="risultato di comparison e dataset sintetico" />
+    <MESSAGE value="risultato di comparison e dataset sintetico pt2" />
+    <MESSAGE value="risultato di comparison e dataset sintetico pt3" />
+    <MESSAGE value="Modifica timeout" />
+    <option name="LAST_COMMIT_MESSAGE" value="Modifica timeout" />
+  </component>
+  <component name="com.intellij.coverage.CoverageDataManagerImpl">
+    <SUITE FILE_PATH="coverage/ProgSDCC_ML$synthetic_dataset_cli.coverage" NAME="synthetic_dataset_cli Coverage Results" MODIFIED="1781537994580" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/synthetic_data" />
+    <SUITE FILE_PATH="coverage/ProgSDCC_ML$local_baseline_cli.coverage" NAME="local_baseline_cli Coverage Results" MODIFIED="1781529372677" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/local_baseline" />
+    <SUITE FILE_PATH="coverage/ProgSDCC_ML$submit_training_regression.coverage" NAME="submit_training_regression Coverage Results" MODIFIED="1779804927673" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/ProgSDCC_ML$training_debug_cli.coverage" NAME="training_debug_cli Coverage Results" MODIFIED="1780844905316" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/ProgSDCC_ML$compare_existing_job_cli.coverage" NAME="compare_existing_job_cli Coverage Results" MODIFIED="1781434093457" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/performance_evaluation" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

@@ -1,0 +1,200 @@
+{
+  "comparison_type": "offline_existing_distributed_job_vs_local_baseline",
+  "metric_name": "accuracy",
+  "compatibility_check": {
+    "same_task_type": true,
+    "same_target_column": true,
+    "same_dataset_scenario": true,
+    "same_n_estimators": true,
+    "same_max_depth": true,
+    "same_max_features": true,
+    "same_criterion": true,
+    "same_bootstrap": true,
+    "same_train_size": true,
+    "same_validation_size": true,
+    "same_test_size": true
+  },
+  "local": {
+    "mode": "local_non_distributed",
+    "dataset_url": "Dataset/diabetes_dataset.csv",
+    "dataset_path_resolved": "C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\Dataset\\diabetes_dataset.csv",
+    "dataset_scenario": "baseline_no_leakage",
+    "target_column": "diagnosed_diabetes",
+    "task_type": "classification",
+    "n_estimators": 240,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "criterion": "gini",
+    "bootstrap": true,
+    "class_weight": null,
+    "n_jobs": 1,
+    "n_train": 60000,
+    "n_validation": 20000,
+    "n_test": 20000,
+    "n_features_input": 28,
+    "n_features_after_preprocessing": 46,
+    "training_time_seconds": 30.36685240000952,
+    "validation_inference_time_seconds": 0.5521169999847189,
+    "test_inference_time_seconds": 0.5460771999787539,
+    "validation_metric": 0.91565,
+    "test_metric": 0.91515,
+    "validation_metrics": {
+      "accuracy": 0.91565,
+      "classification_report": {
+        "0": {
+          "precision": 0.8356368275568786,
+          "recall": 0.9823772028496438,
+          "f1-score": 0.903084965818349,
+          "support": 8001.0
+        },
+        "1": {
+          "precision": 0.9866905795733434,
+          "recall": 0.871155929660805,
+          "f1-score": 0.9253308546895056,
+          "support": 11999.0
+        },
+        "accuracy": 0.91565,
+        "macro avg": {
+          "precision": 0.911163703565111,
+          "recall": 0.9267665662552245,
+          "f1-score": 0.9142079102539273,
+          "support": 20000.0
+        },
+        "weighted avg": {
+          "precision": 0.9262615260791567,
+          "recall": 0.91565,
+          "f1-score": 0.9164313868465993,
+          "support": 20000.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          7860,
+          141
+        ],
+        [
+          1546,
+          10453
+        ]
+      ],
+      "labels": [
+        0,
+        1
+      ]
+    },
+    "test_metrics": {
+      "accuracy": 0.91515,
+      "classification_report": {
+        "0": {
+          "precision": 0.8350877192982457,
+          "recall": 0.98175,
+          "f1-score": 0.9024992818155703,
+          "support": 8000.0
+        },
+        "1": {
+          "precision": 0.9862199150542709,
+          "recall": 0.87075,
+          "f1-score": 0.9248948882496127,
+          "support": 12000.0
+        },
+        "accuracy": 0.91515,
+        "macro avg": {
+          "precision": 0.9106538171762583,
+          "recall": 0.92625,
+          "f1-score": 0.9136970850325915,
+          "support": 20000.0
+        },
+        "weighted avg": {
+          "precision": 0.9257670367518607,
+          "recall": 0.91515,
+          "f1-score": 0.9159366456759958,
+          "support": 20000.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          7854,
+          146
+        ],
+        [
+          1551,
+          10449
+        ]
+      ],
+      "labels": [
+        0,
+        1
+      ]
+    }
+  },
+  "distributed": {
+    "mode": "distributed",
+    "job_id": "job_5245274879644980b4fbb7b192105637",
+    "job_dir": "C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\performance_evaluation\\distributed_jobs\\job_5245274879644980b4fbb7b192105637",
+    "job_status": "COMPLETED",
+    "experiment_id": "job_5245274879644980b4fbb7b192105637_exp_000",
+    "experiment_status": "COMPLETED",
+    "model_id": "model_b17d74c36f02496bb525542f8e6ae35c",
+    "dataset_uri": "/mnt/efs/gp_artifacts/datasets/diabetes_dataset.csv",
+    "dataset_scenario": "baseline_no_leakage",
+    "target_column": "diagnosed_diabetes",
+    "task_type": "classification",
+    "n_estimators": 240,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "criterion": "gini",
+    "bootstrap": true,
+    "worker_count": 6,
+    "assigned_workers": [
+      "worker1",
+      "worker2",
+      "worker3",
+      "worker4",
+      "worker5",
+      "worker6"
+    ],
+    "n_train": 60000,
+    "n_validation": 20000,
+    "n_test": 20000,
+    "n_features": 52,
+    "training_wall_time_seconds": 23.875845909118652,
+    "validation_metric": 0.91075,
+    "validation_accuracy": 0.91075,
+    "validation_r2": null,
+    "validation_mae": null,
+    "validation_mse": null,
+    "validation_rmse": null,
+    "validation_confusion_matrix": [
+      [
+        7905,
+        96
+      ],
+      [
+        1689,
+        10310
+      ]
+    ],
+    "expected_tree_count": 240,
+    "completed_tree_count": 240,
+    "saved_tree_joblib_count": 240,
+    "tree_distribution_by_worker": {
+      "worker1": 40,
+      "worker2": 40,
+      "worker3": 40,
+      "worker4": 40,
+      "worker5": 40,
+      "worker6": 40
+    },
+    "tree_training_time_sum_seconds": 15.789089918136597,
+    "tree_training_time_avg_seconds": 0.06578787465890248,
+    "tree_training_time_max_seconds": 0.12549567222595215
+  },
+  "comparison": {
+    "local_validation_metric": 0.91565,
+    "distributed_validation_metric": 0.91075,
+    "validation_metric_delta_distributed_minus_local": -0.0049000000000000155,
+    "local_training_time_seconds": 30.36685240000952,
+    "distributed_training_wall_time_seconds": 23.875845909118652,
+    "training_time_ratio_local_over_distributed": 1.2718649850396222
+  }
+}
