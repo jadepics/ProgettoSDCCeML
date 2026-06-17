@@ -195,16 +195,13 @@ class MasterClient:
             active_task_ids=None,
             active_tasks=None,
     ):
-        if active_task_ids is None:
-            active_task_ids = active_tasks
-
-        if active_task_ids is None:
-            active_task_ids = []
+        active_task_ids = list(active_task_ids or [])
+        active_tasks = list(active_tasks or [])
 
         request = rf_pb2.HeartbeatRequest(
             worker_id=worker_id,
             running_tasks=running_tasks,
-            active_task_ids=list(active_task_ids),
+            active_task_ids=active_task_ids,
             active_tasks=[
                 rf_pb2.ActiveTaskHeartbeat(
                     task_id=str(item["task_id"]),
@@ -215,6 +212,7 @@ class MasterClient:
         )
 
         last_error = None
+        last_response = None
 
         for address in self._candidate_addresses():
             try:
@@ -228,13 +226,15 @@ class MasterClient:
                 if response.ok:
                     return response
 
+                last_response = response
+
                 print(
                     f"[MasterClient] Heartbeat rejected by {self.address}. "
-                    "Worker may need re-registration or this master is not leader.",
+                    "Trying next master candidate...",
                     flush=True,
                 )
 
-                return response
+                continue
 
             except Exception as exc:
                 last_error = exc
@@ -243,6 +243,9 @@ class MasterClient:
                     flush=True,
                 )
                 continue
+
+        if last_response is not None:
+            return last_response
 
         raise RuntimeError(
             f"Heartbeat failed on all master candidates: {last_error}"

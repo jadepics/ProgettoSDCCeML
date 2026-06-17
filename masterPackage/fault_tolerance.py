@@ -332,8 +332,13 @@ class RaftConsensusService(ConsensusService):
 
                     if self.path == "/request_vote":
                         response = service._handle_request_vote(payload)
+
                     elif self.path == "/append_entries":
                         response = service._handle_append_entries(payload)
+
+                    elif self.path == "/status":
+                        response = service._handle_status()
+
                     else:
                         self.send_response(404)
                         self.end_headers()
@@ -601,3 +606,13 @@ class RaftConsensusService(ConsensusService):
 
         except (urllib.error.URLError, TimeoutError, OSError):
             return None
+
+    def _handle_status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "ok": True,
+                "node_id": self.node_id,
+                "role": str(self._role.value if hasattr(self._role, "value") else self._role),
+                "term": self._term,
+                "leader_id": self._leader_id,
+            }

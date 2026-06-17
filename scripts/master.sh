@@ -366,6 +366,32 @@ reset_raft() {
 
   echo "[OK] Raft state deleted under ${ARTIFACT_MOUNT}/raft"
 }
+wait_leader() {
+  local host
+  host="$(cluster_host)"
+
+  local timeout_seconds="${WAIT_LEADER_TIMEOUT_SECONDS:-60}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  echo "[MASTER] waiting for Raft leader on ${host}..."
+
+  while (( SECONDS < deadline )); do
+    for port in 50151 50152 50153; do
+      response="$(curl -s --max-time 1 "http://${host}:${port}/status" || true)"
+
+      if echo "$response" | grep -q '"role": "LEADER"'; then
+        echo "[MASTER] leader detected on Raft port ${port}"
+        echo "$response"
+        return 0
+      fi
+    done
+
+    sleep 1
+  done
+
+  echo "[ERROR] no Raft leader detected within ${timeout_seconds}s"
+  return 1
+}
 
 case "$ACTION" in
   build)
@@ -415,6 +441,11 @@ case "$ACTION" in
 
   update-all)
     update_all "$@"
+    ;;
+
+    wait-leader)
+    parse_env_only "$@"
+    wait_leader
     ;;
 
   stop-all)

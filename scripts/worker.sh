@@ -314,6 +314,7 @@ update_one() {
 
 start_all() {
   parse_env_only "$@"
+  wait_master_leader
   stop_all_containers
 
   for worker_id in "${WORKERS[@]}"; do
@@ -323,15 +324,43 @@ start_all() {
 
 restart_all() {
   parse_env_only "$@"
+  wait_master_leader
   stop_all_containers
 
   for worker_id in "${WORKERS[@]}"; do
     run_worker "$worker_id" "${WORKER_PORTS[$worker_id]}"
   done
 }
+wait_master_leader() {
+  local host
+  host="$(master_cluster_host)"
+
+  local timeout_seconds="${WAIT_LEADER_TIMEOUT_SECONDS:-60}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  echo "[WORKER] waiting for Raft leader on master cluster ${host}..."
+
+  while (( SECONDS < deadline )); do
+    for port in 50151 50152 50153; do
+      response="$(curl -s --max-time 1 "http://${host}:${port}/status" || true)"
+
+      if echo "$response" | grep -q '"role": "LEADER"'; then
+        echo "[WORKER] leader detected on Raft port ${port}"
+        echo "$response"
+        return 0
+      fi
+    done
+
+    sleep 1
+  done
+
+  echo "[WARN] no Raft leader detected within ${timeout_seconds}s; starting workers anyway"
+  return 0
+}
 
 rebuild_all() {
   parse_env_only "$@"
+  wait_master_leader
   stop_all_containers
   docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
   build_image
@@ -343,6 +372,7 @@ rebuild_all() {
 
 update_all() {
   parse_env_only "$@"
+  wait_master_leader
   cd "$PROJECT_ROOT"
   git pull
   stop_all_containers
