@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Optional, Protocol, Sequence, Any
+from typing import Optional, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
@@ -17,16 +17,21 @@ from sklearn.metrics import (
 )
 
 from common.contracts import TreeArtifactMetadata, ValidationMetrics
+from common.prediction_io import (
+    load_prediction_array,
+    normalize_uri_to_path,
+    path_to_file_uri,
+)
+
 
 @dataclass(slots=True)
 class TestEvaluationResult:
     metrics: ValidationMetrics
-
     predicted_labels: list[str] | None
     predicted_values: list[float] | None
-
     evaluated_rows: int
     model_id: str
+
 
 class WorkerLike(Protocol):
     worker_id: str
@@ -47,22 +52,17 @@ class WorkerRegistryLike(Protocol):
 
 class TestEvaluator:
     """
-    Responsabilità:
-    - leggere il validation split persistito
-    - distribuire gli alberi ai worker vivi
-    - raccogliere predizioni parziali
-    - aggregare il risultato finale
-    - produrre ValidationMetrics
+    Valutazione finale sul test split.
 
-    Nota:
-    questa versione usa i tree artifact già addestrati.
+    Nuovo flusso scalabile:
+    - il master non invia più X_test dentro gRPC;
+    - il master invia test_features_uri ai worker;
+    - i worker leggono X_test da storage condiviso;
+    - i worker salvano predizioni parziali su EFS;
+    - il master legge prediction_uri e aggrega.
 
-    Per classificazione supporta due formati di risposta dal worker:
-    1) formato corretto/atteso:
-       matrice (n_samples, n_classes) con voti parziali
-    2) fallback temporaneo:
-       matrice (n_samples, 1) con classe predetta localmente dal worker
-       -> utile finché il lato worker non viene riallineato del tutto
+    La strategia distribuita resta tree-parallel:
+    ogni worker valuta un sottoinsieme di alberi su tutte le righe.
     """
 
     def __init__(
@@ -70,24 +70,30 @@ class TestEvaluator:
         leadership_guard,
         worker_registry: WorkerRegistryLike,
         worker_client,
+        storage_layout,
         max_parallel_requests: int | None = None,
     ) -> None:
         self.leadership_guard = leadership_guard
         self.worker_registry = worker_registry
         self.worker_client = worker_client
+        self.storage_layout = storage_layout
         self.max_parallel_requests = max_parallel_requests
 
     def evaluate_model(
-            self,
-            model_id: str,
-            experiment_id: str,
-            task_type: str,
-            test_features_uri: str,
-            test_labels_uri: str,
-            tree_artifacts: list[TreeArtifactMetadata],
-            class_labels: Sequence[str] | None = None,
+        self,
+        job_id: str,
+        model_id: str,
+        experiment_id: str,
+        task_type: str,
+        test_features_uri: str,
+        test_labels_uri: str,
+        tree_artifacts: list[TreeArtifactMetadata],
+        class_labels: Sequence[str] | None = None,
     ) -> TestEvaluationResult:
         self.leadership_guard.require_leader()
+
+        if not job_id:
+            raise ValueError("job_id is required for test evaluation")
 
         if not tree_artifacts:
             raise ValueError(
@@ -96,17 +102,21 @@ class TestEvaluator:
 
         X_test_df = self._read_parquet_dataframe(test_features_uri)
         feature_names = list(X_test_df.columns)
+        n_samples = int(X_test_df.shape[0])
+        n_features = int(X_test_df.shape[1])
 
-        X_test = X_test_df.to_numpy(dtype=float)
         y_test = self._read_target_vector(test_labels_uri)
-        if X_test.ndim != 2:
+
+        if X_test_df.ndim != 2:
             raise ValueError("Test features must be a 2D matrix")
-        if X_test.shape[0] == 0:
+
+        if n_samples == 0:
             raise ValueError("Test split is empty")
-        if y_test.shape[0] != X_test.shape[0]:
+
+        if y_test.shape[0] != n_samples:
             raise ValueError(
                 "Test features/labels size mismatch: "
-                f"{X_test.shape[0]} rows vs {y_test.shape[0]} labels"
+                f"{n_samples} rows vs {y_test.shape[0]} labels"
             )
 
         alive_workers = self.worker_registry.alive_workers()
@@ -114,18 +124,29 @@ class TestEvaluator:
             raise RuntimeError("No alive workers available for test evaluation")
 
         tree_uris = [artifact.artifact_uri for artifact in tree_artifacts]
+
         assignments = self._assign_tree_uris_to_workers(
             workers=alive_workers,
             tree_uris=tree_uris,
         )
+
         if not assignments:
             raise RuntimeError("No test assignments could be built")
+
+        prediction_dir = self.storage_layout.prediction_dir(
+            job_id=job_id,
+            experiment_id=experiment_id,
+            phase="test",
+        )
+        prediction_dir.mkdir(parents=True, exist_ok=True)
+        prediction_output_dir = path_to_file_uri(prediction_dir)
 
         responses = self._collect_prediction_responses(
             model_id=model_id,
             experiment_id=experiment_id,
             task_type=task_type,
-            features=X_test,
+            features_uri=test_features_uri,
+            prediction_output_dir=prediction_output_dir,
             class_labels=class_labels,
             assignments=assignments,
         )
@@ -138,7 +159,7 @@ class TestEvaluator:
                 responses=responses,
                 class_labels=class_labels,
                 tree_artifacts=tree_artifacts,
-                n_features=X_test.shape[1],
+                n_features=n_features,
                 feature_names=feature_names,
             )
 
@@ -150,20 +171,21 @@ class TestEvaluator:
                 responses=responses,
                 tree_count=len(tree_artifacts),
                 tree_artifacts=tree_artifacts,
-                n_features=X_test.shape[1],
+                n_features=n_features,
                 feature_names=feature_names,
             )
 
         raise ValueError(f"Unsupported task_type '{task_type}'")
 
     def _collect_prediction_responses(
-            self,
-            model_id: str,
-            experiment_id: str,
-            task_type: str,
-            features: np.ndarray,
-            class_labels: Sequence[str] | None,
-            assignments: list[tuple[WorkerLike, list[str]]],
+        self,
+        model_id: str,
+        experiment_id: str,
+        task_type: str,
+        features_uri: str,
+        prediction_output_dir: str,
+        class_labels: Sequence[str] | None,
+        assignments: list[tuple[WorkerLike, list[str]]],
     ) -> list:
         responses = []
         max_workers = self.max_parallel_requests or len(assignments)
@@ -172,36 +194,43 @@ class TestEvaluator:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             future_map = {}
 
-            for worker, uri_shard in assignments:
+            for index, (worker, uri_shard) in enumerate(assignments):
+                prediction_id = f"{experiment_id}_test_pred_{index:06d}"
+
                 future = pool.submit(
-                    self.worker_client.predict_shard,
+                    self.worker_client.predict_shard_from_uri,
                     worker.host,
                     worker.port,
                     model_id,
                     experiment_id,
                     task_type,
-                    features,
+                    features_uri,
+                    prediction_output_dir,
+                    prediction_id,
                     uri_shard,
                     class_labels,
                 )
-                future_map[future] = (worker, uri_shard)
+                future_map[future] = (worker, uri_shard, prediction_id)
 
             for future in as_completed(future_map):
-                worker, uri_shard = future_map[future]
+                worker, uri_shard, prediction_id = future_map[future]
                 result = future.result()
 
                 if not result.success:
                     retry_worker = self.worker_registry.get_retry_candidate(
                         exclude_worker_id=worker.worker_id
                     )
+
                     if retry_worker is not None:
-                        result = self.worker_client.predict_shard(
+                        result = self.worker_client.predict_shard_from_uri(
                             retry_worker.host,
                             retry_worker.port,
                             model_id,
                             experiment_id,
                             task_type,
-                            features,
+                            features_uri,
+                            prediction_output_dir,
+                            prediction_id,
                             uri_shard,
                             class_labels,
                         )
@@ -217,15 +246,15 @@ class TestEvaluator:
         return responses
 
     def _build_classification_result(
-            self,
-            model_id: str,
-            experiment_id: str,
-            y_true: np.ndarray,
-            responses: list,
-            class_labels: Sequence[str] | None,
-            tree_artifacts: Sequence[TreeArtifactMetadata],
-            n_features: int,
-            feature_names: Sequence[str],
+        self,
+        model_id: str,
+        experiment_id: str,
+        y_true: np.ndarray,
+        responses: list,
+        class_labels: Sequence[str] | None,
+        tree_artifacts: Sequence[TreeArtifactMetadata],
+        n_features: int,
+        feature_names: Sequence[str],
     ) -> TestEvaluationResult:
         resolved_class_labels = self._resolve_class_labels(y_true, class_labels)
         n_samples = y_true.shape[0]
@@ -234,7 +263,7 @@ class TestEvaluator:
         aggregated_votes = np.zeros((n_samples, n_classes), dtype=float)
 
         for response in responses:
-            values = response.values
+            values = self._response_values(response)
 
             if values.shape == aggregated_votes.shape:
                 aggregated_votes += values
@@ -242,11 +271,13 @@ class TestEvaluator:
 
             if values.shape == (n_samples, 1):
                 predicted_indices = np.rint(values[:, 0]).astype(int)
+
                 if np.any(predicted_indices < 0) or np.any(predicted_indices >= n_classes):
                     raise ValueError(
                         "Invalid classification shard response values: "
                         f"indices out of range for {n_classes} classes"
                     )
+
                 aggregated_votes[np.arange(n_samples), predicted_indices] += 1.0
                 continue
 
@@ -261,31 +292,21 @@ class TestEvaluator:
         if self._is_integer_encoded_labels(y_true, n_classes):
             y_true_for_metrics = y_true.astype(int)
             y_pred_for_metrics = final_indices.astype(int)
-            report = classification_report(
-                y_true_for_metrics,
-                y_pred_for_metrics,
-                output_dict=True,
-                zero_division=0,
-            )
-            confusion = confusion_matrix(
-                y_true_for_metrics,
-                y_pred_for_metrics,
-            ).tolist()
-            accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
         else:
             y_true_for_metrics = [str(item) for item in y_true.tolist()]
             y_pred_for_metrics = predicted_labels
-            report = classification_report(
-                y_true_for_metrics,
-                y_pred_for_metrics,
-                output_dict=True,
-                zero_division=0,
-            )
-            confusion = confusion_matrix(
-                y_true_for_metrics,
-                y_pred_for_metrics,
-            ).tolist()
-            accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
+
+        report = classification_report(
+            y_true_for_metrics,
+            y_pred_for_metrics,
+            output_dict=True,
+            zero_division=0,
+        )
+        confusion = confusion_matrix(
+            y_true_for_metrics,
+            y_pred_for_metrics,
+        ).tolist()
+        accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
 
         feature_importances = self._aggregate_feature_importances(
             tree_artifacts=tree_artifacts,
@@ -310,27 +331,26 @@ class TestEvaluator:
             metrics=metrics,
             predicted_labels=predicted_labels,
             predicted_values=None,
-            evaluated_rows=y_true.shape[0],
+            evaluated_rows=n_samples,
             model_id=model_id,
         )
 
     def _build_regression_result(
-            self,
-            model_id: str,
-            experiment_id: str,
-            y_true: np.ndarray,
-            responses: list,
-            tree_count: int,
-            tree_artifacts: Sequence[TreeArtifactMetadata],
-            n_features: int,
-            feature_names: Sequence[str],
+        self,
+        model_id: str,
+        experiment_id: str,
+        y_true: np.ndarray,
+        responses: list,
+        tree_count: int,
+        tree_artifacts: Sequence[TreeArtifactMetadata],
+        n_features: int,
+        feature_names: Sequence[str],
     ) -> TestEvaluationResult:
-
         n_samples = y_true.shape[0]
         aggregated_sum = np.zeros((n_samples, 1), dtype=float)
 
         for response in responses:
-            values = response.values
+            values = self._response_values(response)
 
             if values.shape != aggregated_sum.shape:
                 raise ValueError(
@@ -353,7 +373,6 @@ class TestEvaluator:
             tree_artifacts=tree_artifacts,
             n_features=n_features,
         )
-
         feature_importances_by_name = self._map_feature_importances_by_name(
             feature_names=feature_names,
             feature_importances=feature_importances,
@@ -361,16 +380,13 @@ class TestEvaluator:
 
         metrics = ValidationMetrics(
             experiment_id=experiment_id,
-
             accuracy=None,
             classification_report=None,
             confusion_matrix=None,
-
             mae=mae,
             mse=mse,
             rmse=rmse,
             r2=r2,
-
             feature_importances=feature_importances,
             feature_importances_by_name=feature_importances_by_name,
             evaluated_at=time.time(),
@@ -382,6 +398,56 @@ class TestEvaluator:
             predicted_values=predicted_values,
             evaluated_rows=n_samples,
             model_id=model_id,
+        )
+
+    def _response_values(self, response) -> np.ndarray:
+        """
+        Uniforma il vecchio e il nuovo percorso.
+
+        Vecchio percorso:
+          response.values contiene già la matrice.
+
+        Nuovo percorso:
+          response.prediction_uri punta a un file .npy salvato dal worker.
+        """
+        values = getattr(response, "values", None)
+
+        if values is not None:
+            arr = np.asarray(values, dtype=float)
+
+            if arr.size > 0:
+                if arr.ndim == 1:
+                    if response.n_rows > 0 and response.n_cols > 0:
+                        return arr.reshape(response.n_rows, response.n_cols)
+                    return arr.reshape(-1, 1)
+
+                if arr.ndim == 2:
+                    return arr
+
+                raise ValueError(
+                    f"Invalid in-memory prediction values ndim={arr.ndim}"
+                )
+
+        prediction_uri = getattr(response, "prediction_uri", None)
+
+        if prediction_uri:
+            arr = load_prediction_array(prediction_uri)
+
+            expected_rows = int(getattr(response, "n_rows", 0) or 0)
+            expected_cols = int(getattr(response, "n_cols", 0) or 0)
+
+            if expected_rows > 0 and expected_cols > 0:
+                expected_shape = (expected_rows, expected_cols)
+                if arr.shape != expected_shape:
+                    raise ValueError(
+                        "Prediction URI shape mismatch: "
+                        f"expected {expected_shape}, got {arr.shape}"
+                    )
+
+            return arr.astype(float, copy=False)
+
+        raise ValueError(
+            "Prediction response has neither in-memory values nor prediction_uri"
         )
 
     def _resolve_class_labels(
@@ -397,7 +463,7 @@ class TestEvaluator:
             return [str(index) for index in range(max_label + 1)]
 
         raise ValueError(
-            "class_labels are required for classification when validation labels "
+            "class_labels are required for classification when test labels "
             "are not integer-encoded"
         )
 
@@ -450,6 +516,7 @@ class TestEvaluator:
             buckets[index % shard_count].append(uri)
 
         assignments: list[tuple[WorkerLike, list[str]]] = []
+
         for worker, bucket in zip(ordered_workers[:shard_count], buckets):
             if bucket:
                 assignments.append((worker, bucket))
@@ -457,36 +524,13 @@ class TestEvaluator:
         return assignments
 
     def _read_parquet_dataframe(self, uri: str) -> pd.DataFrame:
-        path = self._normalize_uri(uri)
+        path = normalize_uri_to_path(uri)
         return pd.read_parquet(path)
 
-    def _normalize_uri(self, uri: str) -> str:
-        import os
-        from urllib.parse import urlparse, unquote
-        from urllib.request import url2pathname
-
-        parsed = urlparse(uri)
-
-        if parsed.scheme == "":
-            return uri
-
-        if parsed.scheme != "file":
-            return uri
-
-        path = url2pathname(unquote(parsed.path))
-
-        if os.name == "nt":
-            if parsed.netloc:
-                path = f"//{parsed.netloc}{path}"
-            elif path.startswith("/") and len(path) >= 3 and path[2] == ":":
-                path = path[1:]
-
-        return path
-
     def _aggregate_feature_importances(
-            self,
-            tree_artifacts: Sequence[TreeArtifactMetadata],
-            n_features: int,
+        self,
+        tree_artifacts: Sequence[TreeArtifactMetadata],
+        n_features: int,
     ) -> list[float]:
         vectors: list[np.ndarray] = []
 
@@ -511,9 +555,9 @@ class TestEvaluator:
         return np.mean(np.vstack(vectors), axis=0).tolist()
 
     def _map_feature_importances_by_name(
-            self,
-            feature_names: Sequence[str],
-            feature_importances: Sequence[float],
+        self,
+        feature_names: Sequence[str],
+        feature_importances: Sequence[float],
     ) -> dict[str, float]:
         mapped: dict[str, float] = {}
 

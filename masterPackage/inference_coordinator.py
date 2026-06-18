@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
 import numpy as np
 
+from common.prediction_io import (
+    load_prediction_array,
+    path_to_file_uri,
+    read_parquet_row_count,
+    save_final_prediction_array,
+)
+
 
 @dataclass(slots=True)
 class InferenceResult:
     task_type: str
-    predicted_labels: list[str] | None
-    predicted_values: list[float] | None
+    prediction_uri: str
+    n_rows: int
+    n_cols: int
 
 
 class WorkerLike(Protocol):
@@ -24,23 +34,27 @@ class WorkerRegistryLike(Protocol):
     def alive_workers(self) -> list[WorkerLike]:
         ...
 
-    def get_retry_candidate(self, exclude_worker_id: str | None = None) -> Optional[WorkerLike]:
+    def get_retry_candidate(
+        self,
+        exclude_worker_id: str | None = None,
+    ) -> Optional[WorkerLike]:
         ...
 
 
 class InferenceCoordinator:
     """
-    Responsabilità:
-    - caricare il modello finale dal ModelRepository
-    - suddividere gli alberi tra i worker vivi
-    - inviare richieste di inferenza parziale ai worker tramite WorkerClient
-    - aggregare i risultati finali
+    Inferenza distribuita tree-parallel.
 
-    Assunzioni correnti:
-    - classificazione: ogni worker restituisce una matrice di voti/somme parziali
-      di shape (n_samples, n_classes)
-    - regressione: ogni worker restituisce la somma parziale delle predizioni
-      di shape (n_samples, 1)
+    Nuovo flusso scalabile:
+    - il client/master non invia più DenseMatrix dentro gRPC;
+    - SubmitInference riceve features_uri;
+    - i worker leggono le feature da storage condiviso;
+    - ogni worker valuta un sottoinsieme di alberi sull'intero batch;
+    - ogni worker salva predizioni parziali su EFS;
+    - il master legge prediction_uri, aggrega e salva le predizioni finali.
+
+    gRPC viene usato come control plane.
+    EFS/storage condiviso viene usato come data plane.
     """
 
     def __init__(
@@ -49,29 +63,32 @@ class InferenceCoordinator:
         worker_registry: WorkerRegistryLike,
         worker_client,
         model_repository,
+        storage_layout,
         max_parallel_requests: int | None = None,
     ) -> None:
         self.leadership_guard = leadership_guard
         self.worker_registry = worker_registry
         self.worker_client = worker_client
         self.model_repository = model_repository
+        self.storage_layout = storage_layout
         self.max_parallel_requests = max_parallel_requests
 
     def run_inference(
         self,
         model_id: str,
-        features: np.ndarray,
+        features_uri: str,
     ) -> InferenceResult:
         self.leadership_guard.require_leader()
+
+        if not features_uri:
+            raise ValueError("features_uri must be non-empty")
 
         manifest = self.model_repository.load(model_id)
         if manifest is None:
             raise ValueError(f"Model '{model_id}' not found")
 
-        X = np.asarray(features, dtype=float)
-        if X.ndim != 2:
-            raise ValueError("features must be a 2D matrix")
-        if X.shape[0] == 0:
+        n_samples = read_parquet_row_count(features_uri)
+        if n_samples <= 0:
             raise ValueError("Empty inference batch")
 
         alive_workers = self.worker_registry.alive_workers()
@@ -82,52 +99,124 @@ class InferenceCoordinator:
         if not tree_uris:
             raise RuntimeError("Model manifest contains no tree artifacts")
 
-        worker_shards = self._assign_tree_uris_to_workers(
+        assignments = self._assign_tree_uris_to_workers(
             workers=alive_workers,
             tree_uris=tree_uris,
         )
-        if not worker_shards:
+        if not assignments:
             raise RuntimeError("No worker shards could be built for inference")
 
+        inference_id = self._new_inference_id()
+
+        prediction_dir = self.storage_layout.inference_prediction_dir(
+            model_id=manifest.model_id,
+            inference_id=inference_id,
+        )
+        prediction_dir.mkdir(parents=True, exist_ok=True)
+        prediction_output_dir = path_to_file_uri(prediction_dir)
+
+        responses = self._collect_prediction_responses(
+            model_id=manifest.model_id,
+            experiment_id=manifest.experiment_id,
+            task_type=manifest.model_type,
+            features_uri=features_uri,
+            prediction_output_dir=prediction_output_dir,
+            class_labels=manifest.class_labels,
+            assignments=assignments,
+        )
+
+        if manifest.model_type == "classification":
+            final_predictions = self._aggregate_classification_predictions(
+                responses=responses,
+                n_samples=n_samples,
+                class_labels=manifest.class_labels,
+            )
+
+        elif manifest.model_type == "regression":
+            final_predictions = self._aggregate_regression_predictions(
+                responses=responses,
+                n_samples=n_samples,
+                tree_count=len(manifest.tree_artifacts),
+            )
+
+        else:
+            raise ValueError(f"Unsupported model_type '{manifest.model_type}'")
+
+        final_prediction_path = self.storage_layout.inference_final_prediction_path(
+            model_id=manifest.model_id,
+            inference_id=inference_id,
+        )
+
+        final_prediction_uri = save_final_prediction_array(
+            array=final_predictions,
+            output_uri_or_path=final_prediction_path,
+        )
+
+        return InferenceResult(
+            task_type=manifest.model_type,
+            prediction_uri=final_prediction_uri,
+            n_rows=int(final_predictions.shape[0]),
+            n_cols=int(final_predictions.shape[1]),
+        )
+
+    def _collect_prediction_responses(
+        self,
+        model_id: str,
+        experiment_id: str,
+        task_type: str,
+        features_uri: str,
+        prediction_output_dir: str,
+        class_labels: list[str],
+        assignments: list[tuple[WorkerLike, list[str]]],
+    ) -> list:
         responses = []
-        max_workers = self.max_parallel_requests or len(worker_shards)
-        max_workers = min(max_workers, len(worker_shards))
+        max_workers = self.max_parallel_requests or len(assignments)
+        max_workers = min(max_workers, len(assignments))
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             future_map = {}
 
-            for worker, uri_shard in worker_shards:
+            for index, (worker, uri_shard) in enumerate(assignments):
+                prediction_id = (
+                    f"{experiment_id}_inference_{int(time.time())}_{index:06d}"
+                )
+
                 future = pool.submit(
-                    self.worker_client.predict_shard,
+                    self.worker_client.predict_shard_from_uri,
                     worker.host,
                     worker.port,
-                    manifest.model_id,
-                    manifest.experiment_id,
-                    manifest.model_type,
-                    X,
+                    model_id,
+                    experiment_id,
+                    task_type,
+                    features_uri,
+                    prediction_output_dir,
+                    prediction_id,
                     uri_shard,
-                    manifest.class_labels,
+                    class_labels,
                 )
-                future_map[future] = (worker, uri_shard)
+                future_map[future] = (worker, uri_shard, prediction_id)
 
             for future in as_completed(future_map):
-                worker, uri_shard = future_map[future]
+                worker, uri_shard, prediction_id = future_map[future]
                 result = future.result()
 
                 if not result.success:
                     retry_worker = self.worker_registry.get_retry_candidate(
                         exclude_worker_id=worker.worker_id
                     )
+
                     if retry_worker is not None:
-                        result = self.worker_client.predict_shard(
+                        result = self.worker_client.predict_shard_from_uri(
                             retry_worker.host,
                             retry_worker.port,
-                            manifest.model_id,
-                            manifest.experiment_id,
-                            manifest.model_type,
-                            X,
+                            model_id,
+                            experiment_id,
+                            task_type,
+                            features_uri,
+                            prediction_output_dir,
+                            prediction_id,
                             uri_shard,
-                            manifest.class_labels,
+                            class_labels,
                         )
 
                 if not result.success:
@@ -138,55 +227,123 @@ class InferenceCoordinator:
 
                 responses.append(result)
 
-        if manifest.model_type == "classification":
-            aggregated_votes = np.zeros((X.shape[0], len(manifest.class_labels)), dtype=float)
+        return responses
 
-            for response in responses:
-                if response.values.shape != aggregated_votes.shape:
+    def _aggregate_classification_predictions(
+        self,
+        responses: list,
+        n_samples: int,
+        class_labels: list[str],
+    ) -> np.ndarray:
+        if not class_labels:
+            raise ValueError("class_labels are required for classification inference")
+
+        n_classes = len(class_labels)
+        aggregated_votes = np.zeros((n_samples, n_classes), dtype=float)
+
+        for response in responses:
+            values = self._response_values(response)
+
+            if values.shape == aggregated_votes.shape:
+                aggregated_votes += values
+                continue
+
+            if values.shape == (n_samples, 1):
+                predicted_indices = np.rint(values[:, 0]).astype(int)
+
+                if np.any(predicted_indices < 0) or np.any(predicted_indices >= n_classes):
                     raise ValueError(
-                        "Invalid classification shard response shape: "
-                        f"expected {aggregated_votes.shape}, got {response.values.shape}"
+                        "Invalid classification shard response values: "
+                        f"indices out of range for {n_classes} classes"
                     )
-                aggregated_votes += response.values
 
-            predicted_indices = np.argmax(aggregated_votes, axis=1)
-            predicted_labels = [manifest.class_labels[index] for index in predicted_indices]
+                aggregated_votes[np.arange(n_samples), predicted_indices] += 1.0
+                continue
 
-            return InferenceResult(
-                task_type="classification",
-                predicted_labels=predicted_labels,
-                predicted_values=None,
+            raise ValueError(
+                "Invalid classification shard response shape: "
+                f"expected {(n_samples, n_classes)} or {(n_samples, 1)}, got {values.shape}"
             )
 
-        if manifest.model_type == "regression":
-            aggregated_sum = np.zeros((X.shape[0], 1), dtype=float)
+        final_indices = np.argmax(aggregated_votes, axis=1)
+        predicted_labels = np.asarray(
+            [class_labels[index] for index in final_indices],
+            dtype=str,
+        )
 
-            for response in responses:
-                if response.values.shape != aggregated_sum.shape:
+        return predicted_labels.reshape(-1, 1)
+
+    def _aggregate_regression_predictions(
+        self,
+        responses: list,
+        n_samples: int,
+        tree_count: int,
+    ) -> np.ndarray:
+        if tree_count <= 0:
+            raise ValueError("tree_count must be > 0")
+
+        aggregated_sum = np.zeros((n_samples, 1), dtype=float)
+
+        for response in responses:
+            values = self._response_values(response)
+
+            if values.shape != aggregated_sum.shape:
+                raise ValueError(
+                    "Invalid regression shard response shape: "
+                    f"expected {aggregated_sum.shape}, got {values.shape}"
+                )
+
+            aggregated_sum += values
+
+        return aggregated_sum / float(tree_count)
+
+    def _response_values(self, response) -> np.ndarray:
+        values = getattr(response, "values", None)
+
+        if values is not None:
+            arr = np.asarray(values, dtype=float)
+
+            if arr.size > 0:
+                if arr.ndim == 1:
+                    if response.n_rows > 0 and response.n_cols > 0:
+                        return arr.reshape(response.n_rows, response.n_cols)
+                    return arr.reshape(-1, 1)
+
+                if arr.ndim == 2:
+                    return arr
+
+                raise ValueError(
+                    f"Invalid in-memory prediction values ndim={arr.ndim}"
+                )
+
+        prediction_uri = getattr(response, "prediction_uri", None)
+
+        if prediction_uri:
+            arr = load_prediction_array(prediction_uri)
+
+            expected_rows = int(getattr(response, "n_rows", 0) or 0)
+            expected_cols = int(getattr(response, "n_cols", 0) or 0)
+
+            if expected_rows > 0 and expected_cols > 0:
+                expected_shape = (expected_rows, expected_cols)
+                if arr.shape != expected_shape:
                     raise ValueError(
-                        "Invalid regression shard response shape: "
-                        f"expected {aggregated_sum.shape}, got {response.values.shape}"
+                        "Prediction URI shape mismatch: "
+                        f"expected {expected_shape}, got {arr.shape}"
                     )
-                aggregated_sum += response.values
 
-            predicted_values = (aggregated_sum[:, 0] / len(manifest.tree_artifacts)).tolist()
+            return arr.astype(float, copy=False)
 
-            return InferenceResult(
-                task_type="regression",
-                predicted_labels=None,
-                predicted_values=predicted_values,
-            )
-
-        raise ValueError(f"Unsupported model_type '{manifest.model_type}'")
+        raise ValueError(
+            "Prediction response has neither in-memory values nor prediction_uri"
+        )
 
     def _assign_tree_uris_to_workers(
         self,
         workers: list[WorkerLike],
         tree_uris: list[str],
     ) -> list[tuple[WorkerLike, list[str]]]:
-        if not workers:
-            return []
-        if not tree_uris:
+        if not workers or not tree_uris:
             return []
 
         ordered_workers = sorted(workers, key=lambda worker: worker.worker_id)
@@ -197,8 +354,12 @@ class InferenceCoordinator:
             buckets[index % shard_count].append(uri)
 
         assignments: list[tuple[WorkerLike, list[str]]] = []
+
         for worker, bucket in zip(ordered_workers[:shard_count], buckets):
             if bucket:
                 assignments.append((worker, bucket))
 
         return assignments
+
+    def _new_inference_id(self) -> str:
+        return f"inference_{uuid.uuid4().hex}"

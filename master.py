@@ -46,8 +46,6 @@ from common.repositories import (
     SharedArtifactStore,
     TaskLedger,
 )
-from common.storage_layout import StorageLayout
-from common.enums import WorkerLivenessStatus
 
 from common.storage_layout import StorageLayout
 from common.enums import WorkerLivenessStatus
@@ -290,17 +288,20 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             worker_registry=self.registry,
             worker_client=self.worker_client,
             model_repository=self.model_repository,
+            storage_layout=self.layout,
         )
 
         self.validation_coordinator = ValidationCoordinator(
             leadership_guard=self.leadership_guard,
             worker_registry=self.registry,
             worker_client=self.worker_client,
+            storage_layout=self.layout,
         )
         self.test_evaluator = TestEvaluator(
             leadership_guard=self.leadership_guard,
             worker_registry=self.registry,
             worker_client=self.worker_client,
+            storage_layout=self.layout,
         )
         self.recovery_planner = RecoveryPlanner(
             task_ledger=self.task_ledger,
@@ -554,10 +555,9 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         if not model_id:
             return self._failed_submit_inference_response("model_id must be non-empty")
 
-        try:
-            features = matrix_from_proto(request.features)
-        except Exception as exc:
-            return self._failed_submit_inference_response(f"Invalid features matrix: {exc}")
+        features_uri = request.features_uri.strip()
+        if not features_uri:
+            return self._failed_submit_inference_response("features_uri must be non-empty")
 
         alive_workers = self.registry.alive_workers()
         if not alive_workers:
@@ -566,15 +566,16 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         try:
             result = self.inference_coordinator.run_inference(
                 model_id=model_id,
-                features=features,
+                features_uri=features_uri,
             )
 
             return rf_pb2.SubmitInferenceResponse(
                 success=True,
                 error="",
                 task_type=result.task_type,
-                predicted_labels=result.predicted_labels or [],
-                predicted_values=result.predicted_values or [],
+                prediction_uri=result.prediction_uri,
+                n_rows=result.n_rows,
+                n_cols=result.n_cols,
             )
 
         except Exception as exc:
@@ -685,8 +686,9 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             success=False,
             error=message,
             task_type="",
-            predicted_labels=[],
-            predicted_values=[],
+            prediction_uri="",
+            n_rows=0,
+            n_cols=0,
         )
 
     def _build_training_request(self, request) -> TrainingRequest:

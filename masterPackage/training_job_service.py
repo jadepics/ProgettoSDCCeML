@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any, cast, Sized
 
 from common.contracts import (
     ExperimentRecord,
@@ -170,9 +170,7 @@ class TrainingJobService:
             self.leadership_guard.require_leader()
 
             job_record = self._load_job_or_raise(job_id)
-            training_request = job_record.training_request
-
-            metrics_collector = self._build_scalability_metrics_collector(job_id)
+            training_request = self._require_training_request(job_record)
 
             self._metrics_event(
                 metrics_collector,
@@ -613,7 +611,7 @@ class TrainingJobService:
         for candidate_path in candidate_paths:
             value = self._deep_getattr(self, candidate_path)
             if value is not None:
-                return Path(value)
+                return Path(cast(str | os.PathLike[str], value))
 
         env_value = os.getenv("SHARED_STORAGE_ROOT")
         if env_value:
@@ -642,7 +640,7 @@ class TrainingJobService:
         self,
         root_object,
         dotted_path: str,
-    ):
+    ) -> Any | None:
         current = root_object
 
         for part in dotted_path.split("."):
@@ -656,8 +654,8 @@ class TrainingJobService:
         self,
         metrics_collector: Optional[ScalabilityMetricsCollector],
         name: str,
-        **payload,
-    ):
+        **payload : Any,
+    ) -> Any:
         if metrics_collector is None:
             return nullcontext()
 
@@ -670,7 +668,7 @@ class TrainingJobService:
         self,
         metrics_collector: Optional[ScalabilityMetricsCollector],
         event: str,
-        **payload,
+        **payload: Any,
     ) -> None:
         if metrics_collector is None:
             return
@@ -715,7 +713,7 @@ class TrainingJobService:
     ):
         run_experiment = self.training_orchestrator.run_experiment
 
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "job_id": job_id,
             "experiment_id": experiment_id,
             "forest_config": forest_config,
@@ -731,7 +729,7 @@ class TrainingJobService:
 
     def _method_accepts_parameter(
         self,
-        method,
+        method: Any,
         parameter_name: str,
     ) -> bool:
         try:
@@ -770,7 +768,10 @@ class TrainingJobService:
 
             try:
                 workers = attribute() if callable(attribute) else attribute
-                return len(workers)
+                if isinstance(workers, Sized):
+                    return len(workers)
+
+                return 0
             except Exception:
                 continue
 
@@ -831,11 +832,13 @@ class TrainingJobService:
         self,
         forest_config: ForestConfiguration,
     ) -> ExperimentRecord:
-        experiment_id = getattr(forest_config, "experiment_id", None)
-        if not experiment_id:
+        experiment_id_raw = getattr(forest_config, "experiment_id", None)
+        if not experiment_id_raw:
             raise ValueError(
                 "ForestConfiguration must carry experiment_id to build ExperimentRecord"
             )
+
+        experiment_id = str(experiment_id_raw)
 
         return ExperimentRecord(
             experiment_id=experiment_id,
@@ -862,9 +865,12 @@ class TrainingJobService:
         if prepared_dataset is None:
             raise ValueError(f"Job '{job_id}' has no prepared dataset")
 
+        training_request = self._require_training_request(job_record)
+
         return self.validation_coordinator.validate_experiment(
+            job_id=job_id,
             experiment_id=experiment.experiment_id,
-            task_type=job_record.training_request.task_type,
+            task_type=training_request.task_type,
             validation_features_uri=prepared_dataset.validation_features_uri,
             validation_labels_uri=prepared_dataset.validation_labels_uri,
             tree_artifacts=tree_artifacts,
@@ -901,11 +907,14 @@ class TrainingJobService:
 
         model_id = generate_model_id()
 
+        training_request = self._require_training_request(job_record)
+
         test_metrics = None
-        task_type = job_record.training_request.task_type.strip().lower()
+        task_type = training_request.task_type.strip().lower()
 
         if self.test_evaluator is not None and prepared_dataset.n_test > 0:
             test_result = self.test_evaluator.evaluate_model(
+                job_id=job_record.job_id,
                 model_id=model_id,
                 experiment_id=experiment_record.experiment_id,
                 task_type=task_type,
@@ -960,3 +969,16 @@ class TrainingJobService:
         if record is None:
             raise ValueError(f"Job '{job_id}' not found")
         return record
+
+    def _require_training_request(
+        self,
+        job_record: TrainingJobRecord,
+    ) -> TrainingRequest:
+        training_request = job_record.training_request
+
+        if training_request is None:
+            raise ValueError(
+                f"Job '{job_record.job_id}' has no training request"
+            )
+
+        return training_request

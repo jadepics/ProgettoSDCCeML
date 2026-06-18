@@ -1,21 +1,22 @@
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
-from common.chaos import maybe_fail
-from common.contracts import TrainingShard, ForestConfiguration, TreeArtifactMetadata
-from worker.mappers.tree_artifact_mapper import to_proto_tree_artifact
-from worker.utils.dataset_utils import split_features_labels
 
+from common.chaos import maybe_fail
+from common.contracts import TrainingShard, ForestConfiguration
+from common.prediction_io import read_features_from_uri, save_prediction_array
+
+from worker.mappers.tree_artifact_mapper import to_proto_tree_artifact
 from worker.utils.proto_utils import matrix_from_proto
 
 
 class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 
     def __init__(
-            self,
-            config,
-            state,
-            shard_trainer,
-            shard_predictor,
+        self,
+        config,
+        state,
+        shard_trainer,
+        shard_predictor,
     ):
         self.config = config
         self.state = state
@@ -63,7 +64,11 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             # ----------------------------------------
             # 2. Delega totale al trainer
             # ----------------------------------------
-            result = self.shard_trainer.train(shard, context=context, progress_callback=self.state.on_task_progress,)
+            result = self.shard_trainer.train(
+                shard,
+                context=context,
+                progress_callback=self.state.on_task_progress,
+            )
 
             # ----------------------------------------
             # 3. Stato worker
@@ -110,21 +115,59 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
     # PREDICT
     # --------------------------------------------------
     def PredictShard(self, request, context):
-        self.state.on_task_start(request.model_id)
+        """
+        Prediction distribuita per sottoinsiemi di alberi.
+
+        Modalità legacy:
+          - input: request.features DenseMatrix
+          - output: response.values dentro gRPC
+
+        Modalità scalabile:
+          - input: request.features_uri
+          - output: response.prediction_uri
+          - le predizioni parziali vengono salvate su storage condiviso
+        """
+        task_id = request.prediction_id or request.model_id
+        self.state.on_task_start(task_id)
 
         try:
-            # 1. input
-            X = matrix_from_proto(request.features)
-
-            # 2. usare URIs dal master
             artifact_uris = list(request.tree_artifact_uris)
 
             if not artifact_uris:
                 raise ValueError("No tree artifacts provided")
 
+            # ----------------------------------------
+            # 1. Input features
+            # ----------------------------------------
+            if request.features_uri:
+                if not request.prediction_output_dir:
+                    raise ValueError(
+                        "prediction_output_dir is required when features_uri is used"
+                    )
+
+                if not request.prediction_id:
+                    raise ValueError(
+                        "prediction_id is required when features_uri is used"
+                    )
+
+                X = read_features_from_uri(request.features_uri, dtype=float)
+            else:
+                # Percorso legacy/fallback.
+                X = matrix_from_proto(request.features)
+
             maybe_fail("worker.predict.before_predictor")
 
-            # 3. prediction (NO aggregation finale)
+            # ----------------------------------------
+            # 2. Prediction parziale
+            # ----------------------------------------
+            # Classification:
+            #   result = voti parziali per classe.
+            #
+            # Regression:
+            #   result = somma parziale delle predizioni degli alberi
+            #            assegnati a questo worker.
+            #
+            # L'aggregazione finale resta sul master.
             result = self.shard_predictor.predict(
                 tree_artifact_uris=artifact_uris,
                 X=X,
@@ -132,21 +175,53 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 class_labels=list(request.class_labels),
             )
 
-            self.state.on_task_success(request.model_id)
+            if result.ndim == 1:
+                result = result.reshape(-1, 1)
+
+            if result.ndim != 2:
+                raise ValueError(
+                    f"Shard predictor result must be 1D or 2D, got ndim={result.ndim}"
+                )
 
             n_rows, n_cols = result.shape
 
+            self.state.on_task_success(task_id)
+
+            # ----------------------------------------
+            # 3. Output scalabile: salva .npy e ritorna URI
+            # ----------------------------------------
+            if request.prediction_output_dir:
+                prediction_uri = save_prediction_array(
+                    array=result,
+                    output_dir_uri_or_path=request.prediction_output_dir,
+                    prediction_id=request.prediction_id,
+                )
+
+                return rf_pb2.PredictShardResponse(
+                    worker_id=self.config.worker_id,
+                    success=True,
+                    error="",
+                    values=[],
+                    n_rows=n_rows,
+                    n_cols=n_cols,
+                    prediction_uri=prediction_uri,
+                )
+
+            # ----------------------------------------
+            # 4. Output legacy: ritorna values dentro gRPC
+            # ----------------------------------------
             return rf_pb2.PredictShardResponse(
                 worker_id=self.config.worker_id,
                 success=True,
                 error="",
-                values=result.flatten().tolist(),  # 🔥 fondamentale
+                values=result.flatten().tolist(),
                 n_rows=n_rows,
                 n_cols=n_cols,
+                prediction_uri="",
             )
 
         except Exception as exc:
-            self.state.on_task_failure(request.model_id, str(exc))
+            self.state.on_task_failure(task_id, str(exc))
 
             return rf_pb2.PredictShardResponse(
                 worker_id=self.config.worker_id,
@@ -155,7 +230,8 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 values=[],
                 n_rows=0,
                 n_cols=0,
+                prediction_uri="",
             )
 
         finally:
-            self.state.on_task_end(request.model_id)
+            self.state.on_task_end(task_id)

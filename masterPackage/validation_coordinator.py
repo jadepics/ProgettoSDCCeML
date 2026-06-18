@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Optional, Protocol, Sequence
+from typing import Optional, Protocol, Sequence, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -19,6 +19,11 @@ from sklearn.metrics import (
 )
 
 from common.contracts import TreeArtifactMetadata, ValidationMetrics
+from common.prediction_io import (
+    load_prediction_array,
+    normalize_uri_to_path,
+    path_to_file_uri,
+)
 
 
 @dataclass(slots=True)
@@ -54,15 +59,15 @@ class ValidationCoordinator:
     - aggregare il risultato finale
     - produrre ValidationMetrics
 
-    Nota:
-    questa versione usa i tree artifact già addestrati.
+    Nuovo flusso scalabile:
+    - il master non invia più X_val dentro gRPC;
+    - il master invia validation_features_uri;
+    - ogni worker legge X_val da storage condiviso;
+    - ogni worker salva le predizioni parziali su EFS;
+    - il master legge prediction_uri e aggrega come prima.
 
-    Per classificazione supporta due formati di risposta dal worker:
-    1) formato corretto/atteso:
-       matrice (n_samples, n_classes) con voti parziali
-    2) fallback temporaneo:
-       matrice (n_samples, 1) con classe predetta localmente dal worker
-       -> utile finché il lato worker non viene riallineato del tutto
+    La strategia distribuita resta tree-parallel:
+    ogni worker valuta un sottoinsieme di alberi su tutte le righe.
     """
 
     def __init__(
@@ -70,15 +75,18 @@ class ValidationCoordinator:
         leadership_guard,
         worker_registry: WorkerRegistryLike,
         worker_client,
+        storage_layout,
         max_parallel_requests: int | None = None,
     ) -> None:
         self.leadership_guard = leadership_guard
         self.worker_registry = worker_registry
         self.worker_client = worker_client
+        self.storage_layout = storage_layout
         self.max_parallel_requests = max_parallel_requests
 
     def validate_experiment(
         self,
+        job_id: str,
         experiment_id: str,
         task_type: str,
         validation_features_uri: str,
@@ -88,23 +96,31 @@ class ValidationCoordinator:
     ) -> ValidationResult:
         self.leadership_guard.require_leader()
 
+        if not job_id:
+            raise ValueError("job_id is required for validation")
+
         if not tree_artifacts:
             raise ValueError(
                 f"Experiment '{experiment_id}' has no tree artifacts for validation"
             )
+
+        # Il master legge le feature solo per controlli di shape e nomi colonna.
+        # Non le passa più ai worker via gRPC.
         X_val_df = self._read_parquet_dataframe(validation_features_uri)
         feature_names = list(X_val_df.columns)
+        n_samples = int(X_val_df.shape[0])
+        n_features = int(X_val_df.shape[1])
 
-        X_val = X_val_df.to_numpy(dtype=float)
         y_val = self._read_target_vector(validation_labels_uri)
-        if X_val.ndim != 2:
+
+        if X_val_df.ndim != 2:
             raise ValueError("Validation features must be a 2D matrix")
-        if X_val.shape[0] == 0:
+        if n_samples == 0:
             raise ValueError("Validation split is empty")
-        if y_val.shape[0] != X_val.shape[0]:
+        if y_val.shape[0] != n_samples:
             raise ValueError(
                 "Validation features/labels size mismatch: "
-                f"{X_val.shape[0]} rows vs {y_val.shape[0]} labels"
+                f"{n_samples} rows vs {y_val.shape[0]} labels"
             )
 
         alive_workers = self.worker_registry.alive_workers()
@@ -119,10 +135,19 @@ class ValidationCoordinator:
         if not assignments:
             raise RuntimeError("No validation assignments could be built")
 
+        prediction_dir = self.storage_layout.prediction_dir(
+            job_id=job_id,
+            experiment_id=experiment_id,
+            phase="validation",
+        )
+        prediction_dir.mkdir(parents=True, exist_ok=True)
+        prediction_output_dir = path_to_file_uri(prediction_dir)
+
         responses = self._collect_prediction_responses(
             experiment_id=experiment_id,
             task_type=task_type,
-            features=X_val,
+            features_uri=validation_features_uri,
+            prediction_output_dir=prediction_output_dir,
             class_labels=class_labels,
             assignments=assignments,
         )
@@ -134,7 +159,7 @@ class ValidationCoordinator:
                 responses=responses,
                 class_labels=class_labels,
                 tree_artifacts=tree_artifacts,
-                n_features=X_val.shape[1],
+                n_features=n_features,
                 feature_names=feature_names,
             )
 
@@ -145,7 +170,7 @@ class ValidationCoordinator:
                 responses=responses,
                 tree_count=len(tree_artifacts),
                 tree_artifacts=tree_artifacts,
-                n_features=X_val.shape[1],
+                n_features=n_features,
                 feature_names=feature_names,
             )
 
@@ -155,7 +180,8 @@ class ValidationCoordinator:
         self,
         experiment_id: str,
         task_type: str,
-        features: np.ndarray,
+        features_uri: str,
+        prediction_output_dir: str,
         class_labels: Sequence[str] | None,
         assignments: list[tuple[WorkerLike, list[str]]],
     ) -> list:
@@ -166,36 +192,45 @@ class ValidationCoordinator:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             future_map = {}
 
-            for worker, uri_shard in assignments:
+            for index, (worker, uri_shard) in enumerate(assignments):
+                prediction_id = (
+                    f"{experiment_id}_validation_pred_{index:06d}"
+                )
+
                 future = pool.submit(
-                    self.worker_client.predict_shard,
+                    self.worker_client.predict_shard_from_uri,
                     worker.host,
                     worker.port,
-                    experiment_id,   # model_id temporaneo per validation
+                    experiment_id,  # model_id temporaneo per validation
                     experiment_id,
                     task_type,
-                    features,
+                    features_uri,
+                    prediction_output_dir,
+                    prediction_id,
                     uri_shard,
                     class_labels,
                 )
-                future_map[future] = (worker, uri_shard)
+                future_map[future] = (worker, uri_shard, prediction_id)
 
             for future in as_completed(future_map):
-                worker, uri_shard = future_map[future]
+                worker, uri_shard, prediction_id = future_map[future]
                 result = future.result()
 
                 if not result.success:
                     retry_worker = self.worker_registry.get_retry_candidate(
                         exclude_worker_id=worker.worker_id
                     )
+
                     if retry_worker is not None:
-                        result = self.worker_client.predict_shard(
+                        result = self.worker_client.predict_shard_from_uri(
                             retry_worker.host,
                             retry_worker.port,
-                            experiment_id,   # model_id temporaneo per validation
+                            experiment_id,  # model_id temporaneo per validation
                             experiment_id,
                             task_type,
-                            features,
+                            features_uri,
+                            prediction_output_dir,
+                            prediction_id,
                             uri_shard,
                             class_labels,
                         )
@@ -211,31 +246,30 @@ class ValidationCoordinator:
         return responses
 
     def _build_classification_result(
-            self,
-            experiment_id: str,
-            y_true: np.ndarray,
-            responses: list,
-            class_labels: Sequence[str] | None,
-            tree_artifacts: Sequence[TreeArtifactMetadata],
-            n_features: int,
-            feature_names: Sequence[str],
+        self,
+        experiment_id: str,
+        y_true: np.ndarray,
+        responses: list,
+        class_labels: Sequence[str] | None,
+        tree_artifacts: Sequence[TreeArtifactMetadata],
+        n_features: int,
+        feature_names: Sequence[str],
     ) -> ValidationResult:
         resolved_class_labels = self._resolve_class_labels(y_true, class_labels)
         n_samples = y_true.shape[0]
         n_classes = len(resolved_class_labels)
 
-
         aggregated_votes = np.zeros((n_samples, n_classes), dtype=float)
 
         for response in responses:
-            values = response.values
+            values = self._response_values(response)
 
-            # formato corretto atteso: voti parziali per classe
+            # Formato corretto atteso: voti parziali per classe.
             if values.shape == aggregated_votes.shape:
                 aggregated_votes += values
                 continue
 
-            # fallback temporaneo: classe locale già decisa dal worker
+            # Fallback temporaneo: classe locale già decisa dal worker.
             if values.shape == (n_samples, 1):
                 predicted_indices = np.rint(values[:, 0]).astype(int)
                 if np.any(predicted_indices < 0) or np.any(predicted_indices >= n_classes):
@@ -252,44 +286,89 @@ class ValidationCoordinator:
             )
 
         final_indices = np.argmax(aggregated_votes, axis=1)
-        predicted_labels = [resolved_class_labels[index] for index in final_indices]
+        predicted_labels: list[str] = [
+            resolved_class_labels[int(index)]
+            for index in final_indices.tolist()
+        ]
 
         if self._is_integer_encoded_labels(y_true, n_classes):
             y_true_for_metrics = y_true.astype(int)
             y_pred_for_metrics = final_indices.astype(int)
 
-            report = classification_report(
-                y_true_for_metrics,
-                y_pred_for_metrics,
-                output_dict=True,
-                zero_division=0,
+            report = self._metric_dict(
+                classification_report(
+                    y_true_for_metrics,
+                    y_pred_for_metrics,
+                    output_dict=True,
+                    zero_division=0,
+                )
             )
-            confusion = confusion_matrix(
-                y_true_for_metrics,
-                y_pred_for_metrics,
-            ).tolist()
+            confusion = cast(
+                list[list[int]],
+                confusion_matrix(
+                    y_true_for_metrics,
+                    y_pred_for_metrics,
+                ).astype(int).tolist(),
+            )
             accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
-            balanced_accuracy = float(balanced_accuracy_score(y_true_for_metrics, y_pred_for_metrics))
-            macro_f1 = float(f1_score(y_true_for_metrics, y_pred_for_metrics, average="macro", zero_division=0))
-            weighted_f1 = float(f1_score(y_true_for_metrics, y_pred_for_metrics, average="weighted", zero_division=0))
+            balanced_accuracy = float(
+                balanced_accuracy_score(y_true_for_metrics, y_pred_for_metrics)
+            )
+            macro_f1 = float(
+                f1_score(
+                    y_true_for_metrics,
+                    y_pred_for_metrics,
+                    average="macro",
+                    zero_division=0,
+                )
+            )
+            weighted_f1 = float(
+                f1_score(
+                    y_true_for_metrics,
+                    y_pred_for_metrics,
+                    average="weighted",
+                    zero_division=0,
+                )
+            )
         else:
             y_true_for_metrics = [str(item) for item in y_true.tolist()]
             y_pred_for_metrics = predicted_labels
 
-            report = classification_report(
-                y_true_for_metrics,
-                y_pred_for_metrics,
-                output_dict=True,
-                zero_division=0,
+            report = self._metric_dict(
+                classification_report(
+                    y_true_for_metrics,
+                    y_pred_for_metrics,
+                    output_dict=True,
+                    zero_division=0,
+                )
             )
-            confusion = confusion_matrix(
-                y_true_for_metrics,
-                y_pred_for_metrics,
-            ).tolist()
+            confusion = cast(
+                list[list[int]],
+                confusion_matrix(
+                    y_true_for_metrics,
+                    y_pred_for_metrics,
+                ).astype(int).tolist(),
+            )
             accuracy = float(accuracy_score(y_true_for_metrics, y_pred_for_metrics))
-            balanced_accuracy = float(balanced_accuracy_score(y_true_for_metrics, y_pred_for_metrics))
-            macro_f1 = float(f1_score(y_true_for_metrics, y_pred_for_metrics, average="macro", zero_division=0))
-            weighted_f1 = float(f1_score(y_true_for_metrics, y_pred_for_metrics, average="weighted", zero_division=0))
+            balanced_accuracy = float(
+                balanced_accuracy_score(y_true_for_metrics, y_pred_for_metrics)
+            )
+            macro_f1 = float(
+                f1_score(
+                    y_true_for_metrics,
+                    y_pred_for_metrics,
+                    average="macro",
+                    zero_division=0,
+                )
+            )
+            weighted_f1 = float(
+                f1_score(
+                    y_true_for_metrics,
+                    y_pred_for_metrics,
+                    average="weighted",
+                    zero_division=0,
+                )
+            )
 
         feature_importances = self._aggregate_feature_importances(
             tree_artifacts=tree_artifacts,
@@ -319,21 +398,38 @@ class ValidationCoordinator:
             predicted_values=None,
         )
 
+    def _metric_dict(self, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return cast(dict[str, Any], value)
+
+        raise TypeError(
+            f"Expected sklearn classification_report output_dict=True to return dict, "
+            f"got {type(value).__name__}"
+        )
+
+    def _scalar_metric(self, value: Any) -> float:
+        arr = np.asarray(value, dtype=float)
+
+        if arr.size != 1:
+            raise ValueError(f"Expected scalar metric, got shape={arr.shape}")
+
+        return float(arr.reshape(-1)[0])
+
     def _build_regression_result(
-            self,
-            experiment_id: str,
-            y_true: np.ndarray,
-            responses: list,
-            tree_count: int,
-            tree_artifacts: Sequence[TreeArtifactMetadata],
-            n_features: int,
-            feature_names: Sequence[str],
+        self,
+        experiment_id: str,
+        y_true: np.ndarray,
+        responses: list,
+        tree_count: int,
+        tree_artifacts: Sequence[TreeArtifactMetadata],
+        n_features: int,
+        feature_names: Sequence[str],
     ) -> ValidationResult:
         n_samples = y_true.shape[0]
         aggregated_sum = np.zeros((n_samples, 1), dtype=float)
 
         for response in responses:
-            values = response.values
+            values = self._response_values(response)
 
             if values.shape != aggregated_sum.shape:
                 raise ValueError(
@@ -347,10 +443,16 @@ class ValidationCoordinator:
         predicted_values_array = aggregated_sum[:, 0] / float(tree_count)
         predicted_values = predicted_values_array.tolist()
 
-        mae = float(mean_absolute_error(y_true_float, predicted_values_array))
-        mse = float(mean_squared_error(y_true_float, predicted_values_array))
+        mae = self._scalar_metric(
+            mean_absolute_error(y_true_float, predicted_values_array)
+        )
+        mse = self._scalar_metric(
+            mean_squared_error(y_true_float, predicted_values_array)
+        )
         rmse = float(np.sqrt(mse))
-        r2 = float(r2_score(y_true_float, predicted_values_array))
+        r2 = self._scalar_metric(
+            r2_score(y_true_float, predicted_values_array)
+        )
 
         feature_importances = self._aggregate_feature_importances(
             tree_artifacts=tree_artifacts,
@@ -382,6 +484,58 @@ class ValidationCoordinator:
             predicted_labels=None,
             predicted_values=predicted_values,
         )
+
+    def _response_values(self, response) -> np.ndarray:
+        """
+        Rende uniforme il vecchio e il nuovo percorso.
+
+        Vecchio:
+          response.values contiene già la matrice.
+
+        Nuovo:
+          response.prediction_uri punta a un file .npy salvato dal worker.
+        """
+        values = getattr(response, "values", None)
+
+        if values is not None:
+            arr = np.asarray(values, dtype=float)
+
+            if arr.size > 0:
+                if arr.ndim == 1:
+                    if response.n_rows > 0 and response.n_cols > 0:
+                        return arr.reshape(response.n_rows, response.n_cols)
+                    return arr.reshape(-1, 1)
+
+                if arr.ndim == 2:
+                    return arr
+
+                raise ValueError(
+                    f"Invalid in-memory prediction values ndim={arr.ndim}"
+                )
+
+        prediction_uri_raw = getattr(response, "prediction_uri", None)
+        prediction_uri = str(prediction_uri_raw) if prediction_uri_raw else ""
+
+        if prediction_uri:
+            arr = load_prediction_array(prediction_uri)
+
+            expected_rows = int(getattr(response, "n_rows", 0) or 0)
+            expected_cols = int(getattr(response, "n_cols", 0) or 0)
+
+            if expected_rows > 0 and expected_cols > 0:
+                expected_shape = (expected_rows, expected_cols)
+                if arr.shape != expected_shape:
+                    raise ValueError(
+                        "Prediction URI shape mismatch: "
+                        f"expected {expected_shape}, got {arr.shape}"
+                    )
+
+            return arr.astype(float, copy=False)
+
+        raise ValueError(
+            "Prediction response has neither in-memory values nor prediction_uri"
+        )
+
     def _resolve_class_labels(
         self,
         y_true: np.ndarray,
@@ -455,36 +609,13 @@ class ValidationCoordinator:
         return assignments
 
     def _read_parquet_dataframe(self, uri: str) -> pd.DataFrame:
-        path = self._normalize_uri(uri)
+        path = normalize_uri_to_path(uri)
         return pd.read_parquet(path)
 
-    def _normalize_uri(self, uri: str) -> str:
-        import os
-        from urllib.parse import urlparse, unquote
-        from urllib.request import url2pathname
-
-        parsed = urlparse(uri)
-
-        if parsed.scheme == "":
-            return uri
-
-        if parsed.scheme != "file":
-            return uri
-
-        path = url2pathname(unquote(parsed.path))
-
-        if os.name == "nt":
-            if parsed.netloc:
-                path = f"//{parsed.netloc}{path}"
-            elif path.startswith("/") and len(path) >= 3 and path[2] == ":":
-                path = path[1:]
-
-        return path
-
     def _aggregate_feature_importances(
-            self,
-            tree_artifacts: Sequence[TreeArtifactMetadata],
-            n_features: int,
+        self,
+        tree_artifacts: Sequence[TreeArtifactMetadata],
+        n_features: int,
     ) -> list[float]:
         vectors: list[np.ndarray] = []
 
@@ -509,9 +640,9 @@ class ValidationCoordinator:
         return np.mean(np.vstack(vectors), axis=0).tolist()
 
     def _map_feature_importances_by_name(
-            self,
-            feature_names: Sequence[str],
-            feature_importances: Sequence[float],
+        self,
+        feature_names: Sequence[str],
+        feature_importances: Sequence[float],
     ) -> dict[str, float]:
         mapped: dict[str, float] = {}
 

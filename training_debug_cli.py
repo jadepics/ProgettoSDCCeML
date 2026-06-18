@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 import json
 import os
@@ -14,6 +15,8 @@ import rf_v2_pb2_grpc as rf_pb2_grpc
 import submit_training_classification
 import submit_training_regression
 from common.grpc_config import GRPC_OPTIONS
+
+from common.prediction_io import load_prediction_array, path_to_file_uri
 
 # =========================================================
 # CONFIG
@@ -1076,12 +1079,28 @@ def submit_inference(
 
             X_df = X_df[feature_names]
 
-        X = X_df.head(rows).to_numpy(dtype=float)
+        X_debug_df = X_df.head(rows).reset_index(drop=True)
+
+        inference_input_dir = ARTIFACT_ROOT / "debug_inference_inputs" / model_id
+        inference_input_dir.mkdir(parents=True, exist_ok=True)
+
+        inference_input_path = (
+            inference_input_dir
+            / f"{split_name}_head_{rows}_{int(time.time())}.parquet"
+        )
+
+        X_debug_df.to_parquet(inference_input_path, index=False)
+
+        inference_features_uri = path_to_file_uri(inference_input_path)
 
         request = rf_pb2.SubmitInferenceRequest(
             model_id=model_id,
-            features=matrix_to_proto(X),
+            features_uri=inference_features_uri,
         )
+
+        print()
+        print("features_uri:")
+        print(inference_features_uri)
 
         response = submit_inference_with_leader_discovery(request)
 
@@ -1107,15 +1126,32 @@ def submit_inference(
     print("task_type:")
     print(response.task_type)
 
-    if response.predicted_labels:
-        print()
-        print("predicted_labels:")
-        print(list(response.predicted_labels))
+    print()
+    print("prediction_uri:")
+    print(response.prediction_uri)
 
-    if response.predicted_values:
-        print()
-        print("predicted_values:")
-        print(list(response.predicted_values))
+    print()
+    print("n_rows:")
+    print(response.n_rows)
+
+    print()
+    print("n_cols:")
+    print(response.n_cols)
+
+    predictions = None
+
+    if response.success and response.prediction_uri:
+        try:
+            predictions = load_prediction_array(response.prediction_uri)
+
+            print()
+            print("predictions:")
+            print(predictions.reshape(-1).tolist())
+
+        except Exception as exc:
+            print()
+            print("[ERROR] Could not load prediction_uri")
+            print(exc)
 
     labels_uri = select_labels_uri_from_manifest(
         manifest,
@@ -1133,21 +1169,22 @@ def submit_inference(
             print("expected_values_from_split:")
             print(y_values)
 
-            if response.predicted_labels:
+            if predictions is not None and response.task_type == "classification":
+                predicted_values = predictions.reshape(-1).tolist()
+
                 correct = sum(
                     1
-                    for pred, true in zip(response.predicted_labels, y_values)
+                    for pred, true in zip(predicted_values, y_values)
                     if str(pred) == str(true)
                 )
 
-                accuracy = correct / len(y_values)
+                accuracy = correct / len(y_values) if y_values else 0.0
 
                 print()
                 print("local_accuracy:")
                 print(round(accuracy, 4))
 
     print()
-
 
 def submit_inference_launcher():
     print()

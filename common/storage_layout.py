@@ -85,3 +85,43 @@ class StorageLayout:
 
     def model_manifest_path(self, model_id: str) -> Path:
         return self.model_dir(model_id) / "manifest.json"
+
+    def prediction_dir(self, job_id: str, experiment_id: str, phase: str) -> Path:
+        """
+        Directory per le predizioni parziali prodotte dai worker.
+
+        Esempi:
+          jobs/<job_id>/experiments/<experiment_id>/predictions/validation/
+          jobs/<job_id>/experiments/<experiment_id>/predictions/test/
+        """
+        return self.experiment_dir(job_id, experiment_id) / "predictions" / phase
+
+    def prediction_shard_path(self, job_id: str, experiment_id: str, phase: str, prediction_id: str) -> Path:
+        """
+        Path del file .npy prodotto da un singolo worker.
+        """
+        return self.prediction_dir(job_id, experiment_id, phase) / f"{prediction_id}.npy"
+
+    def inference_dir(self, model_id: str) -> Path:
+        """
+        Directory base per le inferenze effettuate su un modello già addestrato.
+        """
+        return self.model_dir(model_id) / "inference"
+
+    def inference_prediction_dir(self, model_id: str, inference_id: str) -> Path:
+        """
+        Directory per le predizioni parziali di una richiesta di inferenza.
+        """
+        return self.inference_dir(model_id) / inference_id / "predictions"
+
+    def inference_prediction_shard_path(self, model_id: str, inference_id: str, prediction_id: str) -> Path:
+        """
+        Path del file .npy prodotto da un worker durante l'inferenza.
+        """
+        return self.inference_prediction_dir(model_id, inference_id) / f"{prediction_id}.npy"
+
+    def inference_final_prediction_path(self, model_id: str, inference_id: str) -> Path:
+        """
+        Path del file .npy finale, ottenuto aggregando le predizioni parziali.
+        """
+        return self.inference_dir(model_id) / inference_id / "predictions.npy"
