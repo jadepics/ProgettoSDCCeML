@@ -6,6 +6,7 @@ import grpc
 import rf_v2_pb2 as pb
 import rf_v2_pb2_grpc as pbgrpc
 
+from common.grpc_config import GRPC_OPTIONS
 
 def main(
     PrivateIp_Port: str,
@@ -19,7 +20,7 @@ def main(
     if leakage_columns is None:
         leakage_columns = []
 
-    channel = grpc.insecure_channel(PrivateIp_Port)
+    channel = grpc.insecure_channel(PrivateIp_Port, options=GRPC_OPTIONS)
     stub = pbgrpc.CoordinatorServiceStub(channel)
 
     request = pb.SubmitTrainingRequest(

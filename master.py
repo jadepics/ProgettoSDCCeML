@@ -49,16 +49,14 @@ from common.repositories import (
 from common.storage_layout import StorageLayout
 from common.enums import WorkerLivenessStatus
 
+from common.storage_layout import StorageLayout
+from common.enums import WorkerLivenessStatus
+from common.grpc_config import GRPC_MAX_MESSAGE_LENGTH, GRPC_OPTIONS
+
 # Valore precedente ai test: HEARTBEAT_TIMEOUT_SECONDS = 15.0
 HEARTBEAT_TIMEOUT_SECONDS = 30.00
 # Valore precedente ai test: DEFAULT_RPC_TIMEOUT_SECONDS = 600.0
 DEFAULT_RPC_TIMEOUT_SECONDS = 900.0
-GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
-
-GRPC_OPTIONS = [
-    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
-    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
-]
 
 SUPPORTED_DATASET_SCENARIOS = {
     "baseline_original",
