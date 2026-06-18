@@ -345,8 +345,13 @@ def build_comparison(
     )
 
     distributed_training_time = safe_float(
-        distributed_result.get("training_wall_time_seconds")
+        distributed_result.get("scalability_training_time_seconds")
     )
+
+    if distributed_training_time is None:
+        distributed_training_time = safe_float(
+            distributed_result.get("training_wall_time_seconds")
+        )
 
     if (
         local_training_time is not None
@@ -485,6 +490,7 @@ def build_comparison(
             "validation_metric": distributed_validation_metric,
             "validation_accuracy": distributed_result.get(
                 "validation_accuracy"
+
             ),
             "validation_r2": distributed_result.get("validation_r2"),
             "validation_mae": distributed_result.get("validation_mae"),
@@ -514,6 +520,45 @@ def build_comparison(
             "tree_training_time_max_seconds": distributed_result.get(
                 "tree_training_time_max_seconds"
             ),
+            "scalability_metrics_available": distributed_result.get(
+                "scalability_metrics_available"
+            ),
+            "scalability_summary_path": distributed_result.get(
+                "scalability_summary_path"
+            ),
+            "scalability_total_time_seconds": distributed_result.get(
+                "scalability_total_time_seconds"
+            ),
+            "scalability_training_time_seconds": distributed_result.get(
+                "scalability_training_time_seconds"
+            ),
+            "scalability_throughput_trees_per_second": distributed_result.get(
+                "scalability_throughput_trees_per_second"
+            ),
+            "scalability_speedup": distributed_result.get(
+                "scalability_speedup"
+            ),
+            "scalability_efficiency": distributed_result.get(
+                "scalability_efficiency"
+            ),
+            "scalability_baseline_time_seconds": distributed_result.get(
+                "scalability_baseline_time_seconds"
+            ),
+            "scalability_timings": distributed_result.get(
+                "scalability_timings"
+            ),
+            "scalability_counters": distributed_result.get(
+                "scalability_counters"
+            ),
+            "scalability_retry_count": distributed_result.get(
+                "scalability_retry_count"
+            ),
+            "scalability_train_rpc_count": distributed_result.get(
+                "scalability_train_rpc_count"
+            ),
+            "scalability_failed_tree_count": distributed_result.get(
+                "scalability_failed_tree_count"
+            ),
         },
 
         "comparison": {
@@ -527,6 +572,43 @@ def build_comparison(
             "training_time_ratio_local_over_distributed": (
                 training_time_ratio_local_over_distributed
             ),
+        },
+
+        "scalability": {
+            "metrics_available": distributed_result.get(
+                "scalability_metrics_available"
+            ),
+            "worker_count": (
+                    distributed_result.get("scalability_worker_count")
+                    or distributed_result.get("worker_count")
+            ),
+            "n_estimators_total": (
+                    distributed_result.get("scalability_n_estimators_total")
+                    or distributed_result.get("n_estimators")
+            ),
+            "total_time_seconds": distributed_result.get(
+                "scalability_total_time_seconds"
+            ),
+            "training_time_seconds": distributed_result.get(
+                "scalability_training_time_seconds"
+            ),
+            "throughput_trees_per_second": distributed_result.get(
+                "scalability_throughput_trees_per_second"
+            ),
+            "speedup": distributed_result.get("scalability_speedup"),
+            "efficiency": distributed_result.get("scalability_efficiency"),
+            "baseline_time_seconds": distributed_result.get(
+                "scalability_baseline_time_seconds"
+            ),
+            "retry_count": distributed_result.get("scalability_retry_count"),
+            "failed_tree_count": distributed_result.get(
+                "scalability_failed_tree_count"
+            ),
+            "train_rpc_count": distributed_result.get(
+                "scalability_train_rpc_count"
+            ),
+            "timings": distributed_result.get("scalability_timings"),
+            "counters": distributed_result.get("scalability_counters"),
         },
     }
 
@@ -673,6 +755,55 @@ def print_comparison_summary(comparison: dict[str, Any]) -> None:
             print(f"{worker_id}: {tree_count}")
 
     print()
+    print()
+    print("DISTRIBUTED SCALABILITY METRICS")
+    print("-" * 80)
+
+    scalability = comparison.get("scalability") or {}
+
+    if not scalability.get("metrics_available"):
+        print("-")
+    else:
+        print(
+            f"{'worker_count':35s} | "
+            f"{format_value(scalability.get('worker_count'))}"
+        )
+        print(
+            f"{'n_estimators_total':35s} | "
+            f"{format_value(scalability.get('n_estimators_total'))}"
+        )
+        print(
+            f"{'total_time':35s} | "
+            f"{format_seconds(scalability.get('total_time_seconds'))}"
+        )
+        print(
+            f"{'training_time':35s} | "
+            f"{format_seconds(scalability.get('training_time_seconds'))}"
+        )
+        print(
+            f"{'throughput trees/s':35s} | "
+            f"{format_value(scalability.get('throughput_trees_per_second'))}"
+        )
+        print(
+            f"{'speedup':35s} | "
+            f"{format_value(scalability.get('speedup'))}"
+        )
+        print(
+            f"{'efficiency':35s} | "
+            f"{format_value(scalability.get('efficiency'))}"
+        )
+        print(
+            f"{'retry_count':35s} | "
+            f"{format_value(scalability.get('retry_count'))}"
+        )
+        print(
+            f"{'failed_tree_count':35s} | "
+            f"{format_value(scalability.get('failed_tree_count'))}"
+        )
+        print(
+            f"{'train_rpc_count':35s} | "
+            f"{format_value(scalability.get('train_rpc_count'))}"
+        )
 
 
 def main() -> None:

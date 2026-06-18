@@ -7,24 +7,12 @@ ENV_TEMPLATE="${PROJECT_ROOT}/.env.worker"
 RUNTIME_ENV_DIR="${PROJECT_ROOT}/runtime-env"
 ARTIFACT_MOUNT="/mnt/efs/gp_artifacts"
 
-WORKERS=("worker1" "worker2" "worker3" "worker4" "worker5" "worker6")
-
-#TODO togli questo dettaglio di worker già specifici
-declare -A WORKER_PORTS=(
-  ["worker1"]="50061"
-  ["worker2"]="50062"
-  ["worker3"]="50063"
-  ["worker4"]="50064"
-  ["worker5"]="50065"
-  ["worker6"]="50066"
-)
-
 ACTION="${1:-}"
 if [[ $# -gt 0 ]]; then
   shift
 fi
 
-WORKER_ID="worker1"
+WORKER_ID=""
 WORKER_PORT=""
 EXTRA_ENV_VARS=()
 
@@ -43,7 +31,7 @@ usage() {
   echo "  ./scripts/worker.sh logs <worker_id>"
   echo "  ./scripts/worker.sh shell <worker_id>"
   echo ""
-  echo "All workers:"
+  echo "All workers on this instance:"
   echo "  ./scripts/worker.sh start-all [KEY=VALUE ...]"
   echo "  ./scripts/worker.sh restart-all [KEY=VALUE ...]"
   echo "  ./scripts/worker.sh rebuild-all [KEY=VALUE ...]"
@@ -51,42 +39,17 @@ usage() {
   echo "  ./scripts/worker.sh stop-all"
   echo "  ./scripts/worker.sh ps"
   echo ""
-  echo "Example:"
-  echo "  ./scripts/worker.sh rebuild-all MASTER_CLUSTER_HOST=172.31.37.47 WORKER_ADVERTISE_HOST=172.31.39.5"
+  echo "Dynamic worker configuration:"
+  echo "  WORKER_COUNT=4"
+  echo "  WORKER_ID_PREFIX=worker"
+  echo "  WORKER_INDEX_START=1"
+  echo "  WORKER_BASE_PORT=50061"
+  echo ""
+  echo "Examples:"
+  echo "  ./scripts/worker.sh rebuild-all WORKER_COUNT=4 MASTER_CLUSTER_HOST=172.31.37.47"
+  echo "  ./scripts/worker.sh rebuild-all WORKER_COUNT=4 WORKER_ID_PREFIX=worker WORKER_INDEX_START=5 MASTER_CLUSTER_HOST=172.31.37.47"
+  echo "  ./scripts/worker.sh start worker7 50067 MASTER_CLUSTER_HOST=172.31.37.47"
   exit 1
-}
-
-is_known_worker() {
-  local worker_id="$1"
-
-  for candidate in "${WORKERS[@]}"; do
-    if [[ "$candidate" == "$worker_id" ]]; then
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-parse_worker_and_env() {
-  [[ $# -ge 1 ]] || usage
-
-  WORKER_ID="$1"
-  shift
-
-  if [[ $# -gt 0 && "$1" != *=* ]]; then
-    WORKER_PORT="$1"
-    shift
-  else
-    if is_known_worker "$WORKER_ID"; then
-      WORKER_PORT="${WORKER_PORTS[$WORKER_ID]}"
-    else
-      echo "[ERROR] worker_port is required for unknown worker_id: $WORKER_ID"
-      exit 1
-    fi
-  fi
-
-  EXTRA_ENV_VARS=("$@")
 }
 
 parse_env_only() {
@@ -128,6 +91,79 @@ get_template_env_value() {
   grep -E "^${key}=" "$ENV_TEMPLATE" | tail -n 1 | cut -d "=" -f 2- || true
 }
 
+get_runtime_config_value() {
+  local key="$1"
+  local default="$2"
+  local value=""
+
+  if value="$(get_extra_env_value "$key" 2>/dev/null)"; then
+    echo "$value"
+    return
+  fi
+
+  if [[ -n "${!key:-}" ]]; then
+    echo "${!key}"
+    return
+  fi
+
+  echo "$default"
+}
+
+sanitize_for_worker_id() {
+  echo "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+default_worker_id_prefix() {
+  local raw
+  raw="$(hostname -s 2>/dev/null || hostname)"
+  raw="$(sanitize_for_worker_id "$raw")"
+  echo "${raw}-worker"
+}
+
+worker_id_prefix() {
+  get_runtime_config_value "WORKER_ID_PREFIX" "$(default_worker_id_prefix)"
+}
+
+worker_count() {
+  get_runtime_config_value "WORKER_COUNT" "1"
+}
+
+worker_index_start() {
+  get_runtime_config_value "WORKER_INDEX_START" "1"
+}
+
+worker_base_port() {
+  get_runtime_config_value "WORKER_BASE_PORT" "50061"
+}
+
+validate_positive_integer() {
+  local name="$1"
+  local value="$2"
+
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "[ERROR] ${name} must be a positive integer, got: ${value}"
+    exit 1
+  fi
+
+  if [[ "$value" -lt 1 ]]; then
+    echo "[ERROR] ${name} must be >= 1, got: ${value}"
+    exit 1
+  fi
+}
+
+is_control_env_key() {
+  case "$1" in
+    MASTER_CLUSTER_HOST|WORKER_COUNT|WORKER_ID_PREFIX|WORKER_INDEX_START|WORKER_BASE_PORT|WAIT_LEADER_TIMEOUT_SECONDS)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 detect_private_ip() {
   hostname -I | awk '{print $1}'
 }
@@ -167,12 +203,6 @@ worker_advertise_host() {
     return
   fi
 
-  value="$(get_template_env_value "WORKER_ADVERTISE_HOST")"
-  if [[ -n "$value" ]]; then
-    echo "$value"
-    return
-  fi
-
   detect_private_ip
 }
 
@@ -186,6 +216,77 @@ master_seeds() {
 container_name_from_worker_id() {
   local worker_id="$1"
   echo "${worker_id}"
+}
+
+infer_worker_port() {
+  local worker_id="$1"
+  local numeric_suffix
+  local base
+  local start
+
+  numeric_suffix="${worker_id##*[!0-9]}"
+
+  if [[ -z "$numeric_suffix" ]]; then
+    echo "[ERROR] worker_port is required when worker_id has no numeric suffix: $worker_id" >&2
+    exit 1
+  fi
+
+  base="$(worker_base_port)"
+  start="$(worker_index_start)"
+
+  validate_positive_integer "WORKER_BASE_PORT" "$base"
+  validate_positive_integer "WORKER_INDEX_START" "$start"
+
+  echo $((base + numeric_suffix - start))
+}
+
+parse_worker_and_env() {
+  [[ $# -ge 1 ]] || usage
+
+  WORKER_ID="$1"
+  shift
+
+  if [[ $# -gt 0 && "$1" != *=* ]]; then
+    WORKER_PORT="$1"
+    shift
+  else
+    WORKER_PORT=""
+  fi
+
+  EXTRA_ENV_VARS=("$@")
+
+  if [[ -z "$WORKER_PORT" ]]; then
+    WORKER_PORT="$(infer_worker_port "$WORKER_ID")"
+  fi
+}
+
+for_configured_workers() {
+  local callback="$1"
+  local prefix
+  local count
+  local start
+  local base
+  local offset
+  local index
+  local worker_id
+  local worker_port
+
+  prefix="$(worker_id_prefix)"
+  count="$(worker_count)"
+  start="$(worker_index_start)"
+  base="$(worker_base_port)"
+
+  validate_positive_integer "WORKER_COUNT" "$count"
+  validate_positive_integer "WORKER_INDEX_START" "$start"
+  validate_positive_integer "WORKER_BASE_PORT" "$base"
+
+  for ((offset = 0; offset < count; offset++)); do
+    index=$((start + offset))
+    worker_port=$((base + offset))
+    worker_id="${prefix}${index}"
+
+    "$callback" "$worker_id" "$worker_port"
+  done
 }
 
 generate_env() {
@@ -233,7 +334,7 @@ generate_env() {
     key="${kv%%=*}"
     value="${kv#*=}"
 
-    if [[ "$key" == "MASTER_CLUSTER_HOST" ]]; then
+    if is_control_env_key "$key"; then
       continue
     fi
 
@@ -250,9 +351,20 @@ stop_container() {
 }
 
 stop_all_containers() {
-  for worker_id in "${WORKERS[@]}"; do
-    stop_container "$(container_name_from_worker_id "$worker_id")"
-  done
+  local ids
+  local legacy_names
+
+  ids="$(docker ps -aq --filter "label=gp.role=worker" || true)"
+
+  if [[ -n "$ids" ]]; then
+    docker rm -f $ids >/dev/null 2>&1 || true
+  fi
+
+  legacy_names="$(docker ps -a --format '{{.Names}}' | grep -E '^worker[0-9]+$' || true)"
+
+  if [[ -n "$legacy_names" ]]; then
+    docker rm -f $legacy_names >/dev/null 2>&1 || true
+  fi
 }
 
 build_image() {
@@ -271,6 +383,8 @@ run_worker() {
 
   docker run -d \
     --name "$container_name" \
+    --label "gp.role=worker" \
+    --label "gp.worker_id=${worker_id}" \
     --restart unless-stopped \
     --network host \
     --env-file "$env_file" \
@@ -280,6 +394,36 @@ run_worker() {
   echo "[WORKER] started $worker_id as container $container_name"
   echo "[WORKER] port: $worker_port"
   echo "[WORKER] env file: $env_file"
+}
+
+wait_master_leader() {
+  local host
+  local timeout_seconds
+  local deadline
+  local response
+
+  host="$(master_cluster_host)"
+  timeout_seconds="${WAIT_LEADER_TIMEOUT_SECONDS:-60}"
+  deadline=$((SECONDS + timeout_seconds))
+
+  echo "[WORKER] waiting for Raft leader on master cluster ${host}..."
+
+  while (( SECONDS < deadline )); do
+    for port in 50151 50152 50153; do
+      response="$(curl -s --max-time 1 "http://${host}:${port}/status" || true)"
+
+      if echo "$response" | grep -q '"role": "LEADER"'; then
+        echo "[WORKER] leader detected on Raft port ${port}"
+        echo "$response"
+        return 0
+      fi
+    done
+
+    sleep 1
+  done
+
+  echo "[WARN] no Raft leader detected within ${timeout_seconds}s; starting workers anyway"
+  return 0
 }
 
 start_one() {
@@ -316,46 +460,14 @@ start_all() {
   parse_env_only "$@"
   wait_master_leader
   stop_all_containers
-
-  for worker_id in "${WORKERS[@]}"; do
-    run_worker "$worker_id" "${WORKER_PORTS[$worker_id]}"
-  done
+  for_configured_workers run_worker
 }
 
 restart_all() {
   parse_env_only "$@"
   wait_master_leader
   stop_all_containers
-
-  for worker_id in "${WORKERS[@]}"; do
-    run_worker "$worker_id" "${WORKER_PORTS[$worker_id]}"
-  done
-}
-wait_master_leader() {
-  local host
-  host="$(master_cluster_host)"
-
-  local timeout_seconds="${WAIT_LEADER_TIMEOUT_SECONDS:-60}"
-  local deadline=$((SECONDS + timeout_seconds))
-
-  echo "[WORKER] waiting for Raft leader on master cluster ${host}..."
-
-  while (( SECONDS < deadline )); do
-    for port in 50151 50152 50153; do
-      response="$(curl -s --max-time 1 "http://${host}:${port}/status" || true)"
-
-      if echo "$response" | grep -q '"role": "LEADER"'; then
-        echo "[WORKER] leader detected on Raft port ${port}"
-        echo "$response"
-        return 0
-      fi
-    done
-
-    sleep 1
-  done
-
-  echo "[WARN] no Raft leader detected within ${timeout_seconds}s; starting workers anyway"
-  return 0
+  for_configured_workers run_worker
 }
 
 rebuild_all() {
@@ -364,10 +476,7 @@ rebuild_all() {
   stop_all_containers
   docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
   build_image
-
-  for worker_id in "${WORKERS[@]}"; do
-    run_worker "$worker_id" "${WORKER_PORTS[$worker_id]}"
-  done
+  for_configured_workers run_worker
 }
 
 update_all() {
@@ -378,10 +487,7 @@ update_all() {
   stop_all_containers
   docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
   build_image
-
-  for worker_id in "${WORKERS[@]}"; do
-    run_worker "$worker_id" "${WORKER_PORTS[$worker_id]}"
-  done
+  for_configured_workers run_worker
 }
 
 show_logs() {
@@ -395,7 +501,9 @@ open_shell() {
 }
 
 show_ps() {
-  docker ps --filter "name=worker" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Command}}"
+  docker ps \
+    --filter "label=gp.role=worker" \
+    --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Command}}"
 }
 
 case "$ACTION" in

@@ -12,6 +12,14 @@ def load_json(path: Path) -> dict[str, Any]:
 
     return json.loads(path.read_text(encoding="utf-8"))
 
+def load_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 def safe_float(value: Any) -> float | None:
     if value is None:
@@ -243,6 +251,7 @@ def extract_distributed_job_summary(job_dir_value: str | Path) -> dict[str, Any]
 
     tree_summary = summarize_trees(experiment_dir)
     metric_summary = summarize_validation_metrics(validation_metrics)
+    scalability_summary = read_scalability_summary(job_dir)
 
     n_estimators = (
         forest_config.get("n_estimators")
@@ -310,6 +319,72 @@ def extract_distributed_job_summary(job_dir_value: str | Path) -> dict[str, Any]
 
         **metric_summary,
         **tree_summary,
+        **scalability_summary,
     }
 
     return summary
+
+def read_scalability_summary(job_dir: Path) -> dict[str, Any]:
+    summary_path = job_dir / "metrics" / "scalability_summary.json"
+    summary = load_optional_json(summary_path)
+
+    if not summary:
+        return {
+            "scalability_metrics_available": False,
+            "scalability_summary_path": str(summary_path),
+            "scalability_total_time_seconds": None,
+            "scalability_training_time_seconds": None,
+            "scalability_throughput_trees_per_second": None,
+            "scalability_speedup": None,
+            "scalability_efficiency": None,
+            "scalability_baseline_time_seconds": None,
+            "scalability_worker_count": None,
+            "scalability_n_estimators_total": None,
+            "scalability_timings": {},
+            "scalability_counters": {},
+            "scalability_completed_tree_count": None,
+            "scalability_failed_tree_count": None,
+            "scalability_retry_count": None,
+            "scalability_train_rpc_count": None,
+            "scalability_predict_rpc_count": None,
+        }
+
+    counters = summary.get("counters") or {}
+
+    return {
+        "scalability_metrics_available": True,
+        "scalability_summary_path": str(summary_path),
+        "scalability_total_time_seconds": safe_float(
+            summary.get("total_time_seconds")
+        ),
+        "scalability_training_time_seconds": safe_float(
+            summary.get("training_time_seconds")
+        ),
+        "scalability_throughput_trees_per_second": safe_float(
+            summary.get("throughput_trees_per_second")
+        ),
+        "scalability_speedup": safe_float(summary.get("speedup")),
+        "scalability_efficiency": safe_float(summary.get("efficiency")),
+        "scalability_baseline_time_seconds": safe_float(
+            summary.get("baseline_time_seconds")
+        ),
+        "scalability_worker_count": safe_int(summary.get("worker_count")),
+        "scalability_n_estimators_total": safe_int(
+            summary.get("n_estimators_total")
+        ),
+        "scalability_timings": summary.get("timings") or {},
+        "scalability_counters": counters,
+        "scalability_completed_tree_count": safe_int(
+            counters.get("completed_tree_count")
+        ),
+        "scalability_failed_tree_count": safe_int(
+            counters.get("failed_tree_count")
+        ),
+        "scalability_retry_count": safe_int(counters.get("retry_count")),
+        "scalability_train_rpc_count": safe_int(
+            counters.get("train_rpc_count")
+        ),
+        "scalability_predict_rpc_count": safe_int(
+            counters.get("predict_rpc_count")
+        ),
+    }
