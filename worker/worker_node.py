@@ -24,12 +24,8 @@ from worker.runtime.heartbeat_loop import HeartbeatLoop
 from worker.storage.filesystem_store import FilesystemArtifactStore
 
 
-GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
-
-GRPC_OPTIONS = [
-    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
-    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
-]
+from worker.storage.filesystem_store import FilesystemArtifactStore
+from common.grpc_config import GRPC_OPTIONS
 
 class WorkerNode:
     """

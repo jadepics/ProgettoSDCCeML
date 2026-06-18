@@ -20,12 +20,10 @@ from masterPackage.Metrics.Scalability_Metrics_Collector import (
     ScalabilityMetricsCollector,
 )
 
-GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024  # 64 MB
-
-GRPC_OPTIONS = [
-    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
-    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
-]
+from masterPackage.Metrics.Scalability_Metrics_Collector import (
+    ScalabilityMetricsCollector,
+)
+from common.grpc_config import GRPC_OPTIONS
 
 
 @dataclass(slots=True)

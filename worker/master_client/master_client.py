@@ -6,12 +6,7 @@ from typing import Optional
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
 
-GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024
-
-GRPC_OPTIONS = [
-    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
-    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
-]
+from common.grpc_config import GRPC_OPTIONS
 
 
 class MasterClient:

@@ -13,6 +13,7 @@ import rf_v2_pb2_grpc as rf_pb2_grpc
 
 import submit_training_classification
 import submit_training_regression
+from common.grpc_config import GRPC_OPTIONS
 
 # =========================================================
 # CONFIG
@@ -224,14 +225,6 @@ DEFAULT_MASTER_PORT = "50051"
 DATASET_SCENARIO_ORIGINAL = "baseline_original"
 DATASET_SCENARIO_NO_LEAKAGE = "baseline_no_leakage"
 DEFAULT_LEAKAGE_COLUMNS = ["diabetes_stage"]
-
-GRPC_MAX_MESSAGE_LENGTH = 64 * 1024 * 1024
-
-GRPC_OPTIONS = [
-    ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH),
-    ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH),
-]
-
 
 # =========================================================
 # MASTER LEADER DISCOVERY
