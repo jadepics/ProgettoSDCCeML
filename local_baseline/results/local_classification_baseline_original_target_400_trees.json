@@ -1,0 +1,221 @@
+{
+  "mode": "local_non_distributed",
+  "dataset_path_resolved": "C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\\synthetic_classification_2000000_samples_47_features.csv",
+  "config": {
+    "dataset_url": "Dataset/synthetic_classification_2000000_samples_47_features.csv",
+    "target_column": "target",
+    "task_type": "classification",
+    "dataset_scenario": "baseline_original",
+    "extra_drop_columns": [],
+    "n_estimators": 400,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "min_samples_split": 2,
+    "min_samples_leaf": 1,
+    "classification_criterion": "gini",
+    "regression_criterion": "squared_error",
+    "bootstrap": true,
+    "class_weight": null,
+    "validation_ratio": 0.2,
+    "test_ratio": 0.2,
+    "random_seed": 42,
+    "n_jobs": 1,
+    "output_json": "local_baseline\\results\\local_classification_baseline_original_target_400_trees.json"
+  },
+  "n_samples_total": 2000000,
+  "n_features_input": 47,
+  "feature_names_input": [
+    "f_000",
+    "f_001",
+    "f_002",
+    "f_003",
+    "f_004",
+    "f_005",
+    "f_006",
+    "f_007",
+    "f_008",
+    "f_009",
+    "f_010",
+    "f_011",
+    "f_012",
+    "f_013",
+    "f_014",
+    "f_015",
+    "f_016",
+    "f_017",
+    "f_018",
+    "f_019",
+    "f_020",
+    "f_021",
+    "f_022",
+    "f_023",
+    "f_024",
+    "f_025",
+    "f_026",
+    "f_027",
+    "f_028",
+    "f_029",
+    "f_030",
+    "f_031",
+    "f_032",
+    "f_033",
+    "f_034",
+    "f_035",
+    "f_036",
+    "f_037",
+    "f_038",
+    "f_039",
+    "f_040",
+    "f_041",
+    "f_042",
+    "f_043",
+    "f_044",
+    "f_045",
+    "f_046"
+  ],
+  "n_features_after_preprocessing": 47,
+  "feature_names_after_preprocessing": [
+    "numeric__f_000",
+    "numeric__f_001",
+    "numeric__f_002",
+    "numeric__f_003",
+    "numeric__f_004",
+    "numeric__f_005",
+    "numeric__f_006",
+    "numeric__f_007",
+    "numeric__f_008",
+    "numeric__f_009",
+    "numeric__f_010",
+    "numeric__f_011",
+    "numeric__f_012",
+    "numeric__f_013",
+    "numeric__f_014",
+    "numeric__f_015",
+    "numeric__f_016",
+    "numeric__f_017",
+    "numeric__f_018",
+    "numeric__f_019",
+    "numeric__f_020",
+    "numeric__f_021",
+    "numeric__f_022",
+    "numeric__f_023",
+    "numeric__f_024",
+    "numeric__f_025",
+    "numeric__f_026",
+    "numeric__f_027",
+    "numeric__f_028",
+    "numeric__f_029",
+    "numeric__f_030",
+    "numeric__f_031",
+    "numeric__f_032",
+    "numeric__f_033",
+    "numeric__f_034",
+    "numeric__f_035",
+    "numeric__f_036",
+    "numeric__f_037",
+    "numeric__f_038",
+    "numeric__f_039",
+    "numeric__f_040",
+    "numeric__f_041",
+    "numeric__f_042",
+    "numeric__f_043",
+    "numeric__f_044",
+    "numeric__f_045",
+    "numeric__f_046"
+  ],
+  "n_train": 1200000,
+  "n_validation": 400000,
+  "n_test": 400000,
+  "training_time_seconds": 3722.3843486999394,
+  "validation_inference_time_seconds": 9.394435100024566,
+  "test_inference_time_seconds": 8.893930399906822,
+  "total_time_seconds": 3793.264886900084,
+  "validation_metrics": {
+    "accuracy": 0.8721375,
+    "classification_report": {
+      "0": {
+        "precision": 0.8754054858515077,
+        "recall": 0.8677401610241536,
+        "f1-score": 0.8715559696526022,
+        "support": 199970.0
+      },
+      "1": {
+        "precision": 0.868927203255014,
+        "recall": 0.8765335199720042,
+        "f1-score": 0.872713788323366,
+        "support": 200030.0
+      },
+      "accuracy": 0.8721375,
+      "macro avg": {
+        "precision": 0.8721663445532608,
+        "recall": 0.8721368404980789,
+        "f1-score": 0.8721348789879841,
+        "support": 400000.0
+      },
+      "weighted avg": {
+        "precision": 0.8721658586820662,
+        "recall": 0.8721375,
+        "f1-score": 0.8721349658243844,
+        "support": 400000.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        173522,
+        26448
+      ],
+      [
+        24697,
+        175333
+      ]
+    ],
+    "labels": [
+      0,
+      1
+    ]
+  },
+  "test_metrics": {
+    "accuracy": 0.8725925,
+    "classification_report": {
+      "0": {
+        "precision": 0.8739065628811032,
+        "recall": 0.870790618592789,
+        "f1-score": 0.8723458082744905,
+        "support": 199970.0
+      },
+      "1": {
+        "precision": 0.8712881644689977,
+        "recall": 0.8743938409238614,
+        "f1-score": 0.8728382401010049,
+        "support": 200030.0
+      },
+      "accuracy": 0.8725925,
+      "macro avg": {
+        "precision": 0.8725973636750505,
+        "recall": 0.8725922297583252,
+        "f1-score": 0.8725920241877476,
+        "support": 400000.0
+      },
+      "weighted avg": {
+        "precision": 0.8725971672951695,
+        "recall": 0.8725925,
+        "f1-score": 0.8725920611201347,
+        "support": 400000.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        174132,
+        25838
+      ],
+      [
+        25125,
+        174905
+      ]
+    ],
+    "labels": [
+      0,
+      1
+    ]
+  }
+}
