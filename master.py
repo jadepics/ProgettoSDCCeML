@@ -866,32 +866,46 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                     time.sleep(poll_seconds)
                     continue
 
-                recovered_terms.add(term)
-
                 print(
                     "[MasterCoordinator] This node is leader, "
-                    f"starting recovery check for term {term}"
+                    f"starting recovery check for term {term}",
+                    flush=True,
                 )
 
-                self._wait_for_at_least_one_worker()
+                workers_available = self._wait_for_at_least_one_worker()
+
+                if not workers_available:
+                    print(
+                        "[MasterCoordinator] Recovery postponed: "
+                        "no alive workers are available yet. "
+                        f"The recovery check for term {term} will be retried.",
+                        flush=True,
+                    )
+                    time.sleep(poll_seconds)
+                    continue
 
                 recoverable_jobs = self._list_recoverable_jobs()
 
                 if not recoverable_jobs:
-                    print("[MasterCoordinator] No recoverable jobs found")
+                    print("[MasterCoordinator] No recoverable jobs found", flush=True)
+                    recovered_terms.add(term)
                     time.sleep(poll_seconds)
                     continue
 
                 print(
                     "[MasterCoordinator] Recoverable jobs found: "
-                    f"{[job.job_id for job in recoverable_jobs]}"
+                    f"{[job.job_id for job in recoverable_jobs]}",
+                    flush=True,
                 )
+
+                all_jobs_resumed = True
 
                 for job_record in recoverable_jobs:
                     try:
                         print(
                             "[MasterCoordinator] Resuming job "
-                            f"{job_record.job_id}"
+                            f"{job_record.job_id}",
+                            flush=True,
                         )
 
                         self.training_job_service.resume_training_job(
@@ -900,10 +914,26 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                         )
 
                     except Exception as exc:
+                        all_jobs_resumed = False
                         print(
                             "[MasterCoordinator] Failed to resume job "
-                            f"{job_record.job_id}: {exc}"
+                            f"{job_record.job_id}: {exc}",
+                            flush=True,
                         )
+
+                if all_jobs_resumed:
+                    recovered_terms.add(term)
+                    print(
+                        "[MasterCoordinator] Recovery check completed for "
+                        f"term {term}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[MasterCoordinator] Recovery check not marked as completed "
+                        f"for term {term}; it will be retried.",
+                        flush=True,
+                    )
 
             except Exception as exc:
                 print(
@@ -913,7 +943,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 
             time.sleep(poll_seconds)
 
-    def _wait_for_at_least_one_worker(self) -> None:
+    def _wait_for_at_least_one_worker(self) -> bool:
         timeout_seconds = float(
             os.getenv("RECOVERY_WAIT_WORKERS_TIMEOUT_SECONDS", "60")
         )
@@ -933,7 +963,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
                         f"{[worker.worker_id for worker in workers]}",
                         flush=True,
                     )
-                    return
+                    return True
 
             except Exception as exc:
                 print(
@@ -946,9 +976,11 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 
         print(
             "[MasterCoordinator] No workers available before recovery timeout. "
-            "Recovery will still be attempted.",
+            "Recovery will be postponed and retried.",
             flush=True,
         )
+
+        return False
 
     def _list_recoverable_jobs(self):
         jobs = self._list_all_jobs_from_repository()
