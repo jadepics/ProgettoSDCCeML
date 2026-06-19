@@ -192,19 +192,32 @@
     "tree_training_time_sum_seconds": 5942.045927524567,
     "tree_training_time_avg_seconds": 14.855114818811417,
     "tree_training_time_max_seconds": 16.59858751296997,
-    "scalability_metrics_available": false,
+    "scalability_metrics_available": true,
     "scalability_summary_path": "/home/ec2-user/gp/performance_evaluation/distributed_jobs/job_1f973ab7942f45d182cde77e8e1d2b3e/metrics/scalability_summary.json",
-    "scalability_total_time_seconds": null,
-    "scalability_training_time_seconds": null,
-    "scalability_throughput_trees_per_second": null,
-    "scalability_speedup": null,
-    "scalability_efficiency": null,
-    "scalability_baseline_time_seconds": null,
-    "scalability_timings": {},
-    "scalability_counters": {},
+    "scalability_total_time_seconds": 2290.937639474869,
+    "scalability_training_time_seconds": 2290.937639474869,
+    "scalability_throughput_trees_per_second": 0.1746009987821792,
+    "scalability_speedup": 1.6248300628354024,
+    "scalability_efficiency": 0.2031037578544253,
+    "scalability_baseline_time_seconds": 3722.3843486999394,
+    "scalability_timings": {
+      "local_baseline_training_time_seconds": 3722.3843486999394,
+      "distributed_training_wall_time_seconds": 2290.937639474869,
+      "tree_training_time_sum_seconds": 5942.045927524567,
+      "tree_training_time_avg_seconds": 14.855114818811417,
+      "tree_training_time_max_seconds": 16.59858751296997
+    },
+    "scalability_counters": {
+      "worker_count": 8,
+      "n_estimators_total": 400,
+      "expected_tree_count": 400,
+      "completed_tree_count": 400,
+      "saved_tree_joblib_count": 400,
+      "failed_tree_count": 0
+    },
     "scalability_retry_count": null,
     "scalability_train_rpc_count": null,
-    "scalability_failed_tree_count": null
+    "scalability_failed_tree_count": 0
   },
   "comparison": {
     "local_validation_metric": 0.8721375,
@@ -215,19 +228,32 @@
     "training_time_ratio_local_over_distributed": 1.6248300628354024
   },
   "scalability": {
-    "metrics_available": false,
+    "metrics_available": true,
     "worker_count": 8,
     "n_estimators_total": 400,
-    "total_time_seconds": null,
-    "training_time_seconds": null,
-    "throughput_trees_per_second": null,
-    "speedup": null,
-    "efficiency": null,
-    "baseline_time_seconds": null,
+    "total_time_seconds": 2290.937639474869,
+    "training_time_seconds": 2290.937639474869,
+    "throughput_trees_per_second": 0.1746009987821792,
+    "speedup": 1.6248300628354024,
+    "efficiency": 0.2031037578544253,
+    "baseline_time_seconds": 3722.3843486999394,
     "retry_count": null,
-    "failed_tree_count": null,
+    "failed_tree_count": 0,
     "train_rpc_count": null,
-    "timings": {},
-    "counters": {}
+    "timings": {
+      "local_baseline_training_time_seconds": 3722.3843486999394,
+      "distributed_training_wall_time_seconds": 2290.937639474869,
+      "tree_training_time_sum_seconds": 5942.045927524567,
+      "tree_training_time_avg_seconds": 14.855114818811417,
+      "tree_training_time_max_seconds": 16.59858751296997
+    },
+    "counters": {
+      "worker_count": 8,
+      "n_estimators_total": 400,
+      "expected_tree_count": 400,
+      "completed_tree_count": 400,
+      "saved_tree_joblib_count": 400,
+      "failed_tree_count": 0
+    }
   }
 }
