@@ -1,0 +1,233 @@
+{
+  "comparison_type": "offline_existing_distributed_job_vs_local_baseline",
+  "metric_name": "accuracy",
+  "compatibility_check": {
+    "same_task_type": true,
+    "same_target_column": true,
+    "same_dataset_scenario": true,
+    "same_n_estimators": true,
+    "same_max_depth": true,
+    "same_max_features": true,
+    "same_criterion": true,
+    "same_bootstrap": true,
+    "same_train_size": true,
+    "same_validation_size": true,
+    "same_test_size": true
+  },
+  "local": {
+    "mode": "local_non_distributed",
+    "dataset_url": "Dataset/synthetic_classification_2000000_samples_47_features.csv",
+    "dataset_path_resolved": "C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\\synthetic_classification_2000000_samples_47_features.csv",
+    "dataset_scenario": "baseline_original",
+    "target_column": "target",
+    "task_type": "classification",
+    "n_estimators": 400,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "criterion": "gini",
+    "bootstrap": true,
+    "class_weight": null,
+    "n_jobs": 1,
+    "n_train": 1200000,
+    "n_validation": 400000,
+    "n_test": 400000,
+    "n_features_input": 47,
+    "n_features_after_preprocessing": 47,
+    "training_time_seconds": 3722.3843486999394,
+    "validation_inference_time_seconds": 9.394435100024566,
+    "test_inference_time_seconds": 8.893930399906822,
+    "validation_metric": 0.8721375,
+    "test_metric": 0.8725925,
+    "validation_metrics": {
+      "accuracy": 0.8721375,
+      "classification_report": {
+        "0": {
+          "precision": 0.8754054858515077,
+          "recall": 0.8677401610241536,
+          "f1-score": 0.8715559696526022,
+          "support": 199970.0
+        },
+        "1": {
+          "precision": 0.868927203255014,
+          "recall": 0.8765335199720042,
+          "f1-score": 0.872713788323366,
+          "support": 200030.0
+        },
+        "accuracy": 0.8721375,
+        "macro avg": {
+          "precision": 0.8721663445532608,
+          "recall": 0.8721368404980789,
+          "f1-score": 0.8721348789879841,
+          "support": 400000.0
+        },
+        "weighted avg": {
+          "precision": 0.8721658586820662,
+          "recall": 0.8721375,
+          "f1-score": 0.8721349658243844,
+          "support": 400000.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          173522,
+          26448
+        ],
+        [
+          24697,
+          175333
+        ]
+      ],
+      "labels": [
+        0,
+        1
+      ]
+    },
+    "test_metrics": {
+      "accuracy": 0.8725925,
+      "classification_report": {
+        "0": {
+          "precision": 0.8739065628811032,
+          "recall": 0.870790618592789,
+          "f1-score": 0.8723458082744905,
+          "support": 199970.0
+        },
+        "1": {
+          "precision": 0.8712881644689977,
+          "recall": 0.8743938409238614,
+          "f1-score": 0.8728382401010049,
+          "support": 200030.0
+        },
+        "accuracy": 0.8725925,
+        "macro avg": {
+          "precision": 0.8725973636750505,
+          "recall": 0.8725922297583252,
+          "f1-score": 0.8725920241877476,
+          "support": 400000.0
+        },
+        "weighted avg": {
+          "precision": 0.8725971672951695,
+          "recall": 0.8725925,
+          "f1-score": 0.8725920611201347,
+          "support": 400000.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          174132,
+          25838
+        ],
+        [
+          25125,
+          174905
+        ]
+      ],
+      "labels": [
+        0,
+        1
+      ]
+    }
+  },
+  "distributed": {
+    "mode": "distributed",
+    "job_id": "job_1f973ab7942f45d182cde77e8e1d2b3e",
+    "job_dir": "/home/ec2-user/gp/performance_evaluation/distributed_jobs/job_1f973ab7942f45d182cde77e8e1d2b3e",
+    "job_status": "COMPLETED",
+    "experiment_id": "job_1f973ab7942f45d182cde77e8e1d2b3e_exp_000",
+    "experiment_status": "COMPLETED",
+    "model_id": "model_18ceb7bc6f0046c78b12e529df5d5ec8",
+    "dataset_uri": "/mnt/efs/gp_artifacts/datasets/synthetic_classification_2000000_samples_47_features.csv",
+    "dataset_scenario": "baseline_original",
+    "target_column": "target",
+    "task_type": "classification",
+    "n_estimators": 400,
+    "max_depth": 5,
+    "max_features": "sqrt",
+    "criterion": "gini",
+    "bootstrap": true,
+    "worker_count": 8,
+    "assigned_workers": [
+      "ip-172-31-39-5-worker1",
+      "ip-172-31-39-5-worker2",
+      "ip-172-31-39-5-worker3",
+      "ip-172-31-39-5-worker4",
+      "worker5",
+      "worker6",
+      "worker7",
+      "worker8"
+    ],
+    "n_train": 1200000,
+    "n_validation": 400000,
+    "n_test": 400000,
+    "n_features": 47,
+    "training_wall_time_seconds": 2290.937639474869,
+    "validation_metric": 0.86864,
+    "validation_accuracy": 0.86864,
+    "validation_r2": null,
+    "validation_mae": null,
+    "validation_mse": null,
+    "validation_rmse": null,
+    "validation_confusion_matrix": [
+      [
+        175034,
+        24936
+      ],
+      [
+        27608,
+        172422
+      ]
+    ],
+    "expected_tree_count": 400,
+    "completed_tree_count": 400,
+    "saved_tree_joblib_count": 400,
+    "tree_distribution_by_worker": {
+      "ip-172-31-39-5-worker1": 56,
+      "ip-172-31-39-5-worker2": 48,
+      "ip-172-31-39-5-worker3": 48,
+      "ip-172-31-39-5-worker4": 48,
+      "worker5": 50,
+      "worker6": 50,
+      "worker7": 50,
+      "worker8": 50
+    },
+    "tree_training_time_sum_seconds": 5942.045927524567,
+    "tree_training_time_avg_seconds": 14.855114818811417,
+    "tree_training_time_max_seconds": 16.59858751296997,
+    "scalability_metrics_available": false,
+    "scalability_summary_path": "/home/ec2-user/gp/performance_evaluation/distributed_jobs/job_1f973ab7942f45d182cde77e8e1d2b3e/metrics/scalability_summary.json",
+    "scalability_total_time_seconds": null,
+    "scalability_training_time_seconds": null,
+    "scalability_throughput_trees_per_second": null,
+    "scalability_speedup": null,
+    "scalability_efficiency": null,
+    "scalability_baseline_time_seconds": null,
+    "scalability_timings": {},
+    "scalability_counters": {},
+    "scalability_retry_count": null,
+    "scalability_train_rpc_count": null,
+    "scalability_failed_tree_count": null
+  },
+  "comparison": {
+    "local_validation_metric": 0.8721375,
+    "distributed_validation_metric": 0.86864,
+    "validation_metric_delta_distributed_minus_local": -0.0034975000000000422,
+    "local_training_time_seconds": 3722.3843486999394,
+    "distributed_training_wall_time_seconds": 2290.937639474869,
+    "training_time_ratio_local_over_distributed": 1.6248300628354024
+  },
+  "scalability": {
+    "metrics_available": false,
+    "worker_count": 8,
+    "n_estimators_total": 400,
+    "total_time_seconds": null,
+    "training_time_seconds": null,
+    "throughput_trees_per_second": null,
+    "speedup": null,
+    "efficiency": null,
+    "baseline_time_seconds": null,
+    "retry_count": null,
+    "failed_tree_count": null,
+    "train_rpc_count": null,
+    "timings": {},
+    "counters": {}
+  }
+}
