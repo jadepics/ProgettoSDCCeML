@@ -172,6 +172,7 @@ class TrainingJobService:
             job_record = self._load_job_or_raise(job_id)
             training_request = self._require_training_request(job_record)
 
+            metrics_collector = self._build_scalability_metrics_collector(job_id)       #crea cartella metrics in efs
             self._metrics_event(
                 metrics_collector,
                 "job_started",
