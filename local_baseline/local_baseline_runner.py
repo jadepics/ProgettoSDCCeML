@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import joblib
+
 import numpy as np
 import pandas as pd
 
@@ -120,6 +122,24 @@ class LocalBaselineConfig:
     n_jobs: int = 1
     output_json: str | None = None
 
+    # NUOVO: salvataggio modello locale
+    save_model: bool = True
+    model_output_path: str | None = None
+
+    # NUOVO: salvataggio degli split usati dalla baseline locale
+    save_split_artifacts: bool = True
+    split_artifacts_dir: str | None = None
+
+@dataclass
+class LocalSavedInferenceConfig:
+    model_path: str
+    features_path: str
+    task_type: str
+
+    labels_path: str | None = None
+    split_name: str = "test"
+    rows: int | None = None
+    output_json: str | None = None
 
 def resolve_input_path(path_value: str | Path) -> Path:
     """
@@ -159,6 +179,48 @@ def resolve_output_path(path_value: str | Path) -> Path:
 
     return PROJECT_ROOT / path
 
+def sanitize_filename(value: str) -> str:
+    return (
+        str(value)
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "_")
+        .replace(" ", "_")
+    )
+
+
+def default_local_model_path(config: LocalBaselineConfig) -> Path:
+    filename = (
+        f"local_{config.task_type}_"
+        f"{sanitize_filename(config.dataset_scenario)}_"
+        f"{sanitize_filename(config.target_column)}_"
+        f"{config.n_estimators}_trees.joblib"
+    )
+
+    return PROJECT_ROOT / "local_baseline" / "models" / filename
+
+
+def default_split_artifacts_dir(config: LocalBaselineConfig) -> Path:
+    dirname = (
+        f"local_{config.task_type}_"
+        f"{sanitize_filename(config.dataset_scenario)}_"
+        f"{sanitize_filename(config.target_column)}_"
+        f"{config.n_estimators}_trees"
+    )
+
+    return PROJECT_ROOT / "local_baseline" / "prepared_splits" / dirname
+
+
+def save_series_as_parquet(series: pd.Series, path: Path, column_name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    df = series.reset_index(drop=True).to_frame(name=column_name)
+    df.to_parquet(path, index=False)
+
+
+def save_dataframe_as_parquet(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.reset_index(drop=True).to_parquet(path, index=False)
 
 def make_json_safe(value: Any) -> Any:
     """
@@ -536,10 +598,64 @@ def run_local_baseline(config: LocalBaselineConfig) -> dict[str, Any]:
         y_pred=np.asarray(test_predictions),
     )
 
+    model_path: Path | None = None
+
+    if config.save_model:
+        if config.model_output_path:
+            model_path = resolve_output_path(config.model_output_path)
+        else:
+            model_path = default_local_model_path(config)
+
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(pipeline, model_path)
+
+    split_dir: Path | None = None
+    split_paths: dict[str, str] = {}
+
+    if config.save_split_artifacts:
+        if config.split_artifacts_dir:
+            split_dir = resolve_output_path(config.split_artifacts_dir)
+        else:
+            split_dir = default_split_artifacts_dir(config)
+
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        train_features_path = split_dir / "train_features.parquet"
+        train_labels_path = split_dir / "train_labels.parquet"
+        validation_features_path = split_dir / "validation_features.parquet"
+        validation_labels_path = split_dir / "validation_labels.parquet"
+        test_features_path = split_dir / "test_features.parquet"
+        test_labels_path = split_dir / "test_labels.parquet"
+
+        save_dataframe_as_parquet(X_train, train_features_path)
+        save_series_as_parquet(y_train, train_labels_path, config.target_column)
+
+        save_dataframe_as_parquet(X_validation, validation_features_path)
+        save_series_as_parquet(
+            y_validation,
+            validation_labels_path,
+            config.target_column,
+        )
+
+        save_dataframe_as_parquet(X_test, test_features_path)
+        save_series_as_parquet(y_test, test_labels_path, config.target_column)
+
+        split_paths = {
+            "split_artifacts_dir": str(split_dir),
+            "train_features_path": str(train_features_path),
+            "train_labels_path": str(train_labels_path),
+            "validation_features_path": str(validation_features_path),
+            "validation_labels_path": str(validation_labels_path),
+            "test_features_path": str(test_features_path),
+            "test_labels_path": str(test_labels_path),
+        }
+
     result = {
         "mode": "local_non_distributed",
         "dataset_path_resolved": str(dataset_path),
         "config": asdict(config),
+
+        "local_model_path": str(model_path) if model_path is not None else None,
 
         "n_samples_total": int(len(df)),
         "n_features_input": int(len(feature_names)),
@@ -563,6 +679,97 @@ def run_local_baseline(config: LocalBaselineConfig) -> dict[str, Any]:
 
         "validation_metrics": validation_metrics,
         "test_metrics": test_metrics,
+
+        "split_artifacts": split_paths,
+    }
+
+    result = make_json_safe(result)
+
+    if config.output_json:
+        output_path = resolve_output_path(config.output_json)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(result, indent=2),
+            encoding="utf-8",
+        )
+
+    return result
+
+def run_saved_local_inference(
+    config: LocalSavedInferenceConfig,
+) -> dict[str, Any]:
+    model_path = resolve_input_path(config.model_path)
+    features_path = resolve_input_path(config.features_path)
+
+    if not model_path.exists():
+        raise FileNotFoundError(f"Local model not found: {model_path}")
+
+    if not features_path.exists():
+        raise FileNotFoundError(f"Features file not found: {features_path}")
+
+    pipeline = joblib.load(model_path)
+
+    X = pd.read_parquet(features_path)
+
+    if config.rows is not None:
+        if config.rows <= 0:
+            raise ValueError("rows must be positive or None")
+        X = X.head(config.rows)
+
+    X = X.reset_index(drop=True)
+
+    inference_start = time.perf_counter()
+    predictions = pipeline.predict(X)
+    inference_time_seconds = time.perf_counter() - inference_start
+
+    labels_path = (
+        resolve_input_path(config.labels_path)
+        if config.labels_path is not None
+        else None
+    )
+
+    metrics = None
+
+    if labels_path is not None:
+        if not labels_path.exists():
+            raise FileNotFoundError(f"Labels file not found: {labels_path}")
+
+        y_df = pd.read_parquet(labels_path)
+
+        if config.rows is not None:
+            y_df = y_df.head(config.rows)
+
+        y_true = y_df.to_numpy().reshape(-1)
+
+        metrics = compute_metrics(
+            task_type=config.task_type,
+            y_true=np.asarray(y_true),
+            y_pred=np.asarray(predictions),
+        )
+
+    split_name = str(config.split_name).strip().lower() or "test"
+
+    result = {
+        "mode": "local_saved_model_inference",
+        "model_path": str(model_path),
+        "features_path": str(features_path),
+        "labels_path": str(labels_path) if labels_path is not None else None,
+        "task_type": config.task_type,
+        "split": split_name,
+        "requested_rows": config.rows,
+        "n_rows": int(len(X)),
+        "inference_time_seconds": float(inference_time_seconds),
+
+        # Campi compatibili con distributed_inference_benchmark.py
+        f"{split_name}_inference_time_seconds": float(
+            inference_time_seconds
+        ),
+        f"{split_name}_metrics": metrics,
+
+        "predictions_preview": make_json_safe(
+            np.asarray(predictions).reshape(-1)[:20]
+        ),
+        "created_at": time.time(),
     }
 
     result = make_json_safe(result)
