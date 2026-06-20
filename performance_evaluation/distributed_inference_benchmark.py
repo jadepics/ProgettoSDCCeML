@@ -69,7 +69,7 @@ def load_json(path: str | Path) -> dict[str, Any]:
 
 
 def write_json(path: str | Path, payload: dict[str, Any]) -> None:
-    resolved_path = Path(path)
+    resolved_path = Path(str(path))
 
     if not resolved_path.is_absolute():
         resolved_path = PROJECT_ROOT / resolved_path
@@ -131,6 +131,25 @@ def load_master_addresses() -> list[str]:
 
     return [f"{master_host}:{master_port}"]
 
+def normalized_grpc_options() -> list[tuple[str, int | str]]:
+    """
+    gRPC vuole option name stringa e value stringa/int.
+    Questa normalizzazione evita errori tipo:
+    'PosixPath' object has no attribute 'decode'
+    """
+    normalized: list[tuple[str, int | str]] = []
+
+    for key, value in GRPC_OPTIONS:
+        normalized_key = str(key)
+
+        if isinstance(value, Path):
+            normalized_value: int | str = str(value)
+        else:
+            normalized_value = value
+
+        normalized.append((normalized_key, normalized_value))
+
+    return normalized
 
 def is_not_leader_message(message: str) -> bool:
     return "not leader" in str(message or "").lower()
@@ -141,6 +160,9 @@ def submit_inference_with_leader_discovery(
     features_uri: str,
     timeout_seconds: float,
 ) -> tuple[rf_pb2.SubmitInferenceResponse, str]:
+    model_id = str(model_id)
+    features_uri = str(features_uri)
+
     request = rf_pb2.SubmitInferenceRequest(
         model_id=model_id,
         features_uri=features_uri,
@@ -148,30 +170,56 @@ def submit_inference_with_leader_discovery(
 
     last_error: Exception | None = None
 
-    for master_address in load_master_addresses():
+    for raw_master_address in load_master_addresses():
+        master_address = str(raw_master_address).strip()
+
+        if not master_address:
+            continue
+
         try:
+            print(
+                "[distributed_inference_benchmark] Trying master "
+                f"{master_address}",
+                flush=True,
+            )
+
             with grpc.insecure_channel(
                 master_address,
-                options=GRPC_OPTIONS,
+                options=normalized_grpc_options(),
             ) as channel:
                 stub = rf_pb2_grpc.CoordinatorServiceStub(channel)
 
                 response = stub.SubmitInference(
                     request,
-                    timeout=timeout_seconds,
+                    timeout=float(timeout_seconds),
                 )
 
             if response.success:
+                print(
+                    "[distributed_inference_benchmark] SubmitInference "
+                    f"accepted by {master_address}",
+                    flush=True,
+                )
                 return response, master_address
 
             if is_not_leader_message(response.error):
                 last_error = RuntimeError(response.error)
+                print(
+                    "[distributed_inference_benchmark] Master is not leader: "
+                    f"{master_address} -> {response.error}",
+                    flush=True,
+                )
                 continue
 
             raise RuntimeError(response.error or "SubmitInference failed")
 
         except Exception as exc:
             last_error = exc
+            print(
+                "[distributed_inference_benchmark] SubmitInference failed on "
+                f"{master_address}: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
             continue
 
     raise RuntimeError(
@@ -239,6 +287,10 @@ def build_benchmark_features_uri(
     source_features_uri: str,
     rows: int | None,
 ) -> tuple[str, int, bool]:
+    model_id = str(model_id)
+    split = str(split)
+    source_features_uri = str(source_features_uri)
+
     features_df = load_feature_frame(source_features_uri)
 
     if rows is None:
