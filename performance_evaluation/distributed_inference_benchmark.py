@@ -54,6 +54,13 @@ def load_env_file(path: Path) -> None:
             key.strip(),
             value.strip().strip('"').strip("'"),
         )
+def path_from_file_uri(uri: str) -> Path:
+    uri = str(uri)
+
+    if uri.startswith("file://"):
+        return Path(uri.replace("file://", "", 1))
+
+    return Path(uri)
 
 
 def load_json(path: str | Path) -> dict[str, Any]:
@@ -273,8 +280,7 @@ def load_feature_frame(features_uri: str) -> pd.DataFrame:
 
 
 def load_label_values(labels_uri: str, rows: int | None) -> np.ndarray:
-    labels_df = pd.read_parquet(normalize_uri_to_path(labels_uri))
-
+    labels_df = pd.read_parquet(path_from_file_uri(str(labels_uri)))
     if rows is not None:
         labels_df = labels_df.head(rows)
 
@@ -286,33 +292,64 @@ def build_benchmark_features_uri(
     split: str,
     source_features_uri: str,
     rows: int | None,
+    manifest: dict[str, Any],
 ) -> tuple[str, int, bool]:
+    """
+    Costruisce l'input di inferenza nello stesso modo di training_debug_cli.py:
+    - legge il parquet delle feature preparate;
+    - riordina le colonne secondo manifest["feature_names"];
+    - materializza un nuovo parquet su EFS;
+    - passa al master un file:// URI pulito.
+    """
     model_id = str(model_id)
     split = str(split)
     source_features_uri = str(source_features_uri)
 
-    features_df = load_feature_frame(source_features_uri)
+    features_path = path_from_file_uri(source_features_uri)
 
-    if rows is None:
-        return source_features_uri, int(len(features_df)), False
+    if not features_path.exists():
+        raise FileNotFoundError(f"Features parquet not found: {features_path}")
 
-    if rows <= 0:
-        raise ValueError("rows must be positive or 'all'")
+    X_df = pd.read_parquet(features_path)
 
-    sliced_df = features_df.head(rows).reset_index(drop=True)
+    feature_names = manifest.get("feature_names") or []
+
+    if feature_names:
+        missing_features = [
+            feature
+            for feature in feature_names
+            if feature not in X_df.columns
+        ]
+
+        if missing_features:
+            raise ValueError(
+                "Some manifest features are missing from features parquet: "
+                f"{missing_features}"
+            )
+
+        X_df = X_df[feature_names]
+
+    if rows is not None:
+        if rows <= 0:
+            raise ValueError("rows must be positive or 'all'")
+
+        X_df = X_df.head(rows)
+
+    X_df = X_df.reset_index(drop=True)
 
     output_dir = ARTIFACT_ROOT / "benchmark_inference_inputs" / model_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    rows_label = "all" if rows is None else str(rows)
+
     output_path = (
         output_dir
-        / f"{split}_head_{rows}_{int(time.time())}.parquet"
+        / f"{split}_head_{rows_label}_{int(time.time())}.parquet"
     )
 
-    sliced_df.to_parquet(output_path, index=False)
+    X_df.to_parquet(output_path, index=False)
 
-    return path_to_file_uri(output_path), int(len(sliced_df)), True
-
+    return path_to_file_uri(output_path), int(len(X_df)), True
 
 def compute_metrics(
     task_type: str,
@@ -442,6 +479,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             split=args.split,
             source_features_uri=source_features_uri,
             rows=rows,
+            manifest=manifest,
         )
     )
 
