@@ -125,3 +125,9 @@ class StorageLayout:
         Path del file .npy finale, ottenuto aggregando le predizioni parziali.
         """
         return self.inference_dir(model_id) / inference_id / "predictions.npy"
+    def inference_metadata_path(self, model_id: str, inference_id: str) -> Path:
+        """
+        Path del file JSON con i metadata di una richiesta di inferenza.
+        Utile per benchmark e debugging: worker usati, numero alberi, tempo lato master.
+        """
+        return self.inference_dir(model_id) / inference_id / "metadata.json"

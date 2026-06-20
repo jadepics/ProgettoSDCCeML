@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,13 +16,13 @@ from common.prediction_io import (
     save_final_prediction_array,
 )
 
-
 @dataclass(slots=True)
 class InferenceResult:
     task_type: str
     prediction_uri: str
     n_rows: int
     n_cols: int
+    metadata_uri: str | None = None
 
 
 class WorkerLike(Protocol):
@@ -78,6 +79,7 @@ class InferenceCoordinator:
         model_id: str,
         features_uri: str,
     ) -> InferenceResult:
+        coordinator_start = time.perf_counter()
         self.leadership_guard.require_leader()
 
         if not features_uri:
@@ -152,12 +154,81 @@ class InferenceCoordinator:
             output_uri_or_path=final_prediction_path,
         )
 
+        metadata_uri = self._write_inference_metadata(
+            model_id=manifest.model_id,
+            experiment_id=manifest.experiment_id,
+            inference_id=inference_id,
+            task_type=manifest.model_type,
+            features_uri=features_uri,
+            prediction_uri=final_prediction_uri,
+            n_rows=int(final_predictions.shape[0]),
+            n_cols=int(final_predictions.shape[1]),
+            tree_count=len(manifest.tree_artifacts),
+            assignments=assignments,
+            partial_prediction_count=len(responses),
+            elapsed_time_seconds=time.perf_counter() - coordinator_start,
+        )
+
         return InferenceResult(
             task_type=manifest.model_type,
             prediction_uri=final_prediction_uri,
             n_rows=int(final_predictions.shape[0]),
             n_cols=int(final_predictions.shape[1]),
+            metadata_uri=metadata_uri,
         )
+
+    def _write_inference_metadata(
+        self,
+        model_id: str,
+        experiment_id: str,
+        inference_id: str,
+        task_type: str,
+        features_uri: str,
+        prediction_uri: str,
+        n_rows: int,
+        n_cols: int,
+        tree_count: int,
+        assignments: list[tuple[WorkerLike, list[str]]],
+        partial_prediction_count: int,
+        elapsed_time_seconds: float,
+    ) -> str:
+        metadata_path = self.storage_layout.inference_metadata_path(
+            model_id=model_id,
+            inference_id=inference_id,
+        )
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "inference_id": inference_id,
+            "model_id": model_id,
+            "experiment_id": experiment_id,
+            "task_type": task_type,
+            "features_uri": features_uri,
+            "prediction_uri": prediction_uri,
+            "n_rows": int(n_rows),
+            "n_cols": int(n_cols),
+            "tree_count": int(tree_count),
+            "worker_count": int(len(assignments)),
+            "partial_prediction_count": int(partial_prediction_count),
+            "coordinator_elapsed_time_seconds": float(elapsed_time_seconds),
+            "assignments": [
+                {
+                    "worker_id": worker.worker_id,
+                    "host": worker.host,
+                    "port": int(worker.port),
+                    "tree_count": len(tree_uris),
+                }
+                for worker, tree_uris in assignments
+            ],
+            "created_at": time.time(),
+        }
+
+        metadata_path.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+
+        return metadata_path.resolve().as_uri()
 
     def _collect_prediction_responses(
         self,
