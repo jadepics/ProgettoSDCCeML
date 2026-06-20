@@ -9,16 +9,22 @@ import numpy as np
 import pandas as pd
 
 
-def normalize_uri_to_path(uri: str) -> Path:
+def normalize_uri_to_path(uri: str | Path) -> Path:
     """
     Converte un URI file://... oppure un path locale in pathlib.Path.
 
-    Nel progetto gli artifact sono normalmente salvati come:
-      file:///mnt/efs/...
-
-    Supporta anche path semplici:
-      /mnt/efs/...
+    Accetta sia stringhe/URI sia pathlib.Path. Questo è importante perché
+    alcune funzioni interne del master lavorano correttamente con Path locali
+    su EFS, mentre gRPC e gli URI usano stringhe.
     """
+    if uri is None:
+        raise ValueError("URI/path cannot be empty")
+
+    if isinstance(uri, Path):
+        return uri
+
+    uri = str(uri)
+
     if not uri:
         raise ValueError("URI/path cannot be empty")
 

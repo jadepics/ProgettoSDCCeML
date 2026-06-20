@@ -491,14 +491,20 @@ class WorkerClient:
             raise ValueError("tree_artifact_uris cannot be empty")
 
         return rf_pb2.PredictShardRequest(
-            model_id=model_id,
-            experiment_id=experiment_id,
-            task_type=task_type,
-            tree_artifact_uris=list(tree_artifact_uris),
-            class_labels=list(class_labels),
-            features_uri=features_uri,
-            prediction_output_dir=prediction_output_dir,
-            prediction_id=prediction_id,
+            model_id=str(model_id),
+            experiment_id=str(experiment_id),
+            task_type=str(task_type),
+            tree_artifact_uris=[
+                str(uri)
+                for uri in tree_artifact_uris
+            ],
+            class_labels=[
+                str(label)
+                for label in class_labels
+            ],
+            features_uri=str(features_uri),
+            prediction_output_dir=str(prediction_output_dir),
+            prediction_id=str(prediction_id),
         )
 
     def _build_prediction_result_from_response(
