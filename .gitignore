@@ -1,2 +1,9 @@
 /performance_evaluation/distributed_jobs/
 /Dataset/
+
+/.env.master
+/.env.worker
+/runtime-env/
+
+/logs/
+/tmp/
