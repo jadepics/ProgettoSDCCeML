@@ -1,0 +1,110 @@
+SCALABILITY REGRESSION 2M 400 TREES
+
+Notation: <instances>x<workers_per_instance> = total workers
+
+Fixed configuration:
+dataset = /mnt/efs/gp_artifacts/datasets/synthetic_regression_2000000_samples_42_features.csv
+task_type = regression
+target_column = target
+dataset_scenario = baseline_original
+n_estimators = 400
+max_depth = 5
+max_features = sqrt
+criterion = squared_error
+bootstrap = true
+random_seed = 42
+split = 60/20/20
+
+Runs:
+
+1x1:
+instances = 1
+workers_per_instance = 1
+total_workers = 1
+job_id =
+
+1x2:
+instances = 1
+workers_per_instance = 2
+total_workers = 2
+job_id = ...
+
+2x1:
+instances = 2
+workers_per_instance = 1
+total_workers = 2
+job_id = ...
+
+1x4:
+instances = 1
+workers_per_instance = 4
+total_workers = 4
+job_id = job_bec7e60cb02f4f75aa032e3d917a8359
+
+2x2:
+instances = 2
+workers_per_instance = 2
+total_workers = 4
+job_id = ...
+
+4x1:
+instances = 4
+workers_per_instance = 1
+total_workers = 4
+job_id = ...
+
+2x4:
+instances = 2
+workers_per_instance = 4
+total_workers = 8
+job_id = job_17b66deb76704a0aae4dbeb635489cbf
+
+4x2:
+instances = 4
+workers_per_instance = 2
+total_workers = 8
+job_id = ...
+
+
+
+
+JOB_ID="job_57986e36255d42cf9b683fb40b1a14c2"
+sudo rm -rf "/mnt/efs/gp_artifacts/jobs/$JOB_ID"
+
+
+WORKERS:
+watch -n 5 "docker stats --no-stream"
+
+MASTER:
+JOB_ID="job_bec7e60cb02f4f75aa032e3d917a8359"
+EXP_ID="${JOB_ID}_exp_000"
+JOB_DIR="/mnt/efs/gp_artifacts/jobs/$JOB_ID"
+TREE_DIR="$JOB_DIR/experiments/$EXP_ID/trees"
+watch -n 10 "echo '=== JOB DIR ==='; echo '$JOB_DIR'; echo; echo '=== JOB SIZE ==='; du -sh '$JOB_DIR' 2>/dev/null; echo; echo '=== JOBLIB TREES ==='; find '$TREE_DIR' -name 'tree_*.joblib' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== JSON TREES ==='; find '$TREE_DIR' -name 'tree_*.json' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== RECENT JOB FILES ==='; find '$JOB_DIR' -type f -printf '%TY-%Tm-%Td %TH:%TM %s %p\n' 2>/dev/null | sort | tail -12"
+
+
+
+
+$JOB_ID="job_57986e36255d42cf9b683fb40b1a14c2"
+$EXP_ID="${JOB_ID}_exp_000"
+
+$KEY="C:\Users\PC\Desktop\KeyCouple.pem"
+$MASTER_PUBLIC_IP="16.171.199.108"
+
+$HOST="ec2-user@$MASTER_PUBLIC_IP"
+$REMOTE_JOB="/mnt/efs/gp_artifacts/jobs/$JOB_ID"
+$LOCAL_JOB="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\performance_evaluation\distributed_jobs\$JOB_ID"
+
+New-Item -ItemType Directory -Force "$LOCAL_JOB" | Out-Null
+New-Item -ItemType Directory -Force "$LOCAL_JOB\metrics" | Out-Null
+New-Item -ItemType Directory -Force "$LOCAL_JOB\experiments\$EXP_ID" | Out-Null
+
+scp -i $KEY "$HOST`:$REMOTE_JOB/job_record.json" "$LOCAL_JOB\"
+scp -i $KEY "$HOST`:$REMOTE_JOB/task_ledger.json" "$LOCAL_JOB\"
+
+scp -i $KEY "$HOST`:$REMOTE_JOB/metrics/scalability_summary.json" "$LOCAL_JOB\metrics\"
+scp -i $KEY "$HOST`:$REMOTE_JOB/metrics/scalability_events.jsonl" "$LOCAL_JOB\metrics\"
+
+scp -i $KEY "$HOST`:$REMOTE_JOB/experiments/$EXP_ID/experiment_record.json" "$LOCAL_JOB\experiments\$EXP_ID\"
+
+Get-ChildItem -Recurse "$LOCAL_JOB"
