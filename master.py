@@ -275,7 +275,9 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         )
         self.shard_planner = ShardPlanner(
             self.layout,
-            max_running_tasks_per_worker=2,
+
+            #modificato da 2 ad 1 per il problema del parallelismo
+            max_running_tasks_per_worker=1,
         )
 
         self.worker_client = WorkerClient(
