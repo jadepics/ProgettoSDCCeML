@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from typing import Optional, Protocol
+from threading import Lock
 
 from common.contracts import (
     ExperimentRecord,
@@ -475,6 +476,7 @@ class TrainingOrchestrator:
 
             max_workers = self._effective_max_parallel_shards(
                 shard_count=len(shards),
+                worker_count=len(alive_workers),
             )
 
             self._record_training_plan(
@@ -519,6 +521,10 @@ class TrainingOrchestrator:
 
             had_failure = False
 
+            worker_locks = {
+                worker.worker_id: Lock()
+                for worker in alive_workers
+            }
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 future_map = {}
 
@@ -558,6 +564,7 @@ class TrainingOrchestrator:
                         worker,
                         shard,
                         metrics_collector,
+                        worker_locks,
                     )
                     future_map[future] = shard
 
@@ -865,6 +872,7 @@ class TrainingOrchestrator:
         worker: WorkerLike,
         shard: TrainingShard,
         metrics_collector: Optional[ScalabilityMetricsCollector] = None,
+        worker_locks: Optional[dict[str, Lock]] = None,
     ) -> tuple[TrainingShard, ShardTrainingResult, list[ShardTrainingResult]]:
         observed_results: list[ShardTrainingResult] = []
 
@@ -896,11 +904,27 @@ class TrainingOrchestrator:
                 flush=True,
             )
 
-            current_shard, result = self._dispatch_attempt(
-                worker=current_worker,
-                shard=current_shard,
-                metrics_collector=metrics_collector,
-            )
+            worker_lock = None
+
+            if worker_locks is not None:
+                worker_lock = worker_locks.setdefault(
+                    current_worker.worker_id,
+                    Lock(),
+                )
+
+            if worker_lock is None:
+                current_shard, result = self._dispatch_attempt(
+                    worker=current_worker,
+                    shard=current_shard,
+                    metrics_collector=metrics_collector,
+                )
+            else:
+                with worker_lock:
+                    current_shard, result = self._dispatch_attempt(
+                        worker=current_worker,
+                        shard=current_shard,
+                        metrics_collector=metrics_collector,
+                    )
 
             if not self._is_current_attempt(current_shard, result):
                 print(
@@ -1822,17 +1846,26 @@ class TrainingOrchestrator:
         )
 
     def _effective_max_parallel_shards(
-        self,
-        shard_count: int,
+            self,
+            shard_count: int,
+            worker_count: int,
     ) -> int:
         if shard_count <= 0:
             return 0
 
-        max_workers = self.max_parallel_shards or shard_count
-        max_workers = min(max_workers, shard_count)
+        if worker_count <= 0:
+            return 0
+
+        configured_limit = self.max_parallel_shards or worker_count
+
+        max_workers = min(
+            shard_count,
+            worker_count,
+            configured_limit,
+        )
 
         return max_workers
-
+    
     def _log_alive_workers(
         self,
         alive_workers: list[WorkerLike],
