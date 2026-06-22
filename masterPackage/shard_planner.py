@@ -37,7 +37,7 @@ class ShardPlanner:
             lease_timeout_seconds: float | None = None,
             initial_attempt_id: int = 1,
             max_running_tasks_per_worker: int | None = None,
-            max_trees_per_shard: int | None = 100,
+            max_trees_per_shard: int | None = 50,
     ) -> None:
         if initial_attempt_id <= 0:
             raise ValueError("initial_attempt_id must be > 0")
