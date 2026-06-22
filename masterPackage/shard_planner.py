@@ -32,14 +32,18 @@ class ShardPlanner:
     """
 
     def __init__(
-        self,
-        storage_layout: StorageLayout,
-        lease_timeout_seconds: float | None = None,
-        initial_attempt_id: int = 1,
-        max_running_tasks_per_worker: int | None = None
+            self,
+            storage_layout: StorageLayout,
+            lease_timeout_seconds: float | None = None,
+            initial_attempt_id: int = 1,
+            max_running_tasks_per_worker: int | None = None,
+            max_trees_per_shard: int | None = 100,
     ) -> None:
         if initial_attempt_id <= 0:
             raise ValueError("initial_attempt_id must be > 0")
+
+        if max_trees_per_shard is not None and max_trees_per_shard <= 0:
+            raise ValueError("max_trees_per_shard must be > 0 when provided")
 
         self.storage_layout = storage_layout
         self.initial_attempt_id = initial_attempt_id
@@ -49,7 +53,7 @@ class ShardPlanner:
         self.lease_timeout_seconds = lease_timeout_seconds
 
         self.max_running_tasks_per_worker = max_running_tasks_per_worker
-
+        self.max_trees_per_shard = max_trees_per_shard
     def plan(
         self,
         job_id: str,
@@ -257,16 +261,24 @@ class ShardPlanner:
         return eligible_workers
 
     def _split_trees(
-        self,
-        n_trees: int,
-        n_workers: int,
+            self,
+            n_trees: int,
+            n_workers: int,
     ) -> list[tuple[int, int]]:
         if n_trees <= 0:
             raise ValueError("n_trees must be > 0")
         if n_workers <= 0:
             raise ValueError("n_workers must be > 0")
 
-        chunk_count = min(n_trees, n_workers)
+        max_trees_per_shard = self.max_trees_per_shard
+
+        if max_trees_per_shard is None:
+            chunk_count = min(n_trees, n_workers)
+        else:
+            min_chunks_for_limit = (n_trees + max_trees_per_shard - 1) // max_trees_per_shard
+            chunk_count = max(n_workers, min_chunks_for_limit)
+            chunk_count = min(n_trees, chunk_count)
+
         base = n_trees // chunk_count
         remainder = n_trees % chunk_count
 
