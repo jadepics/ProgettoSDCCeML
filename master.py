@@ -278,7 +278,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
 
             #modificato da 2 ad 1 per il problema del parallelismo
             max_running_tasks_per_worker=1,
-            max_trees_per_shard=50,
+            max_trees_per_shard=100,
         )
 
         self.worker_client = WorkerClient(
