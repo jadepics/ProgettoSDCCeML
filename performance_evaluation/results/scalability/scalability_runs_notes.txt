@@ -29,9 +29,9 @@ workers_per_instance = 2
 total_workers = 2
 job_id = ...
 
-2x1:
-instances = 2
-workers_per_instance = 1
+1x3:
+instances = 1
+workers_per_instance = 2
 total_workers = 2
 job_id = ...
 
@@ -41,15 +41,21 @@ workers_per_instance = 4
 total_workers = 4
 job_id = job_bec7e60cb02f4f75aa032e3d917a8359
 
-2x2:
+2x1:
 instances = 2
 workers_per_instance = 2
 total_workers = 4
 job_id = ...
 
-4x1:
-instances = 4
-workers_per_instance = 1
+2x2:
+instances = 2
+workers_per_instance = 2
+total_workers = 4
+job_id = job_d619c1a8a7d546e8b6987341eec9e3d9
+
+2x3:
+instances = 2
+workers_per_instance = 2
 total_workers = 4
 job_id = ...
 
@@ -58,17 +64,63 @@ instances = 2
 workers_per_instance = 4
 total_workers = 8
 job_id = job_17b66deb76704a0aae4dbeb635489cbf
+Simo
+
+3x1:
+instances = 4
+workers_per_instance = 1
+total_workers = 4
+job_id =
+
+3x2:
+instances = 4
+workers_per_instance = 1
+total_workers = 4
+job_id = job_21e38181c63949adb9010bb1869d08b1
+
+3x3:
+instances = 4
+workers_per_instance = 1
+total_workers = 4
+job_id = job_8694995956964f2baf51c5a5201265d6
+
+3x4:
+instances = 4
+workers_per_instance = 1
+total_workers = 4
+job_id = job_e420bade934a4076b06f11271a89e0be
+
+4x1:
+instances = 4
+workers_per_instance = 1
+total_workers = 4
+job_id = job_b594f838244849e0a093b95e823bda55
+Simo
 
 4x2:
 instances = 4
 workers_per_instance = 2
 total_workers = 8
-job_id = ...
+job_id = job_d0bc3a8f2c8c4aadb27f8a5491d9282a
+Simo
+
+4x3:
+instances = 4
+workers_per_instance = 2
+total_workers = 8
+job_id = job_f9e95a90329c492c9c39ae0e6de1f9fc
+Simo
+
+4x4:
+instances = 1
+workers_per_instance = 4
+total_workers = 4
+job_id = job_54907fa2477f40928e7115e684124b30
+Simo
 
 
 
-
-JOB_ID="job_57986e36255d42cf9b683fb40b1a14c2"
+JOB_ID="job_d0bc3a8f2c8c4aadb27f8a5491d9282a"
 sudo rm -rf "/mnt/efs/gp_artifacts/jobs/$JOB_ID"
 
 
@@ -76,7 +128,7 @@ WORKERS:
 watch -n 5 "docker stats --no-stream"
 
 MASTER:
-JOB_ID="job_bec7e60cb02f4f75aa032e3d917a8359"
+JOB_ID="job_d619c1a8a7d546e8b6987341eec9e3d9"
 EXP_ID="${JOB_ID}_exp_000"
 JOB_DIR="/mnt/efs/gp_artifacts/jobs/$JOB_ID"
 TREE_DIR="$JOB_DIR/experiments/$EXP_ID/trees"
@@ -85,26 +137,59 @@ watch -n 10 "echo '=== JOB DIR ==='; echo '$JOB_DIR'; echo; echo '=== JOB SIZE =
 
 
 
-$JOB_ID="job_57986e36255d42cf9b683fb40b1a14c2"
+# ================================
+# DOWNLOAD LIGHT JOB ARTIFACTS
+# ================================
+
+# Job da scaricare
+$JOB_ID="job_b594f838244849e0a093b95e823bda55"
 $EXP_ID="${JOB_ID}_exp_000"
 
+# Chiave SSH
 $KEY="C:\Users\PC\Desktop\KeyCouple.pem"
-$MASTER_PUBLIC_IP="16.171.199.108"
 
-$HOST="ec2-user@$MASTER_PUBLIC_IP"
+# IP pubblico attuale del master
+$MASTER_PUBLIC_IP="16.171.29.63"
+
+# Host remoto
+$REMOTE_HOST="ec2-user@$MASTER_PUBLIC_IP"
+
+# Path remoto su EFS
 $REMOTE_JOB="/mnt/efs/gp_artifacts/jobs/$JOB_ID"
+
+# Path locale nel progetto
 $LOCAL_JOB="C:\Users\PC\Desktop\materie\ISW\Mvn\ProgettoSDCCeML\performance_evaluation\distributed_jobs\$JOB_ID"
+
+# ================================
+# CREAZIONE CARTELLE LOCALI
+# ================================
 
 New-Item -ItemType Directory -Force "$LOCAL_JOB" | Out-Null
 New-Item -ItemType Directory -Force "$LOCAL_JOB\metrics" | Out-Null
 New-Item -ItemType Directory -Force "$LOCAL_JOB\experiments\$EXP_ID" | Out-Null
 
-scp -i $KEY "$HOST`:$REMOTE_JOB/job_record.json" "$LOCAL_JOB\"
-scp -i $KEY "$HOST`:$REMOTE_JOB/task_ledger.json" "$LOCAL_JOB\"
+# ================================
+# DOWNLOAD FILE PRINCIPALI
+# ================================
 
-scp -i $KEY "$HOST`:$REMOTE_JOB/metrics/scalability_summary.json" "$LOCAL_JOB\metrics\"
-scp -i $KEY "$HOST`:$REMOTE_JOB/metrics/scalability_events.jsonl" "$LOCAL_JOB\metrics\"
+scp -i $KEY "$REMOTE_HOST`:$REMOTE_JOB/job_record.json" "$LOCAL_JOB\"
+scp -i $KEY "$REMOTE_HOST`:$REMOTE_JOB/task_ledger.json" "$LOCAL_JOB\"
 
-scp -i $KEY "$HOST`:$REMOTE_JOB/experiments/$EXP_ID/experiment_record.json" "$LOCAL_JOB\experiments\$EXP_ID\"
+# ================================
+# DOWNLOAD METRICHE
+# ================================
+
+scp -i $KEY "$REMOTE_HOST`:$REMOTE_JOB/metrics/scalability_summary.json" "$LOCAL_JOB\metrics\"
+scp -i $KEY "$REMOTE_HOST`:$REMOTE_JOB/metrics/scalability_events.jsonl" "$LOCAL_JOB\metrics\"
+
+# ================================
+# DOWNLOAD EXPERIMENT RECORD
+# ================================
+
+scp -i $KEY "$REMOTE_HOST`:$REMOTE_JOB/experiments/$EXP_ID/experiment_record.json" "$LOCAL_JOB\experiments\$EXP_ID\"
+
+# ================================
+# VERIFICA FINALE
+# ================================
 
 Get-ChildItem -Recurse "$LOCAL_JOB"
