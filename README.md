@@ -2,9 +2,9 @@
 
 ## Descrizione del progetto
 
-Questo progetto implementa un sistema di **Random Forest distribuito** per task di **classificazione** e **regressione**. L'obiettivo è distribuire il training e l'inferenza di una foresta di decision tree su più worker, mantenendo un master responsabile del coordinamento, della preparazione dei dati, della validazione, della selezione del modello e della pubblicazione del manifest finale.
+Questo progetto implementa un sistema di **Random Forest distribuito** per task di **classificazione** (binaria e multiclasse) e **regressione**. L'obiettivo è distribuire il training e l'inferenza di una foresta di decision tree su più worker, mantenendo un master responsabile del coordinamento, della preparazione dei dati, della validazione, della selezione del modello e della pubblicazione del manifest finale.
 
-Il sistema non utilizza Spark, MPI o framework distribuiti esterni. La distribuzione è realizzata tramite un'architettura custom **Master/Worker** basata su **Python**, **gRPC** e storage condiviso. In ambiente AWS, lo storage condiviso previsto è **Amazon EFS**, montato sui nodi master, worker e client nel path:
+La distribuzione del sistema è realizzata tramite un'architettura **Master/Worker** basata su **Python**, **gRPC** e storage condiviso Amazon EFS, n ambiente AWS, montato sui nodi master, worker e client nel path:
 
 ```text
 /mnt/efs/gp_artifacts
@@ -18,7 +18,7 @@ Il progetto include inoltre una fault tolerance pratica basata su:
 - persistenza di job, task ledger, split, alberi e manifest su EFS;
 - recovery degli alberi mancanti dopo crash worker o crash del master leader.
 
-> Nota importante: nella versione corrente Raft è usato per la **leader election**. Lo stato applicativo del training viene recuperato da EFS tramite `JobRepository`, `TaskLedger`, artifact e manifest persistenti. Il progetto non replica ancora tutte le transizioni applicative tramite una state machine Raft completa.
+> Nota importante: Raft è usato per la **leader election**. Lo stato applicativo del training viene recuperato da EFS tramite `JobRepository`, `TaskLedger`, artifact e manifest persistenti. Il progetto non replica ancora tutte le transizioni applicative tramite una state machine Raft completa.
 
 ---
 
@@ -77,7 +77,7 @@ I worker espongono un servizio gRPC e possono essere avviati in più container s
 
 ### Storage condiviso EFS
 
-EFS è la fonte durevole degli artifact. Contiene:
+EFS è lo strato di persistenza degli artifact. Contiene:
 
 - dataset sorgenti;
 - split train/validation/test;
@@ -223,8 +223,8 @@ Il deployment Docker usa `--network host`, quindi le porte dei container coincid
 ### 1. Clonare il repository
 
 ```bash
-git clone <repository-url>
-cd <repository-name>
+git clone https://github.com/jadepics/ProgettoSDCCeML.git
+cd ProgettoSDCCeML
 ```
 
 ### 2. Installare i pacchetti di sistema
@@ -283,36 +283,6 @@ Il progetto assume che EFS sia montato in:
 /mnt/efs/gp_artifacts
 ```
 
-Creare le directory principali:
-
-```bash
-sudo mkdir -p /mnt/efs/gp_artifacts
-sudo mkdir -p /mnt/efs/gp_artifacts/datasets
-sudo mkdir -p /mnt/efs/gp_artifacts/jobs
-sudo mkdir -p /mnt/efs/gp_artifacts/models
-sudo mkdir -p /mnt/efs/gp_artifacts/raft
-```
-
-Se necessario, assegnare i permessi all'utente corrente:
-
-```bash
-sudo chown -R $USER:$USER /mnt/efs/gp_artifacts
-```
-
-Copiare il dataset principale:
-
-```bash
-cp Dataset/diabetes_dataset.csv /mnt/efs/gp_artifacts/datasets/diabetes_dataset.csv
-```
-
-Per accedere alle metriche, agli artifact e alle informazioni dei job:
-
-```bash
-cd /mnt/efs/gp_artifacts/jobs
-```
-
----
-
 ## Configurazione
 
 Il progetto fornisce due file di esempio:
@@ -327,133 +297,6 @@ Copiarli prima dell'esecuzione:
 ```bash
 cp .env.master.example .env.master
 cp .env.worker.example .env.worker
-```
-
----
-
-## Configurazione master
-
-File:
-
-```text
-.env.master
-```
-
-Parametri principali:
-
-| Variabile | Significato |
-|---|---|
-| `ARTIFACT_ROOT` | root degli artifact condivisi |
-| `SHARED_STORAGE_ROOT` | root dello storage condiviso |
-| `MASTER_NODE_ID` | identificativo del master, ad esempio `master1` |
-| `MASTER_HOST` | host di bind gRPC, normalmente `0.0.0.0` |
-| `MASTER_PORT` | porta gRPC del master |
-| `CONSENSUS_BACKEND` | backend consenso, normalmente `raft` |
-| `RAFT_HOST` | host di bind del servizio Raft |
-| `RAFT_PORT` | porta Raft del nodo |
-| `RAFT_PEERS` | lista peer Raft nel formato `node_id:host:port` |
-| `RAFT_LOG_DIR` | directory persistente per stato Raft |
-| `RAFT_ELECTION_TIMEOUT_MS` | timeout di election |
-| `RAFT_HEARTBEAT_INTERVAL_MS` | intervallo heartbeat Raft |
-| `RECOVER_INCOMPLETE_JOBS_ON_STARTUP` | abilita recovery automatico dei job incompleti allo startup |
-| `RECOVER_FAILED_JOBS_ON_STARTUP` | abilita recovery anche di job falliti |
-| `RECOVERY_STARTUP_DELAY_SECONDS` | ritardo prima del recovery startup |
-| `RECOVERY_WAIT_WORKERS_TIMEOUT_SECONDS` | attesa massima dei worker per recovery |
-| `TRAINING_MAX_RECOVERY_ROUNDS` | massimo numero di round di recovery |
-| `GRPC_MAX_MESSAGE_LENGTH_MB` | limite messaggi gRPC in MiB |
-
-Esempio:
-
-```env
-ARTIFACT_ROOT=/mnt/efs/gp_artifacts
-SHARED_STORAGE_ROOT=/mnt/efs/gp_artifacts
-
-MASTER_NODE_ID=master1
-MASTER_HOST=0.0.0.0
-MASTER_PORT=50051
-
-CONSENSUS_BACKEND=raft
-RAFT_HOST=0.0.0.0
-RAFT_PORT=50151
-RAFT_PEERS=master1:127.0.0.1:50151,master2:127.0.0.1:50152,master3:127.0.0.1:50153
-RAFT_LOG_DIR=/mnt/efs/gp_artifacts/raft/master1
-RAFT_ELECTION_TIMEOUT_MS=3000
-RAFT_HEARTBEAT_INTERVAL_MS=500
-
-RECOVER_INCOMPLETE_JOBS_ON_STARTUP=true
-RECOVER_FAILED_JOBS_ON_STARTUP=false
-RECOVERY_STARTUP_DELAY_SECONDS=10
-RECOVERY_WAIT_WORKERS_TIMEOUT_SECONDS=60
-RECOVERY_WAIT_WORKERS_POLL_SECONDS=2
-RECOVERY_LEADER_POLL_SECONDS=2
-
-TRAINING_MAX_RECOVERY_ROUNDS=60
-TRAINING_MAX_IDLE_RECOVERY_ROUNDS=5
-TRAINING_RECOVERY_DEFERRED_SLEEP_SECONDS=5
-TRAINING_FORCE_RECLAIM_DEFERRED_AFTER_ROUNDS=3
-
-GRPC_MAX_MESSAGE_LENGTH_MB=256
-```
-
-Gli script `scripts/master.sh` generano automaticamente file runtime specifici in:
-
-```text
-runtime-env/<master>.runtime.env
-```
-
----
-
-## Configurazione worker
-
-File:
-
-```text
-.env.worker
-```
-
-Parametri principali:
-
-| Variabile | Significato |
-|---|---|
-| `WORKER_ID` | identificativo del worker |
-| `WORKER_BIND_HOST` | host di bind gRPC worker |
-| `WORKER_PORT` | porta gRPC worker |
-| `WORKER_ADVERTISE_HOST` | IP privato raggiungibile dal master |
-| `MASTER_HOST` | host master di default |
-| `MASTER_PORT` | porta master di default |
-| `MASTER_LEADER_HOST` | host leader iniziale, usato come fallback |
-| `MASTER_LEADER_PORT` | porta leader iniziale, usata come fallback |
-| `MASTER_SEEDS` | lista dei master candidati per leader discovery |
-| `ARTIFACT_ROOT` | root artifact condivisi |
-| `SHARED_STORAGE_ROOT` | root storage condiviso |
-| `MAX_CONCURRENT_TASKS` | massimo numero di task concorrenti lato worker |
-| `WORKER_MAX_WORKERS` | dimensione thread pool gRPC worker |
-| `GRPC_MAX_MESSAGE_LENGTH_MB` | limite messaggi gRPC in MiB |
-| `CHAOS_POINT` | punto di fault injection per test |
-| `CHAOS_ACTION` | azione chaos, ad esempio `crash` |
-| `CHAOS_DELAY_SECONDS` | ritardo prima dell'azione chaos |
-| `CHAOS_SLEEP_SECONDS` | durata sleep per fault injection |
-
-Esempio:
-
-```env
-WORKER_ID=worker1
-WORKER_BIND_HOST=0.0.0.0
-WORKER_PORT=50061
-WORKER_ADVERTISE_HOST=172.31.x.x
-
-MASTER_HOST=172.31.x.x
-MASTER_PORT=50051
-MASTER_LEADER_HOST=172.31.x.x
-MASTER_LEADER_PORT=50051
-MASTER_SEEDS=172.31.x.x:50051,172.31.x.x:50052,172.31.x.x:50053
-
-ARTIFACT_ROOT=/mnt/efs/gp_artifacts
-SHARED_STORAGE_ROOT=/mnt/efs/gp_artifacts
-
-MAX_CONCURRENT_TASKS=1
-WORKER_MAX_WORKERS=16
-GRPC_MAX_MESSAGE_LENGTH_MB=256
 ```
 
 ### Worker dinamici sulla stessa istanza
