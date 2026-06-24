@@ -301,7 +301,7 @@ cp .env.worker.example .env.worker
 
 ### Worker dinamici sulla stessa istanza
 
-`scripts/worker.sh` supporta più container worker sulla stessa macchina tramite override runtime:
+Nel path `scripts/worker.sh` supporta più container worker sulla stessa macchina tramite override runtime:
 
 | Variabile | Significato |
 |---|---|
@@ -333,184 +333,22 @@ Esempio seconda istanza worker:
   MASTER_CLUSTER_HOST=<PRIVATE_IP_MASTER>
 ```
 
-La prima istanza genera:
 
-```text
-worker1, worker2, worker3, worker4
-```
 
-La seconda genera:
-
-```text
-worker5, worker6, worker7, worker8
-```
-
----
-
-## Configurazione client
-
-`training_debug_cli.py` può leggere un file `.env.client`. Se non esiste, usa valori di default. In deployment distribuito è consigliato creare:
-
-```env
-MASTER_SEEDS=<MASTER_PRIVATE_IP>:50051,<MASTER_PRIVATE_IP>:50052,<MASTER_PRIVATE_IP>:50053
-MASTER_HOST=<MASTER_PRIVATE_IP>
-MASTER_PORT=50051
-GRPC_MAX_MESSAGE_LENGTH_MB=256
-```
-
----
 
 ## Esecuzione distribuita con Docker
 
-### 1. Build immagine master
-
-Sul nodo master:
-
-```bash
-./scripts/master.sh build
-```
-
-### 2. Avvio cluster master
-
-Per avviare tre master sulla stessa istanza:
-
-```bash
-./scripts/master.sh rebuild-all MASTER_CLUSTER_HOST=<PRIVATE_IP_MASTER>
-```
-
-Se l'immagine è già aggiornata:
-
-```bash
-./scripts/master.sh start-all MASTER_CLUSTER_HOST=<PRIVATE_IP_MASTER>
-```
-
-Comandi utili:
-
-```bash
-./scripts/master.sh ps
-./scripts/master.sh logs master1
-./scripts/master.sh logs master2
-./scripts/master.sh logs master3
-./scripts/master.sh shell master1
-```
-
-Nei log deve apparire un messaggio simile:
-
-```text
-[RaftConsensusService] leader elected: node_id=masterX term=... votes=3/3
-```
-
-### 3. Build immagine worker
-
-Su ogni nodo worker:
-
-```bash
-./scripts/worker.sh build
-```
-
-### 4. Avvio worker
-
-Esempio con 4 worker:
-
-```bash
-./scripts/worker.sh rebuild-all \
-  WORKER_COUNT=4 \
-  WORKER_ID_PREFIX=worker \
-  WORKER_INDEX_START=1 \
-  WORKER_BASE_PORT=50061 \
-  MASTER_CLUSTER_HOST=<PRIVATE_IP_MASTER>
-```
-
-Comandi utili:
-
-```bash
-./scripts/worker.sh ps
-./scripts/worker.sh logs worker1
-./scripts/worker.sh shell worker1
-```
-
-### 5. Monitor diagnostico
-
-Lo script `monitor.sh` produce diagnostica periodica sotto EFS:
-
-```bash
-./scripts/monitor.sh master
-```
-
-oppure:
-
-```bash
-./scripts/monitor.sh worker
-```
-
-Output:
-
-```text
-/mnt/efs/gp_artifacts/diagnostics
-```
-
----
 
 ## Esecuzione locale / sviluppo
 
 Per una run locale semplificata è possibile usare il backend di consenso in memoria.
 
-### Terminale 1 — master locale
-
-```bash
-source .venv/bin/activate
-
-export ARTIFACT_ROOT=/mnt/efs/gp_artifacts
-export SHARED_STORAGE_ROOT=/mnt/efs/gp_artifacts
-export CONSENSUS_BACKEND=memory
-export MASTER_NODE_ID=master1
-export MASTER_HOST=0.0.0.0
-export MASTER_PORT=50051
-export GRPC_MAX_MESSAGE_LENGTH_MB=256
-
-python master.py
 ```
-
-### Terminale 2 — worker locale
-
-```bash
-source .venv/bin/activate
-
-export WORKER_ID=worker1
-export WORKER_BIND_HOST=0.0.0.0
-export WORKER_PORT=50061
-export WORKER_ADVERTISE_HOST=127.0.0.1
-
-export MASTER_HOST=127.0.0.1
-export MASTER_PORT=50051
-export MASTER_SEEDS=127.0.0.1:50051
-
-export ARTIFACT_ROOT=/mnt/efs/gp_artifacts
-export SHARED_STORAGE_ROOT=/mnt/efs/gp_artifacts
-
-python run_worker.py
 ```
-
-### Terminale 3 — client
-
-```bash
-source .venv/bin/activate
-
-cat > .env.client <<'ENV'
-MASTER_SEEDS=127.0.0.1:50051
-MASTER_HOST=127.0.0.1
-MASTER_PORT=50051
-GRPC_MAX_MESSAGE_LENGTH_MB=256
-ENV
-
-python training_debug_cli.py
-```
-
----
 
 ## Training distribuito
 
-La CLI principale è:
+La CLI principale è sul Terminale client:
 
 ```bash
 python training_debug_cli.py
@@ -531,30 +369,14 @@ Menu principale:
 0 -> Exit
 ```
 
-### Training classification
 
-Nel menu:
-
-```text
-1 -> Submit training
-2 -> CLASSIFICATION
-```
-
-Esempio di configurazione tipica:
+Nel menu: 1 -> Submit training:
 
 ```text
-task_type=classification
-target_column=diagnosed_diabetes
-validation_ratio=0.2
-test_ratio=0.2
-bootstrap=True
-global_random_seed=42
-criterion=gini
-max_depth=5
-max_features=sqrt
-min_samples_split=2
-min_samples_leaf=1
+1 -> Submit regression
+2 -> Submit classification
 ```
+
 
 Dataset principale:
 
@@ -562,32 +384,6 @@ Dataset principale:
 /mnt/efs/gp_artifacts/datasets/diabetes_dataset.csv
 ```
 
-### Training regression
-
-Nel menu:
-
-```text
-1 -> Submit training
-1 -> REGRESSION
-```
-
-Esempio di configurazione tipica:
-
-```text
-task_type=regression
-target_column=diabetes_risk_score
-validation_ratio=0.2
-test_ratio=0.2
-bootstrap=True
-global_random_seed=42
-criterion=squared_error
-max_depth=5
-max_features=sqrt
-min_samples_split=2
-min_samples_leaf=1
-```
-
----
 
 ## Monitoraggio dei job
 
@@ -694,6 +490,8 @@ Il sistema invoca `DownloadModel` e produce un bundle del modello in formato esp
 
 ---
 
+# Le seguenti attività sono eseguibili per debug e test lato master o worker:
+
 ## Baseline locale
 
 La baseline non distribuita si trova in:
@@ -702,13 +500,8 @@ La baseline non distribuita si trova in:
 local_baseline/
 ```
 
-Esecuzione:
 
-```bash
-python -m local_baseline.local_baseline_cli
-```
-
-Risultati salvati in:
+Risultati eseguiti in locale sono salvati in:
 
 ```text
 local_baseline/results
@@ -776,114 +569,13 @@ python performance_evaluation/distributed_inference_benchmark.py \
 
 ### Scalabilità
 
-Per valutare la scalabilità, ripetere lo stesso job variando solo il numero di worker:
-
-```text
-1 worker
-2 worker
-4 worker
-6 worker
-```
-
-Metriche consigliate:
-
-```text
-speedup(N) = T_1 / T_N
-efficiency(N) = speedup(N) / N
-```
+Per valutare la scalabilità, abbiamo ripetuto lo stesso task variando solo il numero di worker
 
 ---
 
 ## Fault tolerance
 
 Il progetto include script per raccogliere artifact e log degli esperimenti di fault tolerance.
-
-### Crash worker durante training
-
-Scenario:
-
-```text
-1. avviare 3 master
-2. avviare almeno 2 worker
-3. lanciare un training con molti alberi
-4. killare un worker durante il training
-5. verificare che il job continui
-6. verificare recovery degli alberi mancanti
-7. verificare pubblicazione del manifest finale
-```
-
-Snapshot prima del crash:
-
-```bash
-./scripts/collect_worker_crash_artifacts.sh <job_id> before_crash
-```
-
-Kill worker:
-
-```bash
-docker kill <worker_container_name>
-```
-
-Snapshot successivi:
-
-```bash
-./scripts/collect_worker_crash_artifacts.sh <job_id> after_worker_kill
-./scripts/collect_worker_crash_artifacts.sh <job_id> recovery_progress
-./scripts/collect_worker_crash_artifacts.sh <job_id> final_completed
-```
-
-Output:
-
-```text
-logs/fault_tolerance/worker_crash/<job_id>/<phase>
-```
-
-### Crash master leader durante training
-
-Scenario:
-
-```text
-1. avviare 3 master
-2. identificare il leader dai log
-3. lanciare training
-4. killare il master leader
-5. verificare nuova leader election
-6. verificare che i worker seguano il nuovo leader
-7. verificare recovery job
-8. verificare completamento modello
-```
-
-Log master:
-
-```bash
-./scripts/master.sh logs master1
-./scripts/master.sh logs master2
-./scripts/master.sh logs master3
-```
-
-Kill leader:
-
-```bash
-docker kill gp-master-master2
-```
-
-Raccolta artifact:
-
-```bash
-./scripts/coolect_master_leade_crash_artifacts.sh <job_id> before_crash <leader_container>
-./scripts/coolect_master_leade_crash_artifacts.sh <job_id> after_leader_kill <leader_container>
-./scripts/coolect_master_leade_crash_artifacts.sh <job_id> new_leader_elected <leader_container>
-./scripts/coolect_master_leade_crash_artifacts.sh <job_id> recovery_progress <leader_container>
-./scripts/coolect_master_leade_crash_artifacts.sh <job_id> final_completed <leader_container>
-```
-
-Output:
-
-```text
-logs/fault_tolerance/master_leader_crash/<job_id>/<phase>
-```
-
-> Nota: il nome dello script nel repository è `coolect_master_leade_crash_artifacts.sh`.
 
 ---
 
@@ -1047,74 +739,21 @@ Il sistema usa identificativi deterministici per task e alberi. Il recovery non 
 
 ---
 
-## Troubleshooting
+## Troubleshooting:
 
-### `No alive workers available`
+### No alive workers available
 
-Verificare:
 
-```bash
-./scripts/worker.sh ps
-./scripts/worker.sh logs worker1
-./scripts/master.sh logs master1
-./scripts/master.sh logs master2
-./scripts/master.sh logs master3
-```
-
-Controllare:
-
-```text
-MASTER_SEEDS
-MASTER_CLUSTER_HOST
-WORKER_ADVERTISE_HOST
-Security Group AWS
-porte 50051-50053 e 50061+
-```
-
-### `Not leader`
-
-Il client o il worker ha contattato un follower. Usare `MASTER_SEEDS` con tutti i master:
-
-```env
-MASTER_SEEDS=<MASTER_IP>:50051,<MASTER_IP>:50052,<MASTER_IP>:50053
-```
+### Not leader
 
 ### Dataset non trovato
 
-```bash
-ls -lh /mnt/efs/gp_artifacts/datasets/
-cp Dataset/diabetes_dataset.csv /mnt/efs/gp_artifacts/datasets/
-```
-
 ### Worker duplicati
-
-Usare `WORKER_INDEX_START` diverso per ogni istanza worker:
-
-```text
-prima istanza  -> WORKER_INDEX_START=1
-seconda istanza -> WORKER_INDEX_START=5
-terza istanza  -> WORKER_INDEX_START=9
-```
 
 ### Pulizia Docker
 
-```bash
-./scripts/docker-clean.sh
-```
-
-Oppure:
-
-```bash
-docker system prune -af
-docker builder prune -af
-docker image prune -af
-```
-
 ### Reset stato Raft
 
-```bash
-./scripts/master.sh reset-raft
-```
 
 ---
 
