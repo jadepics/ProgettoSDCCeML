@@ -3,7 +3,8 @@ SCALABILITY REGRESSION 2M 400 TREES
 Notation: <instances>x<workers_per_instance> = total workers
 
 Fixed configuration:
-dataset = /mnt/efs/gp_artifacts/datasets/synthetic_regression_2000000_samples_42_features.csv
+dataset =
+/mnt/efs/gp_artifacts/datasets/synthetic_regression_2000000_samples_42_features.csv
 task_type = regression
 target_column = target
 dataset_scenario = baseline_original
@@ -22,6 +23,7 @@ instances = 1
 workers_per_instance = 1
 total_workers = 1
 job_id =
+Baseline
 
 1x2:
 instances = 1
@@ -29,11 +31,6 @@ workers_per_instance = 2
 total_workers = 2
 job_id = ...
 
-1x3:
-instances = 1
-workers_per_instance = 2
-total_workers = 2
-job_id = ...
 
 1x4:
 instances = 1
@@ -45,7 +42,7 @@ job_id = job_bec7e60cb02f4f75aa032e3d917a8359
 instances = 2
 workers_per_instance = 2
 total_workers = 4
-job_id = ...
+job_id = job_9931fabfe3834b8aa78079e45c394541
 
 2x2:
 instances = 2
@@ -57,37 +54,31 @@ job_id = job_d619c1a8a7d546e8b6987341eec9e3d9
 instances = 2
 workers_per_instance = 2
 total_workers = 4
-job_id = ...
+job_id = job_5d505682c8b846bba7d1fcf02648c6eb
 
 2x4:
 instances = 2
 workers_per_instance = 4
 total_workers = 8
 job_id = job_17b66deb76704a0aae4dbeb635489cbf
-Simo
-
-3x1:
-instances = 4
-workers_per_instance = 1
-total_workers = 4
-job_id =
 
 3x2:
-instances = 4
-workers_per_instance = 1
-total_workers = 4
+instances = 3
+workers_per_instance = 2
+total_workers = 6
 job_id = job_21e38181c63949adb9010bb1869d08b1
 
 3x3:
-instances = 4
-workers_per_instance = 1
-total_workers = 4
+instances = 3
+workers_per_instance = 3
+total_workers = 9
 job_id = job_8694995956964f2baf51c5a5201265d6
+3x3,3,3,9,job_8694995956964f2baf51c5a5201265d6,true,
 
 3x4:
-instances = 4
-workers_per_instance = 1
-total_workers = 4
+instances = 3
+workers_per_instance = 4
+total_workers = 12
 job_id = job_e420bade934a4076b06f11271a89e0be
 
 4x1:
@@ -95,30 +86,48 @@ instances = 4
 workers_per_instance = 1
 total_workers = 4
 job_id = job_b594f838244849e0a093b95e823bda55
-Simo
 
 4x2:
 instances = 4
 workers_per_instance = 2
 total_workers = 8
 job_id = job_d0bc3a8f2c8c4aadb27f8a5491d9282a
-Simo
 
 4x3:
 instances = 4
-workers_per_instance = 2
-total_workers = 8
+workers_per_instance = 3
+total_workers = 12
 job_id = job_f9e95a90329c492c9c39ae0e6de1f9fc
-Simo
 
 4x4:
-instances = 1
+instances = 4
 workers_per_instance = 4
-total_workers = 4
+total_workers = 16
 job_id = job_54907fa2477f40928e7115e684124b30
-Simo
 
+6x1:
+instances = 6
+workers_per_instance = 1
+total_workers = 6
+job_id = job_efc55db071b34684be24abf8f13071b6
 
+6x2:
+instances = 6
+workers_per_instance = 2
+total_workers = 12
+job_id = job_058aafba47794dc7ad08a686f1567e38
+
+8x1:
+instances = 8
+workers_per_instance = 1
+total_workers = 8
+job_id = job_0c79c0847f294325a843439ad53eda43
+
+8x2:
+instances = 8
+workers_per_instance = 2
+total_workers = 16
+job_id = job_ad2a4f8fb7c84b00b430112347e4af46
 
 JOB_ID="job_d0bc3a8f2c8c4aadb27f8a5491d9282a"
 sudo rm -rf "/mnt/efs/gp_artifacts/jobs/$JOB_ID"
@@ -128,13 +137,11 @@ WORKERS:
 watch -n 5 "docker stats --no-stream"
 
 MASTER:
-JOB_ID="job_d619c1a8a7d546e8b6987341eec9e3d9"
+JOB_ID="job_5d505682c8b846bba7d1fcf02648c6eb"
 EXP_ID="${JOB_ID}_exp_000"
 JOB_DIR="/mnt/efs/gp_artifacts/jobs/$JOB_ID"
 TREE_DIR="$JOB_DIR/experiments/$EXP_ID/trees"
 watch -n 10 "echo '=== JOB DIR ==='; echo '$JOB_DIR'; echo; echo '=== JOB SIZE ==='; du -sh '$JOB_DIR' 2>/dev/null; echo; echo '=== JOBLIB TREES ==='; find '$TREE_DIR' -name 'tree_*.joblib' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== JSON TREES ==='; find '$TREE_DIR' -name 'tree_*.json' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== RECENT JOB FILES ==='; find '$JOB_DIR' -type f -printf '%TY-%Tm-%Td %TH:%TM %s %p\n' 2>/dev/null | sort | tail -12"
-
-
 
 
 # ================================
@@ -142,14 +149,14 @@ watch -n 10 "echo '=== JOB DIR ==='; echo '$JOB_DIR'; echo; echo '=== JOB SIZE =
 # ================================
 
 # Job da scaricare
-$JOB_ID="job_b594f838244849e0a093b95e823bda55"
+$JOB_ID="job_5d505682c8b846bba7d1fcf02648c6eb"
 $EXP_ID="${JOB_ID}_exp_000"
 
 # Chiave SSH
 $KEY="C:\Users\PC\Desktop\KeyCouple.pem"
 
 # IP pubblico attuale del master
-$MASTER_PUBLIC_IP="16.171.29.63"
+$MASTER_PUBLIC_IP="51.20.31.200"
 
 # Host remoto
 $REMOTE_HOST="ec2-user@$MASTER_PUBLIC_IP"
