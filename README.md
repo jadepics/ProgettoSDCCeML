@@ -764,7 +764,7 @@ Il sistema usa identificativi deterministici per task e alberi. Il recovery non 
 - L'inferenza richiede feature coerenti con il manifest del modello.
 - Il preprocessing viene applicato centralmente dal master durante la data preparation.
 - Gli script sono ottimizzati per Linux/AWS EC2 con EFS montato in `/mnt/efs/gp_artifacts`.
-- Il deployment usa `--network host`, quindi bisogna evitare collisioni tra porte.
+- Il deployment suppone l'evitare collisioni tra porte.
 - I file `.env.master`, `.env.worker`, `.env.client` reali non devono essere versionati.
 
 ---
