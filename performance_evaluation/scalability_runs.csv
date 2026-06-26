@@ -1,6 +1,7 @@
 label,instances,workers_per_instance,total_workers,job_id,include,notes
 1x1,1,1,1,local_regression_2m_400,true,baseline locale regressione 2M 400 alberi
-1x4,1,4,4,job_bec7e60cb02f4f75aa032e3d917a8359,false,OOM/retry non pulito
+1x2,1,2,2,job_5511c62e1abe4862b51730555066bf84,true,
+1x4,1,4,4,job_bec7e60cb02f4f75aa032e3d917a8359,true,OOM/retry non pulito
 2x1,2,1,2,job_9931fabfe3834b8aa78079e45c394541,true,
 2x2,2,2,4,job_d619c1a8a7d546e8b6987341eec9e3d9,true,
 2x3,2,2,6,job_5d505682c8b846bba7d1fcf02648c6eb,true,
@@ -13,5 +14,5 @@ label,instances,workers_per_instance,total_workers,job_id,include,notes
 4x4,4,4,16,job_54907fa2477f40928e7115e684124b30,true,
 6x1,6,1,6,job_efc55db071b34684be24abf8f13071b6,true,
 6x2,6,2,12,job_058aafba47794dc7ad08a686f1567e38,true,
-8x1,8,1,8,job_0c79c0847f294325a843439ad53eda43,true,
-8x2,8,2,16,job_ad2a4f8fb7c84b00b430112347e4af46,true,
+8x1,8,1,8,job_5a445e641aee47228340290d1129c0dd,true,
+8x2,8,2,16,job_356f180845df4b17a2c55c6ec9f22f70,true,

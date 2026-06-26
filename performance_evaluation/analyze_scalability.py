@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+from asyncio.windows_events import NULL
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
@@ -441,6 +442,32 @@ def save_results(df: pd.DataFrame) -> None:
     df.to_csv(output_csv, index=False, encoding="utf-8")
     print(f"[OK] Risultati salvati in: {output_csv}")
 
+def add_grouped_bar_positions(
+    plot_df: pd.DataFrame,
+        spacing: float,
+        group_column: str = "total_workers",
+) -> pd.DataFrame:
+    """
+    Aggiunge una colonna x_position per disegnare barre affiancate
+    quando più configurazioni hanno lo stesso numero totale di worker.
+    """
+    plot_df = plot_df.copy()
+
+    group_sizes = plot_df.groupby(group_column)["label"].transform("count")
+    group_index = plot_df.groupby(group_column).cumcount()
+
+    plot_df["x_position"] = (
+        plot_df[group_column]
+        + (group_index - (group_sizes - 1) / 2) * spacing
+    )
+
+    return plot_df
+
+def format_minutes_seconds(minutes: float) -> str:
+    total_seconds = int(round(float(minutes) * 60))
+    mins = total_seconds // 60
+    secs = total_seconds % 60
+    return f"{mins}m {secs:02d}s"
 
 def plot_duration(df: pd.DataFrame) -> None:
     plot_df = df.dropna(subset=["duration_minutes", "total_workers"]).copy()
@@ -456,24 +483,11 @@ def plot_duration(df: pd.DataFrame) -> None:
         by=["total_workers", "instances", "workers_per_instance", "label"]
     ).reset_index(drop=True)
 
-    # Per ogni gruppo con lo stesso numero di worker, calcoliamo un piccolo offset.
-    # Esempio:
-    # worker = 8 -> 2x4 e 4x2 vengono disegnati uno accanto all'altro.
-    group_sizes = plot_df.groupby("total_workers")["label"].transform("count")
-    group_index = plot_df.groupby("total_workers").cumcount()
+    bar_width = 0.40
 
+    plot_df = add_grouped_bar_positions(plot_df, bar_width+0.10)
 
-    #larghezza barra
-    bar_width = 0.50
-    #distanza tra le configurazioni con gli stessi worker
-    spacing = bar_width + 0.15
-
-    plot_df["x_position"] = (
-        plot_df["total_workers"]
-        + (group_index - (group_sizes - 1) / 2) * spacing
-    )
-
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(13, 6))
 
     plt.bar(
         plot_df["x_position"],
@@ -481,7 +495,6 @@ def plot_duration(df: pd.DataFrame) -> None:
         width=bar_width,
     )
 
-    # Etichetta della configurazione vicino alla barra
     y_max = plot_df["duration_minutes"].max()
     label_offset = y_max * 0.015
 
@@ -489,25 +502,25 @@ def plot_duration(df: pd.DataFrame) -> None:
         x = row["x_position"]
         y = row["duration_minutes"]
 
-        # configurazione sopra la barra
         plt.text(
             x,
-            y + 0.6,
-            f'{row["label"]}\n{y:.1f} min',
+            y + label_offset,
+            row["label"],
             ha="center",
             va="bottom",
-            fontsize=10,
+            fontsize=9,
         )
 
-        # tempo dentro la barra, vicino al bordo alto
-        """plt.text(
+        plt.text(
             x,
-            y - 0.8,
-            f'{y:.1f}',
+            y * 0.5,
+            format_minutes_seconds(y),
             ha="center",
-            va="top",
-            fontsize=10,
-        )"""
+            va="center",
+            fontsize=8,
+            rotation=90,
+            fontweight="bold",
+        )
 
     worker_ticks = sorted(plot_df["total_workers"].unique())
 
@@ -529,41 +542,92 @@ def plot_duration(df: pd.DataFrame) -> None:
 
     print(f"[OK] Grafico salvato in: {output}")
 
-
 def plot_speedup(df: pd.DataFrame) -> None:
     plot_df = df.dropna(subset=["speedup", "total_workers"]).copy()
 
     if plot_df.empty:
-        print("[WARN] Grafico speedup non generato: nessuna durata valida trovata.")
+        print("[WARN] Grafico speedup non generato: nessun valore valido trovato.")
         return
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(plot_df["total_workers"], plot_df["speedup"], marker="o", label="Speedup reale")
+    plot_df["total_workers"] = pd.to_numeric(plot_df["total_workers"]).astype(int)
+    plot_df["speedup"] = pd.to_numeric(plot_df["speedup"])
 
-    max_workers = int(plot_df["total_workers"].max())
-    ideal_x = list(range(1, max_workers + 1))
-    ideal_y = ideal_x
+    plot_df = plot_df.sort_values(
+        by=["total_workers", "instances", "workers_per_instance", "label"]
+    ).reset_index(drop=True)
 
-    plt.plot(ideal_x, ideal_y, linestyle="--", label="Speedup ideale")
+    bar_width = 0.40
+
+    plot_df = add_grouped_bar_positions(plot_df, bar_width+0.10)
+
+    plt.figure(figsize=(13, 6))
+
+    plt.bar(
+        plot_df["x_position"],
+        plot_df["speedup"],
+        width=bar_width,
+        label="Speedup reale",
+    )
+
+    y_max = plot_df["speedup"].max()
+    label_offset = y_max * 0.02
 
     for _, row in plot_df.iterrows():
-        plt.annotate(
+        x = row["x_position"]
+        y = row["speedup"]
+
+        plt.text(
+            x,
+            y + label_offset,
             row["label"],
-            (row["total_workers"], row["speedup"]),
-            textcoords="offset points",
-            xytext=(5, 5),
-            fontsize=8,
+            ha="center",
+            va="bottom",
+            fontsize=9,
         )
 
+        plt.text(
+            x,
+            y * 0.5,
+            f"{y:.2f}x",
+            ha="center",
+            va="center",
+            fontsize=8,
+            rotation=90,
+            fontweight="bold",
+        )
+
+    worker_ticks = sorted(plot_df["total_workers"].unique())
+
+    plt.xticks(
+        worker_ticks,
+        [str(worker) for worker in worker_ticks],
+    )
+
+    # Linea ideale: speedup = numero worker.
+    # È utile come riferimento teorico.
+    ideal_x = worker_ticks
+    ideal_y = worker_ticks
+
+    plt.plot(
+        ideal_x,
+        ideal_y,
+        linestyle="--",
+        linewidth=1,
+        label="Speedup ideale",
+    )
+
     plt.xlabel("Numero totale di worker")
-    plt.ylabel("Speedup rispetto al baseline")
-    plt.title("Speedup al crescere dei worker")
+    plt.ylabel("Speedup")
+    plt.title("Speedup rispetto alla baseline locale")
+    plt.ylim(0, max(max(ideal_y), y_max) * 1.15)
+    plt.grid(axis="y", alpha=0.25)
     plt.legend()
     plt.tight_layout()
 
     output = OUTPUT_DIR / "speedup_by_workers.png"
     plt.savefig(output, dpi=200)
     plt.close()
+
     print(f"[OK] Grafico salvato in: {output}")
 
 
@@ -571,63 +635,159 @@ def plot_throughput(df: pd.DataFrame) -> None:
     plot_df = df.dropna(subset=["throughput_trees_per_second", "total_workers"]).copy()
 
     if plot_df.empty:
-        print("[WARN] Grafico throughput non generato: nessuna durata valida trovata.")
+        print("[WARN] Grafico throughput non generato: nessun valore valido trovato.")
         return
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(
-        plot_df["total_workers"],
-        plot_df["throughput_trees_per_second"],
-        marker="o",
+    plot_df["total_workers"] = pd.to_numeric(plot_df["total_workers"]).astype(int)
+    plot_df["throughput_trees_per_second"] = pd.to_numeric(
+        plot_df["throughput_trees_per_second"]
     )
 
+    plot_df = plot_df.sort_values(
+        by=["total_workers", "instances", "workers_per_instance", "label"]
+    ).reset_index(drop=True)
+
+    bar_width = 0.40
+
+    plot_df = add_grouped_bar_positions(plot_df,bar_width+0.10)
+
+    plt.figure(figsize=(13, 6))
+
+    plt.bar(
+        plot_df["x_position"],
+        plot_df["throughput_trees_per_second"],
+        width=bar_width,
+    )
+
+    y_max = plot_df["throughput_trees_per_second"].max()
+    label_offset = y_max * 0.02
+
     for _, row in plot_df.iterrows():
-        plt.annotate(
+        x = row["x_position"]
+        y = row["throughput_trees_per_second"]
+
+        plt.text(
+            x,
+            y + label_offset,
             row["label"],
-            (row["total_workers"], row["throughput_trees_per_second"]),
-            textcoords="offset points",
-            xytext=(5, 5),
-            fontsize=8,
+            ha="center",
+            va="bottom",
+            fontsize=9,
         )
 
+        plt.text(
+            x,
+            y * 0.5,
+            f"{y:.2f}",
+            ha="center",
+            va="center",
+            fontsize=8,
+            rotation=90,
+            fontweight="bold",
+        )
+
+    worker_ticks = sorted(plot_df["total_workers"].unique())
+
+    plt.xticks(
+        worker_ticks,
+        [str(worker) for worker in worker_ticks],
+    )
+
     plt.xlabel("Numero totale di worker")
-    plt.ylabel("Throughput (alberi/secondo)")
-    plt.title("Throughput del training distribuito")
+    plt.ylabel("Throughput (alberi/sec)")
+    plt.title("Throughput al crescere del numero di worker")
+    plt.ylim(0, y_max * 1.18)
+    plt.grid(axis="y", alpha=0.25)
     plt.tight_layout()
 
     output = OUTPUT_DIR / "throughput_by_workers.png"
     plt.savefig(output, dpi=200)
     plt.close()
-    print(f"[OK] Grafico salvato in: {output}")
 
+    print(f"[OK] Grafico salvato in: {output}")
 
 def plot_efficiency(df: pd.DataFrame) -> None:
     plot_df = df.dropna(subset=["efficiency", "total_workers"]).copy()
 
     if plot_df.empty:
-        print("[WARN] Grafico efficienza non generato: nessuna durata valida trovata.")
+        print("[WARN] Grafico efficienza non generato: nessun valore valido trovato.")
         return
 
-    plt.figure(figsize=(10, 6))
-    plt.scatter(plot_df["total_workers"], plot_df["efficiency"])
+    plot_df["total_workers"] = pd.to_numeric(plot_df["total_workers"]).astype(int)
+    plot_df["efficiency"] = pd.to_numeric(plot_df["efficiency"])
+
+    plot_df["efficiency_percent"] = plot_df["efficiency"] * 100.0
+
+    plot_df = plot_df.sort_values(
+        by=["total_workers", "instances", "workers_per_instance", "label"]
+    ).reset_index(drop=True)
+
+    bar_width = 0.40
+
+    plot_df = add_grouped_bar_positions(plot_df, bar_width+0.10)
+
+    plt.figure(figsize=(13, 6))
+
+    plt.bar(
+        plot_df["x_position"],
+        plot_df["efficiency_percent"],
+        width=bar_width,
+        label="Efficienza reale",
+    )
+
+    y_max = plot_df["efficiency_percent"].max()
+    label_offset = y_max * 0.02
 
     for _, row in plot_df.iterrows():
-        plt.annotate(
+        x = row["x_position"]
+        y = row["efficiency_percent"]
+
+        plt.text(
+            x,
+            y + label_offset,
             row["label"],
-            (row["total_workers"], row["efficiency"]),
-            textcoords="offset points",
-            xytext=(5, 5),
-            fontsize=8,
+            ha="center",
+            va="bottom",
+            fontsize=9,
         )
 
+        plt.text(
+            x,
+            y * 0.5,
+            f"{y:.1f}%",
+            ha="center",
+            va="center",
+            fontsize=8,
+            rotation=90,
+            fontweight="bold",
+        )
+
+    worker_ticks = sorted(plot_df["total_workers"].unique())
+
+    plt.xticks(
+        worker_ticks,
+        [str(worker) for worker in worker_ticks],
+    )
+
+    plt.axhline(
+        100,
+        linestyle="--",
+        linewidth=1,
+        label="Efficienza ideale 100%",
+    )
+
     plt.xlabel("Numero totale di worker")
-    plt.ylabel("Efficienza = speedup / worker")
-    plt.title("Efficienza della scalabilità")
+    plt.ylabel("Efficienza (%)")
+    plt.title("Efficienza al crescere del numero di worker")
+    plt.ylim(0, max(y_max * 1.18, 110))
+    plt.grid(axis="y", alpha=0.25)
+    plt.legend()
     plt.tight_layout()
 
     output = OUTPUT_DIR / "efficiency_by_workers.png"
     plt.savefig(output, dpi=200)
     plt.close()
+
     print(f"[OK] Grafico salvato in: {output}")
 
 
@@ -657,12 +817,12 @@ def main() -> None:
         ].to_string(index=False)
     )
 
-    #save_results(df)
+    save_results(df)
 
     plot_duration(df)
-    #plot_speedup(df)
-    #plot_throughput(df)
-    #plot_efficiency(df)
+    plot_speedup(df)
+    plot_throughput(df)
+    plot_efficiency(df)
 
 
 if __name__ == "__main__":
