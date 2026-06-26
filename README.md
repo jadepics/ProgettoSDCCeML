@@ -4,7 +4,7 @@
 
 Questo progetto implementa un sistema di **Random Forest distribuito** per task di **classificazione** (binaria e multiclasse) e **regressione**. L'obiettivo è distribuire il training e l'inferenza di una foresta di decision tree su più worker, mantenendo un master responsabile del coordinamento, della preparazione dei dati, della validazione, della selezione del modello e della pubblicazione del manifest finale.
 
-La distribuzione del sistema è realizzata tramite un'architettura **Master/Worker** basata su **Python**, **gRPC** e storage condiviso Amazon EFS, n ambiente AWS, montato sui nodi master, worker e client nel path:
+La distribuzione del sistema è realizzata tramite un'architettura **Master/Worker** basata su **Python**, **gRPC** e storage condiviso Amazon EFS, in ambiente AWS, montato sui nodi master, worker e client nel path:
 
 ```text
 /mnt/efs/gp_artifacts
@@ -343,8 +343,7 @@ Esempio seconda istanza worker:
 
 Per una run locale semplificata è possibile usare il backend di consenso in memoria.
 
-```
-```
+
 
 ## Training distribuito
 
