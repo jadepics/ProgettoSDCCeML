@@ -64,6 +64,36 @@ class CoordinatorServiceStub(object):
                 request_serializer=rf__v2__pb2.DownloadModelRequest.SerializeToString,
                 response_deserializer=rf__v2__pb2.DownloadModelResponse.FromString,
                 _registered_method=True)
+        self.GetJobStatus = channel.unary_unary(
+                '/distributedrf.CoordinatorService/GetJobStatus',
+                request_serializer=rf__v2__pb2.GetJobStatusRequest.SerializeToString,
+                response_deserializer=rf__v2__pb2.GetJobStatusResponse.FromString,
+                _registered_method=True)
+        self.ListExperiments = channel.unary_unary(
+                '/distributedrf.CoordinatorService/ListExperiments',
+                request_serializer=rf__v2__pb2.ListExperimentsRequest.SerializeToString,
+                response_deserializer=rf__v2__pb2.ListExperimentsResponse.FromString,
+                _registered_method=True)
+        self.CountSavedTrees = channel.unary_unary(
+                '/distributedrf.CoordinatorService/CountSavedTrees',
+                request_serializer=rf__v2__pb2.CountSavedTreesRequest.SerializeToString,
+                response_deserializer=rf__v2__pb2.CountSavedTreesResponse.FromString,
+                _registered_method=True)
+        self.GetValidationMetrics = channel.unary_unary(
+                '/distributedrf.CoordinatorService/GetValidationMetrics',
+                request_serializer=rf__v2__pb2.GetValidationMetricsRequest.SerializeToString,
+                response_deserializer=rf__v2__pb2.GetValidationMetricsResponse.FromString,
+                _registered_method=True)
+        self.RunInferenceOnModelSplit = channel.unary_unary(
+                '/distributedrf.CoordinatorService/RunInferenceOnModelSplit',
+                request_serializer=rf__v2__pb2.RunInferenceOnModelSplitRequest.SerializeToString,
+                response_deserializer=rf__v2__pb2.RunInferenceOnModelSplitResponse.FromString,
+                _registered_method=True)
+        self.ResetSharedArtifacts = channel.unary_unary(
+                '/distributedrf.CoordinatorService/ResetSharedArtifacts',
+                request_serializer=rf__v2__pb2.ResetSharedArtifactsRequest.SerializeToString,
+                response_deserializer=rf__v2__pb2.ResetSharedArtifactsResponse.FromString,
+                _registered_method=True)
 
 
 class CoordinatorServiceServicer(object):
@@ -105,6 +135,42 @@ class CoordinatorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetJobStatus(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListExperiments(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CountSavedTrees(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetValidationMetrics(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RunInferenceOnModelSplit(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ResetSharedArtifacts(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_CoordinatorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -137,6 +203,36 @@ def add_CoordinatorServiceServicer_to_server(servicer, server):
                     servicer.DownloadModel,
                     request_deserializer=rf__v2__pb2.DownloadModelRequest.FromString,
                     response_serializer=rf__v2__pb2.DownloadModelResponse.SerializeToString,
+            ),
+            'GetJobStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetJobStatus,
+                    request_deserializer=rf__v2__pb2.GetJobStatusRequest.FromString,
+                    response_serializer=rf__v2__pb2.GetJobStatusResponse.SerializeToString,
+            ),
+            'ListExperiments': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListExperiments,
+                    request_deserializer=rf__v2__pb2.ListExperimentsRequest.FromString,
+                    response_serializer=rf__v2__pb2.ListExperimentsResponse.SerializeToString,
+            ),
+            'CountSavedTrees': grpc.unary_unary_rpc_method_handler(
+                    servicer.CountSavedTrees,
+                    request_deserializer=rf__v2__pb2.CountSavedTreesRequest.FromString,
+                    response_serializer=rf__v2__pb2.CountSavedTreesResponse.SerializeToString,
+            ),
+            'GetValidationMetrics': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetValidationMetrics,
+                    request_deserializer=rf__v2__pb2.GetValidationMetricsRequest.FromString,
+                    response_serializer=rf__v2__pb2.GetValidationMetricsResponse.SerializeToString,
+            ),
+            'RunInferenceOnModelSplit': grpc.unary_unary_rpc_method_handler(
+                    servicer.RunInferenceOnModelSplit,
+                    request_deserializer=rf__v2__pb2.RunInferenceOnModelSplitRequest.FromString,
+                    response_serializer=rf__v2__pb2.RunInferenceOnModelSplitResponse.SerializeToString,
+            ),
+            'ResetSharedArtifacts': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResetSharedArtifacts,
+                    request_deserializer=rf__v2__pb2.ResetSharedArtifactsRequest.FromString,
+                    response_serializer=rf__v2__pb2.ResetSharedArtifactsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -301,6 +397,168 @@ class CoordinatorService(object):
             '/distributedrf.CoordinatorService/DownloadModel',
             rf__v2__pb2.DownloadModelRequest.SerializeToString,
             rf__v2__pb2.DownloadModelResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetJobStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/distributedrf.CoordinatorService/GetJobStatus',
+            rf__v2__pb2.GetJobStatusRequest.SerializeToString,
+            rf__v2__pb2.GetJobStatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListExperiments(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/distributedrf.CoordinatorService/ListExperiments',
+            rf__v2__pb2.ListExperimentsRequest.SerializeToString,
+            rf__v2__pb2.ListExperimentsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CountSavedTrees(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/distributedrf.CoordinatorService/CountSavedTrees',
+            rf__v2__pb2.CountSavedTreesRequest.SerializeToString,
+            rf__v2__pb2.CountSavedTreesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetValidationMetrics(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/distributedrf.CoordinatorService/GetValidationMetrics',
+            rf__v2__pb2.GetValidationMetricsRequest.SerializeToString,
+            rf__v2__pb2.GetValidationMetricsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RunInferenceOnModelSplit(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/distributedrf.CoordinatorService/RunInferenceOnModelSplit',
+            rf__v2__pb2.RunInferenceOnModelSplitRequest.SerializeToString,
+            rf__v2__pb2.RunInferenceOnModelSplitResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResetSharedArtifacts(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/distributedrf.CoordinatorService/ResetSharedArtifacts',
+            rf__v2__pb2.ResetSharedArtifactsRequest.SerializeToString,
+            rf__v2__pb2.ResetSharedArtifactsResponse.FromString,
             options,
             channel_credentials,
             insecure,

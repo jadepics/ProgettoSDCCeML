@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import threading
 import time
 from concurrent import futures
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 import grpc
 import numpy as np
+import pandas as pd
 
 import rf_v2_pb2 as rf_pb2
 import rf_v2_pb2_grpc as rf_pb2_grpc
@@ -45,6 +48,11 @@ from common.repositories import (
     ModelRepository,
     SharedArtifactStore,
     TaskLedger,
+)
+from common.prediction_io import (
+    load_prediction_array,
+    normalize_uri_to_path,
+    path_to_file_uri,
 )
 
 from common.storage_layout import StorageLayout
@@ -626,9 +634,618 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         except Exception as exc:
             return self._failed_download_model_response(str(exc))
 
+    def GetJobStatus(self, request, context):
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            return rf_pb2.GetJobStatusResponse(
+                success=False,
+                error=f"Not leader: {exc}",
+                job_id=getattr(request, "job_id", ""),
+                status="",
+                message="",
+                selected_experiment_id="",
+                model_id="",
+            )
+
+        job_id = request.job_id.strip()
+
+        if not job_id:
+            return rf_pb2.GetJobStatusResponse(
+                success=False,
+                error="job_id must be non-empty",
+                job_id="",
+                status="",
+                message="",
+                selected_experiment_id="",
+                model_id="",
+            )
+
+        job_record = self.job_repository.load_raw(job_id)
+
+        if job_record is None:
+            return rf_pb2.GetJobStatusResponse(
+                success=False,
+                error=f"job_record.json not found for job_id={job_id}",
+                job_id=job_id,
+                status="",
+                message="",
+                selected_experiment_id="",
+                model_id="",
+            )
+
+        return rf_pb2.GetJobStatusResponse(
+            success=True,
+            error="",
+            job_id=job_id,
+            status=str(job_record.get("status") or ""),
+            message=str(job_record.get("message") or ""),
+            selected_experiment_id=str(job_record.get("selected_experiment_id") or ""),
+            model_id=str(job_record.get("model_id") or ""),
+        )
+
+    def ListExperiments(self, request, context):
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            return rf_pb2.ListExperimentsResponse(
+                success=False,
+                error=f"Not leader: {exc}",
+                job_id=getattr(request, "job_id", ""),
+                experiments=[],
+            )
+
+        job_id = request.job_id.strip()
+
+        if not job_id:
+            return rf_pb2.ListExperimentsResponse(
+                success=False,
+                error="job_id must be non-empty",
+                job_id="",
+                experiments=[],
+            )
+
+        experiments_root = self.layout.experiments_dir(job_id)
+
+        if not experiments_root.exists():
+            return rf_pb2.ListExperimentsResponse(
+                success=False,
+                error=f"experiments folder not found for job_id={job_id}",
+                job_id=job_id,
+                experiments=[],
+            )
+
+        summaries: list[rf_pb2.ExperimentSummary] = []
+
+        for experiment_record in self._load_experiment_records_from_disk(job_id):
+            summaries.append(
+                rf_pb2.ExperimentSummary(
+                    experiment_id=str(experiment_record.get("experiment_id") or ""),
+                    status=str(experiment_record.get("status") or ""),
+                    expected_tree_count=int(
+                        experiment_record.get("expected_tree_count") or 0
+                    ),
+                    completed_tree_count=int(
+                        experiment_record.get("completed_tree_count") or 0
+                    ),
+                    assigned_workers=[
+                        str(worker_id)
+                        for worker_id in experiment_record.get("assigned_workers", [])
+                    ],
+                )
+            )
+
+        return rf_pb2.ListExperimentsResponse(
+            success=True,
+            error="",
+            job_id=job_id,
+            experiments=summaries,
+        )
+
+    def CountSavedTrees(self, request, context):
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            return rf_pb2.CountSavedTreesResponse(
+                success=False,
+                error=f"Not leader: {exc}",
+                job_id=getattr(request, "job_id", ""),
+                counts=[],
+            )
+
+        job_id = request.job_id.strip()
+
+        if not job_id:
+            return rf_pb2.CountSavedTreesResponse(
+                success=False,
+                error="job_id must be non-empty",
+                job_id="",
+                counts=[],
+            )
+
+        experiments_root = self.layout.experiments_dir(job_id)
+
+        if not experiments_root.exists():
+            return rf_pb2.CountSavedTreesResponse(
+                success=False,
+                error=f"experiments folder not found for job_id={job_id}",
+                job_id=job_id,
+                counts=[],
+            )
+
+        counts: list[rf_pb2.SavedTreeCount] = []
+
+        for experiment_dir in sorted(experiments_root.iterdir()):
+            if not experiment_dir.is_dir():
+                continue
+
+            trees_dir = experiment_dir / "trees"
+            saved_tree_count = 0
+
+            if trees_dir.exists():
+                saved_tree_count = len(list(trees_dir.glob("*.joblib")))
+
+            counts.append(
+                rf_pb2.SavedTreeCount(
+                    experiment_id=experiment_dir.name,
+                    saved_tree_count=saved_tree_count,
+                )
+            )
+
+        return rf_pb2.CountSavedTreesResponse(
+            success=True,
+            error="",
+            job_id=job_id,
+            counts=counts,
+        )
+
+    def GetValidationMetrics(self, request, context):
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            return rf_pb2.GetValidationMetricsResponse(
+                success=False,
+                error=f"Not leader: {exc}",
+                job_id=getattr(request, "job_id", ""),
+                experiment_id=getattr(request, "experiment_id", ""),
+                status="",
+                expected_tree_count=0,
+                completed_tree_count=0,
+                assigned_workers=[],
+                validation_metrics_json="{}",
+            )
+
+        job_id = request.job_id.strip()
+        experiment_id = request.experiment_id.strip()
+
+        if not job_id:
+            return rf_pb2.GetValidationMetricsResponse(
+                success=False,
+                error="job_id must be non-empty",
+                job_id="",
+                experiment_id=experiment_id,
+                status="",
+                expected_tree_count=0,
+                completed_tree_count=0,
+                assigned_workers=[],
+                validation_metrics_json="{}",
+            )
+
+        if not experiment_id:
+            return rf_pb2.GetValidationMetricsResponse(
+                success=False,
+                error="experiment_id must be non-empty",
+                job_id=job_id,
+                experiment_id="",
+                status="",
+                expected_tree_count=0,
+                completed_tree_count=0,
+                assigned_workers=[],
+                validation_metrics_json="{}",
+            )
+
+        experiment_record = self.job_repository.load_experiment_raw(
+            job_id,
+            experiment_id,
+        )
+
+        if experiment_record is None:
+            return rf_pb2.GetValidationMetricsResponse(
+                success=False,
+                error=(
+                    "experiment_record.json not found for "
+                    f"job_id={job_id}, experiment_id={experiment_id}"
+                ),
+                job_id=job_id,
+                experiment_id=experiment_id,
+                status="",
+                expected_tree_count=0,
+                completed_tree_count=0,
+                assigned_workers=[],
+                validation_metrics_json="{}",
+            )
+
+        validation_metrics = experiment_record.get("validation_metrics") or {}
+
+        return rf_pb2.GetValidationMetricsResponse(
+            success=True,
+            error="",
+            job_id=job_id,
+            experiment_id=experiment_id,
+            status=str(experiment_record.get("status") or ""),
+            expected_tree_count=int(
+                experiment_record.get("expected_tree_count") or 0
+            ),
+            completed_tree_count=int(
+                experiment_record.get("completed_tree_count") or 0
+            ),
+            assigned_workers=[
+                str(worker_id)
+                for worker_id in experiment_record.get("assigned_workers", [])
+            ],
+            validation_metrics_json=json.dumps(
+                validation_metrics,
+                indent=2,
+                sort_keys=True,
+            ),
+        )
+
+    def RunInferenceOnModelSplit(self, request, context):
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            return self._failed_run_inference_on_model_split_response(
+                message=f"Not leader: {exc}",
+                model_id=getattr(request, "model_id", ""),
+                split_name=getattr(request, "split_name", ""),
+            )
+
+        model_id = request.model_id.strip()
+        split_name = request.split_name.strip().lower()
+        rows = int(request.rows)
+
+        if not model_id:
+            return self._failed_run_inference_on_model_split_response(
+                message="model_id must be non-empty",
+                model_id=model_id,
+                split_name=split_name,
+            )
+
+        if split_name not in {"train", "validation", "test"}:
+            return self._failed_run_inference_on_model_split_response(
+                message="split_name must be one of: train, validation, test",
+                model_id=model_id,
+                split_name=split_name,
+            )
+
+        if rows <= 0:
+            return self._failed_run_inference_on_model_split_response(
+                message="rows must be > 0",
+                model_id=model_id,
+                split_name=split_name,
+            )
+
+        alive_workers = self.registry.alive_workers()
+        if not alive_workers:
+            return self._failed_run_inference_on_model_split_response(
+                message="No alive workers available",
+                model_id=model_id,
+                split_name=split_name,
+            )
+
+        try:
+            manifest = self._load_model_manifest_raw_by_model_id(model_id)
+
+            features_uri = self._select_features_uri_from_manifest(
+                manifest=manifest,
+                split_name=split_name,
+            )
+
+            labels_uri = self._select_labels_uri_from_manifest(
+                manifest=manifest,
+                split_name=split_name,
+            )
+
+            inference_features_uri = self._create_head_features_file_for_inference(
+                model_id=model_id,
+                split_name=split_name,
+                rows=rows,
+                features_uri=features_uri,
+                feature_names=manifest.get("feature_names") or [],
+            )
+
+            result = self.inference_coordinator.run_inference(
+                model_id=model_id,
+                features_uri=inference_features_uri,
+            )
+
+            predictions = load_prediction_array(result.prediction_uri)
+            predicted_values = self._values_to_string_list(
+                predictions.reshape(-1).tolist()
+            )
+
+            expected_values: list[str] = []
+            local_accuracy = 0.0
+            has_local_accuracy = False
+
+            if labels_uri:
+                expected_values = self._load_expected_values_from_labels_uri(
+                    labels_uri=labels_uri,
+                    rows=rows,
+                )
+
+                if result.task_type == "classification" and expected_values:
+                    correct = sum(
+                        1
+                        for predicted, expected in zip(
+                            predicted_values,
+                            expected_values,
+                        )
+                        if self._normalize_prediction_value(predicted)
+                        == self._normalize_prediction_value(expected)
+                    )
+
+                    local_accuracy = correct / len(expected_values)
+                    has_local_accuracy = True
+
+            return rf_pb2.RunInferenceOnModelSplitResponse(
+                success=True,
+                error="",
+                model_id=model_id,
+                split_name=split_name,
+                task_type=result.task_type,
+                prediction_uri=result.prediction_uri,
+                n_rows=result.n_rows,
+                n_cols=result.n_cols,
+                predicted_values=predicted_values,
+                expected_values=expected_values,
+                local_accuracy=local_accuracy,
+                has_local_accuracy=has_local_accuracy,
+            )
+
+        except Exception as exc:
+            return self._failed_run_inference_on_model_split_response(
+                message=str(exc),
+                model_id=model_id,
+                split_name=split_name,
+            )
+
+    def ResetSharedArtifacts(self, request, context):
+        try:
+            self.leadership_guard.require_leader()
+        except Exception as exc:
+            return rf_pb2.ResetSharedArtifactsResponse(
+                success=False,
+                error=f"Not leader: {exc}",
+                message="",
+            )
+
+        if not bool(request.confirm):
+            return rf_pb2.ResetSharedArtifactsResponse(
+                success=False,
+                error="Reset not confirmed. Set confirm=true to delete artifacts.",
+                message="",
+            )
+
+        try:
+            folders_to_clean = [
+                self.artifact_root / "jobs",
+                self.artifact_root / "models",
+                self.artifact_root / "debug_inference_inputs",
+            ]
+
+            for folder in folders_to_clean:
+                if folder.exists():
+                    shutil.rmtree(folder, ignore_errors=True)
+
+                folder.mkdir(parents=True, exist_ok=True)
+
+            return rf_pb2.ResetSharedArtifactsResponse(
+                success=True,
+                error="",
+                message="Shared artifacts deleted successfully",
+            )
+
+        except Exception as exc:
+            return rf_pb2.ResetSharedArtifactsResponse(
+                success=False,
+                error=str(exc),
+                message="",
+            )
+
     # --------------------------------------------------------
     # Helpers
     # --------------------------------------------------------
+
+    def _load_experiment_records_from_disk(self, job_id: str) -> list[dict[str, Any]]:
+        experiments_root = self.layout.experiments_dir(job_id)
+
+        if not experiments_root.exists():
+            return []
+
+        records: list[dict[str, Any]] = []
+
+        for experiment_dir in sorted(experiments_root.iterdir()):
+            if not experiment_dir.is_dir():
+                continue
+
+            experiment_record_path = experiment_dir / "experiment_record.json"
+
+            if not experiment_record_path.exists():
+                continue
+
+            try:
+                with experiment_record_path.open("r", encoding="utf-8") as file:
+                    records.append(json.load(file))
+
+            except Exception as exc:
+                print(
+                    "[MasterCoordinator] Could not load experiment record "
+                    f"{experiment_record_path}: {exc}",
+                    flush=True,
+                )
+
+        return records
+
+    def _load_model_manifest_raw_by_model_id(self, model_id: str) -> dict[str, Any]:
+        manifest = self.model_repository.load_raw(model_id)
+
+        if manifest is not None:
+            return manifest
+
+        for candidate in self.artifact_root.rglob("manifest.json"):
+            try:
+                with candidate.open("r", encoding="utf-8") as file:
+                    payload = json.load(file)
+
+                if payload.get("model_id") == model_id:
+                    return payload
+
+            except Exception:
+                continue
+
+        raise FileNotFoundError(f"Manifest not found for model_id={model_id}")
+
+    def _select_features_uri_from_manifest(
+        self,
+        *,
+        manifest: dict[str, Any],
+        split_name: str,
+    ) -> str:
+        key = f"{split_name}_features_uri"
+        value = manifest.get(key)
+
+        if not value:
+            raise ValueError(f"{key} not found in model manifest")
+
+        return str(value)
+
+    def _select_labels_uri_from_manifest(
+        self,
+        *,
+        manifest: dict[str, Any],
+        split_name: str,
+    ) -> str | None:
+        key = f"{split_name}_labels_uri"
+        value = manifest.get(key)
+
+        if not value:
+            return None
+
+        return str(value)
+
+    def _create_head_features_file_for_inference(
+        self,
+        *,
+        model_id: str,
+        split_name: str,
+        rows: int,
+        features_uri: str,
+        feature_names: list[str],
+    ) -> str:
+        features_path = normalize_uri_to_path(features_uri)
+
+        if not features_path.exists():
+            raise FileNotFoundError(f"features file not found: {features_path}")
+
+        features_df = pd.read_parquet(features_path)
+
+        if feature_names:
+            missing_features = [
+                feature
+                for feature in feature_names
+                if feature not in features_df.columns
+            ]
+
+            if missing_features:
+                raise ValueError(
+                    "Some manifest features are missing from features parquet: "
+                    f"{missing_features}"
+                )
+
+            features_df = features_df[feature_names]
+
+        debug_df = features_df.head(rows).reset_index(drop=True)
+
+        inference_input_dir = (
+            self.artifact_root
+            / "debug_inference_inputs"
+            / model_id
+        )
+        inference_input_dir.mkdir(parents=True, exist_ok=True)
+
+        inference_input_path = (
+            inference_input_dir
+            / f"{split_name}_head_{rows}_{int(time.time())}.parquet"
+        )
+
+        debug_df.to_parquet(inference_input_path, index=False)
+
+        return path_to_file_uri(inference_input_path)
+
+    def _load_expected_values_from_labels_uri(
+        self,
+        *,
+        labels_uri: str,
+        rows: int,
+    ) -> list[str]:
+        labels_path = normalize_uri_to_path(labels_uri)
+
+        if not labels_path.exists():
+            return []
+
+        labels_df = pd.read_parquet(labels_path)
+        values = labels_df.head(rows).values.reshape(-1).tolist()
+
+        return self._values_to_string_list(values)
+
+    def _values_to_string_list(self, values: list[Any]) -> list[str]:
+        return [
+            self._normalize_prediction_value(value)
+            for value in values
+        ]
+
+    def _normalize_prediction_value(self, value: Any) -> str:
+        if value is None:
+            return ""
+
+        if isinstance(value, str):
+            return value
+
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+
+        if isinstance(value, (float, np.floating)):
+            number = float(value)
+
+            if number.is_integer():
+                return str(int(number))
+
+            return str(number)
+
+        return str(value)
+
+    def _failed_run_inference_on_model_split_response(
+        self,
+        *,
+        message: str,
+        model_id: str = "",
+        split_name: str = "",
+    ) -> rf_pb2.RunInferenceOnModelSplitResponse:
+        return rf_pb2.RunInferenceOnModelSplitResponse(
+            success=False,
+            error=message,
+            model_id=model_id,
+            split_name=split_name,
+            task_type="",
+            prediction_uri="",
+            n_rows=0,
+            n_cols=0,
+            predicted_values=[],
+            expected_values=[],
+            local_accuracy=0.0,
+            has_local_accuracy=False,
+        )
 
     def _failed_download_model_response(self, message: str) -> rf_pb2.DownloadModelResponse:
         return rf_pb2.DownloadModelResponse(
