@@ -478,7 +478,7 @@ wait_master_leader() {
         local host
         host="$(master_node_private_ip "$node")"
 
-        response="$(curl -s --max-time 1 "http://${host}:50151/status" || true)"
+        response="$(curl -s --max-time 1 -X POST "http://${host}:50151/status" || true)"
 
         if echo "$response" | grep -q '"role": "LEADER"'; then
           echo "[WORKER] leader detected on ${node} ${host}:50151"
@@ -491,7 +491,7 @@ wait_master_leader() {
       host="$(master_cluster_host)"
 
       for port in 50151 50152 50153; do
-        response="$(curl -s --max-time 1 "http://${host}:${port}/status" || true)"
+        response="$(curl -s --max-time 1 -X POST "http://${host}:${port}/status" || true)"
 
         if echo "$response" | grep -q '"role": "LEADER"'; then
           echo "[WORKER] leader detected on Raft port ${port}"

@@ -502,7 +502,7 @@ wait_leader() {
         host="$(master_node_private_ip "$node")"
         port="$(master_raft_port "$node")"
 
-        response="$(curl -s --max-time 1 "http://${host}:${port}/status" || true)"
+        response="$(curl -s --max-time 1 -X POST "http://${host}:${port}/status" || true)"
 
         if echo "$response" | grep -q '"role": "LEADER"'; then
           echo "[MASTER] leader detected on ${node} ${host}:${port}"
@@ -515,7 +515,7 @@ wait_leader() {
       host="$(cluster_host)"
 
       for port in 50151 50152 50153; do
-        response="$(curl -s --max-time 1 "http://${host}:${port}/status" || true)"
+        response="$(curl -s --max-time 1 -X POST "http://${host}:${port}/status" || true)"
 
         if echo "$response" | grep -q '"role": "LEADER"'; then
           echo "[MASTER] leader detected on Raft port ${port}"
@@ -531,6 +531,7 @@ wait_leader() {
   echo "[ERROR] no Raft leader detected within ${timeout_seconds}s"
   return 1
 }
+
 
 case "$ACTION" in
   build)
