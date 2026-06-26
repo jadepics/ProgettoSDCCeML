@@ -738,24 +738,6 @@ Il sistema usa identificativi deterministici per task e alberi. Il recovery non 
 
 ---
 
-## Troubleshooting:
-
-### No alive workers available
-
-
-### Not leader
-
-### Dataset non trovato
-
-### Worker duplicati
-
-### Pulizia Docker
-
-### Reset stato Raft
-
-
----
-
 ## Limitazioni note
 
 - Raft viene usato per leader election, non per una replica completa dello stato applicativo.
