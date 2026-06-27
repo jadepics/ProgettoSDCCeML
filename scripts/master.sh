@@ -124,6 +124,40 @@ get_extra_env_value() {
   return 1
 }
 
+get_template_env_value() {
+  local key="$1"
+
+  if [[ ! -f "$ENV_TEMPLATE" ]]; then
+    return 1
+  fi
+
+  grep -E "^${key}=" "$ENV_TEMPLATE" | tail -n 1 | cut -d "=" -f 2- || true
+}
+
+get_config_value() {
+  local key="$1"
+  local default="$2"
+  local value=""
+
+  if value="$(get_extra_env_value "$key" 2>/dev/null)"; then
+    echo "$value"
+    return
+  fi
+
+  if [[ -n "${!key:-}" ]]; then
+    echo "${!key}"
+    return
+  fi
+
+  value="$(get_template_env_value "$key")"
+  if [[ -n "$value" ]]; then
+    echo "$value"
+    return
+  fi
+
+  echo "$default"
+}
+
 detect_private_ip() {
   hostname -I | awk '{print $1}'
 }
@@ -154,7 +188,78 @@ cluster_host() {
   detect_private_ip
 }
 
+master_deployment_mode() {
+  get_config_value "MASTER_DEPLOYMENT_MODE" "single-host"
+}
+
+master_grpc_port() {
+  local node="$1"
+  local mode
+  mode="$(master_deployment_mode)"
+
+echo "${MASTER_PORTS[$node]}"
+}
+
+master_raft_port() {
+  local node="$1"
+  local mode
+  mode="$(master_deployment_mode)"
+
+  if [[ "$mode" == "multi-host" ]]; then
+    echo "50151"
+    return
+  fi
+
+  echo "${RAFT_PORTS[$node]}"
+}
+
+master_node_private_ip() {
+  local node="$1"
+
+  case "$node" in
+    master1)
+      get_config_value "MASTER1_PRIVATE_IP" "172.31.37.47"
+      ;;
+    master2)
+      get_config_value "MASTER2_PRIVATE_IP" "172.31.33.26"
+      ;;
+    master3)
+      get_config_value "MASTER3_PRIVATE_IP" "172.31.35.187"
+      ;;
+    *)
+      echo "[ERROR] unknown master node: $node" >&2
+      exit 1
+      ;;
+  esac
+}
+
+ensure_single_host_cluster_command_allowed() {
+  local command_name="$1"
+  local mode
+  mode="$(master_deployment_mode)"
+
+  if [[ "$mode" == "multi-host" ]]; then
+    echo "[ERROR] '$command_name' is not allowed when MASTER_DEPLOYMENT_MODE=multi-host"
+    echo ""
+    echo "In multi-host mode, each EC2 instance must run only its own master node:"
+    echo "  master1 EC2 -> ./master.sh rebuild master1"
+    echo "  master2 EC2 -> ./master.sh rebuild master2"
+    echo "  master3 EC2 -> ./master.sh rebuild master3"
+    echo ""
+    echo "Do not use start-all/restart-all/rebuild-all/update-all in multi-host mode."
+    exit 1
+  fi
+}
+
 default_raft_peers() {
+  local mode
+  mode="$(master_deployment_mode)"
+
+  if [[ "$mode" == "multi-host" ]]; then
+    echo "master1:$(master_node_private_ip master1):50151,master2:$(master_node_private_ip master2):50151,master3:$(master_node_private_ip master3):50151"
+    return
+  fi
+
   local host
   host="$(cluster_host)"
 
@@ -176,10 +281,10 @@ generate_env() {
   set_env_value "$runtime_env_file" "MASTER_NODE_ID" "$node"
 
   set_env_value "$runtime_env_file" "MASTER_HOST" "0.0.0.0"
-  set_env_value "$runtime_env_file" "MASTER_PORT" "${MASTER_PORTS[$node]}"
+  set_env_value "$runtime_env_file" "MASTER_PORT" "$(master_grpc_port "$node")"
 
   set_env_value "$runtime_env_file" "RAFT_HOST" "0.0.0.0"
-  set_env_value "$runtime_env_file" "RAFT_PORT" "${RAFT_PORTS[$node]}"
+  set_env_value "$runtime_env_file" "RAFT_PORT" "$(master_raft_port "$node")"
   set_env_value "$runtime_env_file" "RAFT_PEERS" "$(default_raft_peers)"
   set_env_value "$runtime_env_file" "RAFT_LOG_DIR" "${ARTIFACT_MOUNT}/raft/${node}"
 
@@ -267,8 +372,9 @@ run_container() {
     "$IMAGE_NAME"
 
   echo "[MASTER] started $node as container $cname"
-  echo "[MASTER] grpc port: ${MASTER_PORTS[$node]}"
-  echo "[MASTER] raft port: ${RAFT_PORTS[$node]}"
+  echo "[MASTER] deployment mode: $(master_deployment_mode)"
+  echo "[MASTER] grpc port: $(master_grpc_port "$node")"
+  echo "[MASTER] raft port: $(master_raft_port "$node")"
   echo "[MASTER] env file: $env_file"
 }
 
@@ -302,6 +408,7 @@ update_one() {
 
 start_all() {
   parse_env_only "$@"
+  ensure_single_host_cluster_command_allowed "start-all"
   stop_all_containers
 
   for node in "${NODES[@]}"; do
@@ -311,6 +418,7 @@ start_all() {
 
 restart_all() {
   parse_env_only "$@"
+  ensure_single_host_cluster_command_allowed "restart-all"
   stop_all_containers
 
   for node in "${NODES[@]}"; do
@@ -320,6 +428,7 @@ restart_all() {
 
 rebuild_all() {
   parse_env_only "$@"
+  ensure_single_host_cluster_command_allowed "rebuild-all"
   stop_all_containers
   docker rmi "$IMAGE_NAME" >/dev/null 2>&1 || true
   build_image
@@ -331,6 +440,7 @@ rebuild_all() {
 
 update_all() {
   parse_env_only "$@"
+  ensure_single_host_cluster_command_allowed "update-all"
   cd "$PROJECT_ROOT"
   git pull
   stop_all_containers
@@ -366,25 +476,49 @@ reset_raft() {
 
   echo "[OK] Raft state deleted under ${ARTIFACT_MOUNT}/raft"
 }
-wait_leader() {
-  local host
-  host="$(cluster_host)"
 
+wait_leader() {
   local timeout_seconds="${WAIT_LEADER_TIMEOUT_SECONDS:-60}"
   local deadline=$((SECONDS + timeout_seconds))
+  local mode
+  local response
 
-  echo "[MASTER] waiting for Raft leader on ${host}..."
+  mode="$(master_deployment_mode)"
+
+  echo "[MASTER] waiting for Raft leader..."
+  echo "[MASTER] deployment mode: ${mode}"
 
   while (( SECONDS < deadline )); do
-    for port in 50151 50152 50153; do
-      response="$(curl -s --max-time 1 "http://${host}:${port}/status" || true)"
+    if [[ "$mode" == "multi-host" ]]; then
+      for node in "${NODES[@]}"; do
+        local host
+        local port
 
-      if echo "$response" | grep -q '"role": "LEADER"'; then
-        echo "[MASTER] leader detected on Raft port ${port}"
-        echo "$response"
-        return 0
-      fi
-    done
+        host="$(master_node_private_ip "$node")"
+        port="$(master_raft_port "$node")"
+
+        response="$(curl -s --max-time 1 -X POST "http://${host}:${port}/status" || true)"
+
+        if echo "$response" | grep -q '"role": "LEADER"'; then
+          echo "[MASTER] leader detected on ${node} ${host}:${port}"
+          echo "$response"
+          return 0
+        fi
+      done
+    else
+      local host
+      host="$(cluster_host)"
+
+      for port in 50151 50152 50153; do
+        response="$(curl -s --max-time 1 -X POST "http://${host}:${port}/status" || true)"
+
+        if echo "$response" | grep -q '"role": "LEADER"'; then
+          echo "[MASTER] leader detected on Raft port ${port}"
+          echo "$response"
+          return 0
+        fi
+      done
+    fi
 
     sleep 1
   done
@@ -392,6 +526,7 @@ wait_leader() {
   echo "[ERROR] no Raft leader detected within ${timeout_seconds}s"
   return 1
 }
+
 
 case "$ACTION" in
   build)

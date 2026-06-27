@@ -1,0 +1,362 @@
+Index: README.md
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Distributed Random Forest — Master/Worker con gRPC, EFS e Fault Tolerance\r\n\r\n## Descrizione del progetto\r\n\r\nQuesto progetto implementa un sistema di **Random Forest distribuito** per task di **classificazione** (binaria e multiclasse) e **regressione**. L'obiettivo è distribuire il training e l'inferenza di una foresta di decision tree su più worker, mantenendo un master responsabile del coordinamento, della preparazione dei dati, della validazione, della selezione del modello e della pubblicazione del manifest finale.\r\n\r\nLa distribuzione del sistema è realizzata tramite un'architettura **Master/Worker** basata su **Python**, **gRPC** e storage condiviso Amazon EFS, n ambiente AWS, montato sui nodi master, worker e client nel path:\r\n\r\n```text\r\n/mnt/efs/gp_artifacts\r\n```\r\n\r\nIl progetto include inoltre una fault tolerance pratica basata su:\r\n\r\n- cluster di master con leader election tramite Raft minimale;\r\n- esecuzione delle operazioni critiche solo sul master leader;\r\n- worker con registrazione e heartbeat;\r\n- persistenza di job, task ledger, split, alberi e manifest su EFS;\r\n- recovery degli alberi mancanti dopo crash worker o crash del master leader.\r\n\r\n> Nota importante: Raft è usato per la **leader election**. Lo stato applicativo del training viene recuperato da EFS tramite `JobRepository`, `TaskLedger`, artifact e manifest persistenti. Il progetto non replica ancora tutte le transizioni applicative tramite una state machine Raft completa.\r\n\r\n---\r\n\r\n## Architettura del sistema\r\n\r\nIl sistema è composto da quattro componenti principali.\r\n\r\n### Client\r\n\r\nIl client invia richieste al master leader tramite gRPC. Può:\r\n\r\n- lanciare job di training;\r\n- interrogare lo stato dei job;\r\n- eseguire inferenza distribuita;\r\n- scaricare il modello addestrato;\r\n- confrontare i risultati distribuiti con baseline locali.\r\n\r\nLa CLI principale è:\r\n\r\n```bash\r\npython training_debug_cli.py\r\n```\r\n\r\n### Master cluster\r\n\r\nIl master rappresenta il **control plane** del sistema. In configurazione distribuita sono previsti tre master:\r\n\r\n```text\r\nmaster1 -> gRPC 50051, Raft 50151\r\nmaster2 -> gRPC 50052, Raft 50152\r\nmaster3 -> gRPC 50053, Raft 50153\r\n```\r\n\r\nUn solo nodo è leader alla volta. Il leader:\r\n\r\n- riceve `SubmitTraining`, `SubmitInference`, `ResumeTraining` e `DownloadModel`;\r\n- prepara il dataset;\r\n- crea gli esperimenti;\r\n- divide la foresta in shard;\r\n- assegna shard ai worker;\r\n- coordina validation e test;\r\n- seleziona il miglior modello;\r\n- costruisce e salva il `ModelManifest` finale.\r\n\r\n### Worker\r\n\r\nIl worker rappresenta l'**execution plane**. Ogni worker:\r\n\r\n- riceve shard di training dal master leader;\r\n- legge gli split del dataset da EFS;\r\n- addestra un sottoinsieme di alberi;\r\n- salva ogni albero e i relativi metadata su EFS;\r\n- produce predizioni parziali per validation, testing e inferenza.\r\n\r\nI worker espongono un servizio gRPC e possono essere avviati in più container sulla stessa istanza EC2.\r\n\r\n### Storage condiviso EFS\r\n\r\nEFS è lo strato di persistenza degli artifact. Contiene:\r\n\r\n- dataset sorgenti;\r\n- split train/validation/test;\r\n- alberi `.joblib`;\r\n- metadata JSON degli alberi;\r\n- `job_record.json`;\r\n- `task_ledger.json`;\r\n- metriche di validation e test;\r\n- prediction artifact;\r\n- manifest dei modelli finali;\r\n- log Raft dei master.\r\n\r\n---\r\n\r\n## Flusso di training distribuito\r\n\r\n```text\r\nClient\r\n  |\r\n  | SubmitTraining\r\n  v\r\nMaster leader\r\n  |\r\n  | load dataset\r\n  | validate dataset\r\n  | apply scenario / preprocessing\r\n  | split train / validation / test\r\n  | persist prepared dataset on EFS\r\n  v\r\nExperimentPlanner\r\n  |\r\n  | generate ForestConfiguration(s)\r\n  v\r\nShardPlanner\r\n  |\r\n  | split n_estimators into deterministic tree shards\r\n  v\r\nTrainingOrchestrator\r\n  |\r\n  | assign shards to alive workers\r\n  v\r\nWorkers\r\n  |\r\n  | train DecisionTreeClassifier / DecisionTreeRegressor\r\n  | save tree artifact and metadata on EFS\r\n  v\r\nMaster leader\r\n  |\r\n  | collect completed artifacts\r\n  | run distributed validation\r\n  | select best experiment\r\n  | run distributed test evaluation\r\n  | build and save model manifest\r\n  v\r\nEFS /models/<model_id>/manifest.json\r\n```\r\n\r\nOgni albero ha un identificativo deterministico:\r\n\r\n```text\r\n<experiment_id>_tree_<tree_index>\r\n```\r\n\r\nQuesta scelta supporta idempotenza e recovery: se un worker fallisce dopo aver completato alcuni alberi, il sistema può recuperare solo quelli mancanti.\r\n\r\n---\r\n\r\n## Flusso di inferenza distribuita\r\n\r\nL'inferenza usa il manifest del modello finale.\r\n\r\n```text\r\nClient\r\n  |\r\n  | SubmitInference(model_id, features_uri)\r\n  v\r\nMaster leader\r\n  |\r\n  | load manifest\r\n  | split tree_artifact_uris among workers\r\n  v\r\nWorkers\r\n  |\r\n  | load assigned trees from EFS\r\n  | load input features from EFS\r\n  | compute partial predictions\r\n  | save partial predictions on EFS\r\n  v\r\nMaster leader\r\n  |\r\n  | aggregate partial predictions\r\n  | classification -> majority vote\r\n  | regression -> average prediction\r\n  | save predictions.npy\r\n  v\r\nClient receives prediction_uri\r\n```\r\n\r\nNel percorso scalabile non vengono inviate matrici dense via gRPC: master e worker scambiano principalmente URI verso file salvati su EFS.\r\n\r\n---\r\n\r\n## Prerequisiti\r\n\r\n### Software\r\n\r\n- Python 3.11 o superiore;\r\n- `pip`;\r\n- `venv`;\r\n- Docker;\r\n- gRPC / Protocol Buffers;\r\n- storage condiviso montato in `/mnt/efs/gp_artifacts`;\r\n- su AWS: EC2 + EFS.\r\n\r\nDipendenze Python presenti in `requirements.txt`:\r\n\r\n```text\r\ngrpcio\r\ngrpcio-tools\r\nnumpy\r\npandas\r\nscikit-learn\r\njoblib\r\npyarrow\r\nmatplotlib\r\n```\r\n\r\n### Porte principali\r\n\r\n| Componente | Porte | Uso |\r\n|---|---:|---|\r\n| Master gRPC | `50051`, `50052`, `50053` | API master verso client e worker |\r\n| Master Raft | `50151`, `50152`, `50153` | leader election tra master |\r\n| Worker gRPC | `50061+` | training e inferenza shard |\r\n| EFS / NFS | `2049` | mount storage condiviso |\r\n\r\nIl deployment Docker usa `--network host`, quindi le porte dei container coincidono con quelle dell'host.\r\n\r\n---\r\n\r\n## Installazione\r\n\r\n### 1. Clonare il repository\r\n\r\n```bash\r\ngit clone https://github.com/jadepics/ProgettoSDCCeML.git\r\ncd ProgettoSDCCeML\r\n```\r\n\r\n### 2. Installare i pacchetti di sistema\r\n\r\nSu Amazon Linux / EC2:\r\n\r\n```bash\r\nsudo dnf install -y python3 python3-pip python3-devel gcc gcc-c++ make\r\n```\r\n\r\nSe Docker non è installato:\r\n\r\n```bash\r\nsudo dnf install -y docker\r\nsudo systemctl enable --now docker\r\nsudo usermod -aG docker $USER\r\n```\r\n\r\nDopo `usermod`, effettuare logout/login oppure riaprire la sessione SSH.\r\n\r\n### 3. Creare l'ambiente Python\r\n\r\n```bash\r\npython3 -m venv .venv\r\nsource .venv/bin/activate\r\n```\r\n\r\n### 4. Installare le dipendenze\r\n\r\n```bash\r\npython -m pip install --upgrade pip\r\npip install -r requirements.txt\r\n```\r\n\r\n### 5. Rigenerare gli stub gRPC se il proto viene modificato\r\n\r\nI file `rf_v2_pb2.py` e `rf_v2_pb2_grpc.py` sono già presenti nel progetto. Se viene modificato `proto/rf_v2.proto`, rigenerarli con:\r\n\r\n```bash\r\npython -m grpc_tools.protoc \\\r\n  -I proto \\\r\n  --python_out=. \\\r\n  --grpc_python_out=. \\\r\n  proto/rf_v2.proto\r\n```\r\n\r\nI Dockerfile rigenerano automaticamente gli stub durante la build.\r\n\r\n---\r\n\r\n## Preparazione dello storage condiviso\r\n\r\nIl progetto assume che EFS sia montato in:\r\n\r\n```text\r\n/mnt/efs/gp_artifacts\r\n```\r\n\r\n## Configurazione\r\n\r\nIl progetto fornisce due file di esempio:\r\n\r\n```text\r\n.env.master.example\r\n.env.worker.example\r\n```\r\n\r\nCopiarli prima dell'esecuzione:\r\n\r\n```bash\r\ncp .env.master.example .env.master\r\ncp .env.worker.example .env.worker\r\n```\r\n\r\n### Worker dinamici sulla stessa istanza\r\n\r\nNel path `scripts/worker.sh` supporta più container worker sulla stessa macchina tramite override runtime:\r\n\r\n| Variabile | Significato |\r\n|---|---|\r\n| `WORKER_COUNT` | numero di container worker da avviare |\r\n| `WORKER_ID_PREFIX` | prefisso degli ID worker |\r\n| `WORKER_INDEX_START` | indice iniziale degli ID worker |\r\n| `WORKER_BASE_PORT` | prima porta worker da usare |\r\n| `MASTER_CLUSTER_HOST` | IP privato del nodo master/cluster master |\r\n\r\nEsempio prima istanza worker:\r\n\r\n```bash\r\n./scripts/worker.sh rebuild-all \\\r\n  WORKER_COUNT=4 \\\r\n  WORKER_ID_PREFIX=worker \\\r\n  WORKER_INDEX_START=1 \\\r\n  WORKER_BASE_PORT=50061 \\\r\n  MASTER_CLUSTER_HOST=<PRIVATE_IP_MASTER>\r\n```\r\n\r\nEsempio seconda istanza worker:\r\n\r\n```bash\r\n./scripts/worker.sh rebuild-all \\\r\n  WORKER_COUNT=4 \\\r\n  WORKER_ID_PREFIX=worker \\\r\n  WORKER_INDEX_START=5 \\\r\n  WORKER_BASE_PORT=50065 \\\r\n  MASTER_CLUSTER_HOST=<PRIVATE_IP_MASTER>\r\n```\r\n\r\n\r\n\r\n\r\n## Esecuzione distribuita con Docker\r\n\r\n\r\n## Esecuzione locale / sviluppo\r\n\r\nPer una run locale semplificata è possibile usare il backend di consenso in memoria.\r\n\r\n```\r\n```\r\n\r\n## Training distribuito\r\n\r\nLa CLI principale è sul Terminale client:\r\n\r\n```bash\r\npython training_debug_cli.py\r\n```\r\n\r\nMenu principale:\r\n\r\n```text\r\n1 -> Submit training\r\n2 -> See job status\r\n3 -> See experiments\r\n4 -> Count saved trees\r\n5 -> See validation metrics\r\n6 -> Submit inference\r\n7 -> Resume training job\r\n8 -> Download trained model\r\n9 -> Eliminate shared artifacts\r\n0 -> Exit\r\n```\r\n\r\n\r\nNel menu: 1 -> Submit training:\r\n\r\n```text\r\n1 -> Submit regression\r\n2 -> Submit classification\r\n```\r\n\r\n\r\nDataset principale:\r\n\r\n```text\r\n/mnt/efs/gp_artifacts/datasets/diabetes_dataset.csv\r\n```\r\n\r\n\r\n## Monitoraggio dei job\r\n\r\nI job vengono salvati in:\r\n\r\n```text\r\n/mnt/efs/gp_artifacts/jobs/<job_id>\r\n```\r\n\r\nStruttura tipica:\r\n\r\n```text\r\n/mnt/efs/gp_artifacts/jobs/<job_id>/\r\n├── job_record.json\r\n├── task_ledger.json\r\n├── prepared_dataset/\r\n│   ├── schema.json\r\n│   ├── dataset_scenario_report.json\r\n│   ├── train_features.parquet\r\n│   ├── train_labels.parquet\r\n│   ├── validation_features.parquet\r\n│   ├── validation_labels.parquet\r\n│   ├── test_features.parquet\r\n│   └── test_labels.parquet\r\n└── experiments/\r\n    └── <experiment_id>/\r\n        ├── experiment_record.json\r\n        ├── trees/\r\n        │   ├── tree_0.joblib\r\n        │   ├── tree_0.json\r\n        │   └── ...\r\n        ├── metrics/\r\n        │   └── validation_metrics.json\r\n        └── predictions/\r\n```\r\n\r\nComandi utili:\r\n\r\n```bash\r\ncd /mnt/efs/gp_artifacts/jobs\r\nls\r\ncat /mnt/efs/gp_artifacts/jobs/<job_id>/job_record.json\r\ncat /mnt/efs/gp_artifacts/jobs/<job_id>/task_ledger.json\r\nfind /mnt/efs/gp_artifacts/jobs/<job_id>/experiments -path \"*/trees/*.joblib\" | wc -l\r\n```\r\n\r\nPer elencare job falliti:\r\n\r\n```bash\r\npython scripts/list_failed_jobs.py\r\n```\r\n\r\n---\r\n\r\n## Inferenza distribuita\r\n\r\nAvviare la CLI:\r\n\r\n```bash\r\npython training_debug_cli.py\r\n```\r\n\r\nNel menu:\r\n\r\n```text\r\n6 -> Submit inference\r\n```\r\n\r\nLa CLI richiede:\r\n\r\n```text\r\nmodel_id\r\nsplit: validation / test / train\r\nnumero di righe\r\n```\r\n\r\nOutput tipico:\r\n\r\n```text\r\nsuccess: True\r\ntask_type: classification\r\nprediction_uri: file:///mnt/efs/gp_artifacts/models/<model_id>/inference/<inference_id>/predictions.npy\r\nn_rows: ...\r\nn_cols: ...\r\n```\r\n\r\n---\r\n\r\n## Download del modello\r\n\r\nDalla CLI:\r\n\r\n```bash\r\npython training_debug_cli.py\r\n```\r\n\r\nSelezionare:\r\n\r\n```text\r\n8 -> Download trained model\r\n```\r\n\r\nIl sistema invoca `DownloadModel` e produce un bundle del modello in formato esportabile.\r\n\r\n---\r\n\r\n# Le seguenti attività sono eseguibili per debug e test lato master o worker:\r\n\r\n## Baseline locale\r\n\r\nLa baseline non distribuita si trova in:\r\n\r\n```text\r\nlocal_baseline/\r\n```\r\n\r\n\r\nRisultati eseguiti in locale sono salvati in:\r\n\r\n```text\r\nlocal_baseline/results\r\n```\r\n\r\nConfronto con job distribuiti:\r\n\r\n```bash\r\npython performance_evaluation/compare_existing_job_cli.py\r\n```\r\n\r\n---\r\n\r\n## Dataset sintetici\r\n\r\nGenerazione dataset sintetici:\r\n\r\n```bash\r\npython -m synthetic_data.synthetic_dataset_cli\r\n```\r\n\r\nOutput tipico:\r\n\r\n```text\r\nDataset/synthetic_classification_<n_samples>_samples_<n_features>_features.csv\r\nDataset/synthetic_regression_<n_samples>_samples_<n_features>_features.csv\r\n```\r\n\r\nCopia su EFS:\r\n\r\n```bash\r\ncp Dataset/synthetic_classification_100000_samples_40_features.csv \\\r\n  /mnt/efs/gp_artifacts/datasets/\r\n\r\ncp Dataset/synthetic_regression_100000_samples_40_features.csv \\\r\n  /mnt/efs/gp_artifacts/datasets/\r\n```\r\n\r\n---\r\n\r\n## Benchmark e performance evaluation\r\n\r\n### Confronto job distribuito vs baseline locale\r\n\r\n```bash\r\npython performance_evaluation/compare_existing_job_cli.py\r\n```\r\n\r\nRisultati:\r\n\r\n```text\r\nperformance_evaluation/results/\r\n```\r\n\r\n### Benchmark inferenza distribuita\r\n\r\n```bash\r\npython performance_evaluation/distributed_inference_benchmark.py \\\r\n  --model-id <model_id> \\\r\n  --split test \\\r\n  --rows all \\\r\n  --local-baseline-json local_baseline/results/<baseline>.json \\\r\n  --output-json performance_evaluation/results/inference/distributed_inference_<name>.json\r\n```\r\n\r\n### Scalabilità\r\n\r\nPer valutare la scalabilità, abbiamo ripetuto lo stesso task variando solo il numero di worker\r\n\r\n---\r\n\r\n## Fault tolerance\r\n\r\nIl progetto include script per raccogliere artifact e log degli esperimenti di fault tolerance.\r\n\r\n---\r\n\r\n## Struttura del progetto\r\n\r\n```text\r\n.\r\n├── Dockerfile.master\r\n├── Dockerfile.worker\r\n├── README.md\r\n├── ML_SCENARIOS.md\r\n├── requirements.txt\r\n├── master.py\r\n├── run_worker.py\r\n├── training_debug_cli.py\r\n├── submit_training_classification.py\r\n├── submit_training_regression.py\r\n├── rf_v2_pb2.py\r\n├── rf_v2_pb2_grpc.py\r\n│\r\n├── proto/\r\n│   └── rf_v2.proto\r\n│\r\n├── common/\r\n│   ├── contracts.py\r\n│   ├── enums.py\r\n│   ├── grpc_config.py\r\n│   ├── ids.py\r\n│   ├── prediction_io.py\r\n│   ├── repositories.py\r\n│   └── storage_layout.py\r\n│\r\n├── masterPackage/\r\n│   ├── data/\r\n│   │   ├── dataset_loader.py\r\n│   │   ├── dataset_validator.py\r\n│   │   ├── split_manager.py\r\n│   │   └── data_preparation_service.py\r\n│   ├── experiment_planner.py\r\n│   ├── shard_planner.py\r\n│   ├── training_orchestrator.py\r\n│   ├── training_job_service.py\r\n│   ├── validation_coordinator.py\r\n│   ├── test_evaluator.py\r\n│   ├── model_selector.py\r\n│   ├── model_manifest_builder.py\r\n│   ├── model_export_service.py\r\n│   ├── inference_coordinator.py\r\n│   ├── worker_client.py\r\n│   ├── fault_tolerance.py\r\n│   ├── worker_heartbeat_monitor.py\r\n│   ├── task_lease_manager.py\r\n│   ├── recovery_planner.py\r\n│   └── retry_policy.py\r\n│\r\n├── worker/\r\n│   ├── worker_config.py\r\n│   ├── worker_node.py\r\n│   ├── worker_service.py\r\n│   ├── worker_state.py\r\n│   ├── master_client/\r\n│   │   └── master_client.py\r\n│   ├── runtime/\r\n│   │   └── heartbeat_loop.py\r\n│   ├── training/\r\n│   │   ├── bootstrap_sampler.py\r\n│   │   ├── decision_tree_factory.py\r\n│   │   ├── shard_trainer.py\r\n│   │   └── tree_artifact_writer.py\r\n│   ├── prediction/\r\n│   │   └── shard_predictor.py\r\n│   ├── progress/\r\n│   │   └── worker_progress_store.py\r\n│   ├── storage/\r\n│   ├── mappers/\r\n│   └── utils/\r\n│\r\n├── scripts/\r\n│   ├── master.sh\r\n│   ├── worker.sh\r\n│   ├── monitor.sh\r\n│   ├── docker-clean.sh\r\n│   ├── list_failed_jobs.py\r\n│   ├── collect_worker_crash_artifacts.sh\r\n│   └── coolect_master_leade_crash_artifacts.sh\r\n│\r\n├── local_baseline/\r\n│   ├── local_baseline_cli.py\r\n│   ├── local_baseline_runner.py\r\n│   ├── results/\r\n│   └── models/\r\n│\r\n├── synthetic_data/\r\n│   ├── synthetic_dataset_cli.py\r\n│   └── synthetic_dataset_generator.py\r\n│\r\n├── performance_evaluation/\r\n│   ├── compare_existing_job_cli.py\r\n│   ├── distributed_inference_benchmark.py\r\n│   ├── distributed_job_reader.py\r\n│   ├── distributed_jobs/\r\n│   └── results/\r\n│\r\n├── Dataset/\r\n│   └── diabetes_dataset.csv\r\n│\r\n├── logs/\r\n│   └── fault_tolerance/\r\n│\r\n└── shared_artifacts/\r\n    ├── jobs/\r\n    └── models/\r\n```\r\n\r\n---\r\n\r\n## Ruolo dei file principali\r\n\r\n| File / directory | Ruolo |\r\n|---|---|\r\n| `master.py` | entry point del master gRPC e implementazione della facciata `CoordinatorService` |\r\n| `run_worker.py` | entry point del worker |\r\n| `proto/rf_v2.proto` | definizione RPC e messaggi gRPC |\r\n| `common/contracts.py` | dataclass condivise master/worker |\r\n| `common/repositories.py` | repository JSON per job, task ledger e manifest |\r\n| `common/storage_layout.py` | layout deterministico degli artifact |\r\n| `masterPackage/training_job_service.py` | orchestrazione completa di un job di training |\r\n| `masterPackage/training_orchestrator.py` | assegnazione shard, retry e recovery training |\r\n| `masterPackage/shard_planner.py` | divisione della foresta in shard di alberi |\r\n| `masterPackage/recovery_planner.py` | calcolo alberi mancanti e recovery shard |\r\n| `masterPackage/fault_tolerance.py` | leadership guard e consenso Raft minimale |\r\n| `worker/training/shard_trainer.py` | training effettivo degli alberi lato worker |\r\n| `worker/training/tree_artifact_writer.py` | scrittura atomica e idempotente degli alberi |\r\n| `worker/prediction/shard_predictor.py` | predizioni parziali per validation/test/inference |\r\n| `scripts/master.sh` | build, start, restart e gestione cluster master |\r\n| `scripts/worker.sh` | build, start, restart e gestione worker dinamici |\r\n| `training_debug_cli.py` | CLI principale per training, inference, status e download |\r\n| `local_baseline/` | baseline locale non distribuita |\r\n| `performance_evaluation/` | confronto prestazionale e benchmark |\r\n| `synthetic_data/` | generazione dataset sintetici |\r\n\r\n---\r\n\r\n## Scelte implementative rilevanti\r\n\r\n### Master come control plane\r\n\r\nIl master non addestra direttamente gli alberi. Coordina il ciclo di vita del job: data preparation, planning, scheduling, validation, test, model selection e manifest.\r\n\r\n### Worker come execution plane\r\n\r\nIl worker esegue training e predizione parziale. Gli alberi vengono salvati su storage condiviso e sono referenziati tramite URI persistenti.\r\n\r\n### EFS come fonte durevole\r\n\r\nIl sistema assume che EFS sia accessibile da master, worker e client. In caso di crash, il nuovo leader ricostruisce lo stato osservando repository JSON, ledger e artifact esistenti.\r\n\r\n### Idempotenza e recovery minimale\r\n\r\nIl sistema usa identificativi deterministici per task e alberi. Il recovery non ricrea necessariamente lo shard originale, ma genera nuovi recovery shard contenenti solo gli alberi mancanti.\r\n\r\n---\r\n\r\n## Troubleshooting:\r\n\r\n### No alive workers available\r\n\r\n\r\n### Not leader\r\n\r\n### Dataset non trovato\r\n\r\n### Worker duplicati\r\n\r\n### Pulizia Docker\r\n\r\n### Reset stato Raft\r\n\r\n\r\n---\r\n\r\n## Limitazioni note\r\n\r\n- Raft viene usato per leader election, non per una replica completa dello stato applicativo.\r\n- EFS è assunto come componente affidabile e condiviso.\r\n- L'inferenza richiede feature coerenti con il manifest del modello.\r\n- Il preprocessing viene applicato centralmente dal master durante la data preparation.\r\n- Gli script sono ottimizzati per Linux/AWS EC2 con EFS montato in `/mnt/efs/gp_artifacts`.\r\n- Il deployment suppone l'evitare collisioni tra porte.\r\n- I file `.env.master`, `.env.worker`, `.env.client` reali non devono essere versionati.\r\n\r\n---\r\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/README.md b/README.md
+--- a/README.md	(revision af85a7d22f02a11f7da9bfbf9304f4a92afc658b)
++++ b/README.md	(date 1782483393238)
+@@ -4,7 +4,7 @@
+ 
+ Questo progetto implementa un sistema di **Random Forest distribuito** per task di **classificazione** (binaria e multiclasse) e **regressione**. L'obiettivo è distribuire il training e l'inferenza di una foresta di decision tree su più worker, mantenendo un master responsabile del coordinamento, della preparazione dei dati, della validazione, della selezione del modello e della pubblicazione del manifest finale.
+ 
+-La distribuzione del sistema è realizzata tramite un'architettura **Master/Worker** basata su **Python**, **gRPC** e storage condiviso Amazon EFS, n ambiente AWS, montato sui nodi master, worker e client nel path:
++La distribuzione del sistema è realizzata tramite un'architettura **Master/Worker** basata su **Python**, **gRPC** e storage condiviso Amazon EFS, in ambiente AWS, montato sui nodi master, worker e client nel path:
+ 
+ ```text
+ /mnt/efs/gp_artifacts
+@@ -31,12 +31,11 @@
+ Il client invia richieste al master leader tramite gRPC. Può:
+ 
+ - lanciare job di training;
++- lanciare inferenza distribuita;
+ - interrogare lo stato dei job;
+-- eseguire inferenza distribuita;
+ - scaricare il modello addestrato;
+-- confrontare i risultati distribuiti con baseline locali.
+ 
+-La CLI principale è:
++Il comando per lanciare la CLI principale da client è:
+ 
+ ```bash
+ python training_debug_cli.py
+@@ -339,13 +338,6 @@
+ ## Esecuzione distribuita con Docker
+ 
+ 
+-## Esecuzione locale / sviluppo
+-
+-Per una run locale semplificata è possibile usare il backend di consenso in memoria.
+-
+-```
+-```
+-
+ ## Training distribuito
+ 
+ La CLI principale è sul Terminale client:
+@@ -743,7 +735,6 @@
+ 
+ ### No alive workers available
+ 
+-
+ ### Not leader
+ 
+ ### Dataset non trovato
+@@ -757,7 +748,7 @@
+ 
+ ---
+ 
+-## Limitazioni note
++## Limitazioni noteED
+ 
+ - Raft viene usato per leader election, non per una replica completa dello stato applicativo.
+ - EFS è assunto come componente affidabile e condiviso.
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"BufProjectSettings\">\r\n    <option name=\"bufCLIPath\" value=\"$ brew install bufbuild/buf/buf\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"compare baseline 2milioni\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"CopilotPersistence\">\r\n    <persistenceIdMap>\r\n      <entry key=\"_C:/Users/PC/Desktop/materie/ISW/Mvn/ProgettoSDCCeML\" value=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n    </persistenceIdMap>\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;jadepics&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\">{\r\n  &quot;selectedUrlAndAccountId&quot;: {\r\n    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,\r\n    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;\r\n  }\r\n}</component>\r\n  <component name=\"KubernetesApiPersistence\">{}</component>\r\n  <component name=\"KubernetesApiProvider\">{\r\n  &quot;isMigrated&quot;: true\r\n}</component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 8\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\"><![CDATA[{\r\n  \"keyToString\": {\r\n    \"ModuleVcsDetector.initialDetectionPerformed\": \"true\",\r\n    \"Python.compare_existing_job_cli.executor\": \"Run\",\r\n    \"Python.local_baseline_cli.executor\": \"Run\",\r\n    \"Python.submit_training_regression.executor\": \"Run\",\r\n    \"Python.synthetic_dataset_cli.executor\": \"Run\",\r\n    \"Python.training_debug_cli.executor\": \"Run\",\r\n    \"RunOnceActivity.ShowReadmeOnStart\": \"true\",\r\n    \"RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252\": \"true\",\r\n    \"RunOnceActivity.git.unshallow\": \"true\",\r\n    \"RunOnceActivity.typescript.service.memoryLimit.init\": \"true\",\r\n    \"SHELLCHECK.PATH\": \"C:\\\\Users\\\\PC\\\\AppData\\\\Roaming\\\\JetBrains\\\\PyCharm2026.1\\\\plugins\\\\Shell Script\\\\shellcheck.exe\",\r\n    \"ai.playground.ignore.import.keys.banner.in.settings\": \"true\",\r\n    \"codeWithMe.voiceChat.enabledByDefault\": \"false\",\r\n    \"git-widget-placeholder\": \"master\",\r\n    \"ignore.virus.scanning.warn.message\": \"true\",\r\n    \"kotlin-language-version-configured\": \"true\",\r\n    \"last_opened_file_path\": \"C:/Users/micci/PycharmProjects/PythonProject1/Dataset\",\r\n    \"node.js.detected.package.eslint\": \"true\",\r\n    \"node.js.detected.package.tslint\": \"true\",\r\n    \"node.js.selected.package.eslint\": \"(autodetect)\",\r\n    \"node.js.selected.package.tslint\": \"(autodetect)\",\r\n    \"nodejs_package_manager_path\": \"npm\",\r\n    \"settings.editor.selected.configurable\": \"com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable\",\r\n    \"vue.rearranger.settings.migration\": \"true\"\r\n  }\r\n}]]></component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"CopyFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\performance_evaluation\\distributed_jobs\" />\r\n    </key>\r\n    <key name=\"MoveFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\performance_evaluation\\distributed_jobs\\job_af645a3fd97b4a66b6bbc18c46eb74f6\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\performance_evaluation\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\boh\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\worker\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"\" />\r\n      <created>1772718028304</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1772718028304</updated>\r\n      <workItem from=\"1774557139933\" duration=\"1949000\" />\r\n      <workItem from=\"1774559557015\" duration=\"480000\" />\r\n      <workItem from=\"1774600460605\" duration=\"10626000\" />\r\n      <workItem from=\"1774694994766\" duration=\"3422000\" />\r\n      <workItem from=\"1774720403281\" duration=\"207000\" />\r\n      <workItem from=\"1774730844650\" duration=\"5746000\" />\r\n      <workItem from=\"1774964855112\" duration=\"688000\" />\r\n      <workItem from=\"1779263574177\" duration=\"624000\" />\r\n      <workItem from=\"1779266908342\" duration=\"2183000\" />\r\n      <workItem from=\"1779277413235\" duration=\"124000\" />\r\n      <workItem from=\"1779277767156\" duration=\"1430000\" />\r\n      <workItem from=\"1779282016019\" duration=\"4319000\" />\r\n      <workItem from=\"1779364505669\" duration=\"5140000\" />\r\n      <workItem from=\"1779370545584\" duration=\"1243000\" />\r\n      <workItem from=\"1779377569243\" duration=\"718000\" />\r\n      <workItem from=\"1779439480187\" duration=\"878000\" />\r\n      <workItem from=\"1779441751102\" duration=\"3017000\" />\r\n      <workItem from=\"1779614781225\" duration=\"335000\" />\r\n      <workItem from=\"1779642332598\" duration=\"4169000\" />\r\n      <workItem from=\"1779728510992\" duration=\"1472000\" />\r\n      <workItem from=\"1779784048930\" duration=\"16439000\" />\r\n      <workItem from=\"1779888735354\" duration=\"601000\" />\r\n      <workItem from=\"1779962688140\" duration=\"4957000\" />\r\n      <workItem from=\"1779972775664\" duration=\"1887000\" />\r\n      <workItem from=\"1779975108322\" duration=\"1664000\" />\r\n      <workItem from=\"1780072526235\" duration=\"12327000\" />\r\n      <workItem from=\"1780135591851\" duration=\"7076000\" />\r\n      <workItem from=\"1780165392523\" duration=\"202000\" />\r\n      <workItem from=\"1780165648182\" duration=\"5423000\" />\r\n      <workItem from=\"1780218283708\" duration=\"5762000\" />\r\n      <workItem from=\"1780315250667\" duration=\"595000\" />\r\n      <workItem from=\"1780328703391\" duration=\"4108000\" />\r\n      <workItem from=\"1780642990702\" duration=\"10000\" />\r\n      <workItem from=\"1780643112020\" duration=\"1677000\" />\r\n      <workItem from=\"1780645173444\" duration=\"4864000\" />\r\n      <workItem from=\"1780826629839\" duration=\"2568000\" />\r\n      <workItem from=\"1780842941419\" duration=\"2857000\" />\r\n      <workItem from=\"1780871228325\" duration=\"1802000\" />\r\n      <workItem from=\"1780915643641\" duration=\"1148000\" />\r\n      <workItem from=\"1781165343765\" duration=\"1019000\" />\r\n      <workItem from=\"1781166852232\" duration=\"3097000\" />\r\n      <workItem from=\"1781253627449\" duration=\"5255000\" />\r\n      <workItem from=\"1781268867842\" duration=\"5212000\" />\r\n      <workItem from=\"1781286702703\" duration=\"3008000\" />\r\n      <workItem from=\"1781431922369\" duration=\"3602000\" />\r\n      <workItem from=\"1781447944852\" duration=\"7075000\" />\r\n      <workItem from=\"1781462137533\" duration=\"394000\" />\r\n      <workItem from=\"1781465799321\" duration=\"728000\" />\r\n      <workItem from=\"1781515326205\" duration=\"11029000\" />\r\n      <workItem from=\"1781535697356\" duration=\"4855000\" />\r\n    </task>\r\n    <task id=\"LOCAL-00001\" summary=\"First commit\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772718604332</created>\r\n      <option name=\"number\" value=\"00001\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772718604332</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00002\" summary=\"Introduzione artifact_store, filesystem_stoere e paths\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774605271956</created>\r\n      <option name=\"number\" value=\"00002\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00002\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774605271956</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00003\" summary=\"refactoring worker.py e paths.py\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774698083683</created>\r\n      <option name=\"number\" value=\"00003\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00003\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774698083683</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00004\" summary=\"aggiunto commento\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774875188528</created>\r\n      <option name=\"number\" value=\"00004\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00004\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774875188528</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00005\" summary=\"ristrutturato master\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774886067552</created>\r\n      <option name=\"number\" value=\"00005\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00005\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774886067552</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00006\" summary=\"introduzione Monitor.sh per l'analisi delle statistiche su log\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779267177978</created>\r\n      <option name=\"number\" value=\"00006\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00006\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779267177978</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00007\" summary=\"Refactoring monitor.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779267655059</created>\r\n      <option name=\"number\" value=\"00007\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00007\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779267655060</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00008\" summary=\"Correzione monitor.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779277941088</created>\r\n      <option name=\"number\" value=\"00008\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00008\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779277941088</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00009\" summary=\"monitor.sh in background\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779282339366</created>\r\n      <option name=\"number\" value=\"00009\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00009\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779282339366</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00010\" summary=\"update monitor.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779366565339</created>\r\n      <option name=\"number\" value=\"00010\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00010\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779366565339</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00011\" summary=\"introduzione feature importance\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779443662224</created>\r\n      <option name=\"number\" value=\"00011\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00011\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779443662224</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00012\" summary=\"completamento della fault tolerance su worker e master\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779792342651</created>\r\n      <option name=\"number\" value=\"00012\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00012\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779792342651</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00013\" summary=\"testing fault tolerance sistema\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779798283775</created>\r\n      <option name=\"number\" value=\"00013\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00013\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779798283775</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00014\" summary=\"Introduzione dell'iperparametro Numero degli alberi come parametro da cli\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779805159717</created>\r\n      <option name=\"number\" value=\"00014\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00014\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779805159717</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00015\" summary=\"Sistemato worker.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779976993221</created>\r\n      <option name=\"number\" value=\"00015\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00015\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779976993222</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00016\" summary=\"Sistemato update worker.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780074164744</created>\r\n      <option name=\"number\" value=\"00016\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00016\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780074164744</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00017\" summary=\"update worker.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780074564671</created>\r\n      <option name=\"number\" value=\"00017\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00017\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780074564671</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00018\" summary=\"fault tollerance worker zombie\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780075709131</created>\r\n      <option name=\"number\" value=\"00018\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00018\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780075709131</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00019\" summary=\"Fault tolerance worker zombie\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780087658962</created>\r\n      <option name=\"number\" value=\"00019\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00019\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780087658962</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00020\" summary=\"Implementazione recovery storm con 16 alberi per worker per recover\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780173968854</created>\r\n      <option name=\"number\" value=\"00020\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00020\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780173968855</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00021\" summary=\"aggiunta loggers e tempo di timeout più breve\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780227221854</created>\r\n      <option name=\"number\" value=\"00021\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00021\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780227221855</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00022\" summary=\"Tempo di timeout più breve per testing\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780644070262</created>\r\n      <option name=\"number\" value=\"00022\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00022\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780644070262</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00023\" summary=\"Tempo di timeout più breve per testing pt.2\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780650154467</created>\r\n      <option name=\"number\" value=\"00023\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00023\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780650154467</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00024\" summary=\"Implementazione resume training e script per ottenere i job falliti\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781169512638</created>\r\n      <option name=\"number\" value=\"00024\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00024\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781169512638</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00025\" summary=\"test per allenamento locale e distribuito\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781457122726</created>\r\n      <option name=\"number\" value=\"00025\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00025\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781457122726</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00026\" summary=\"Risoluzione race condition\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781519613723</created>\r\n      <option name=\"number\" value=\"00026\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00026\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781519613724</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00027\" summary=\"Risoluzione race condition pt2\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781521103009</created>\r\n      <option name=\"number\" value=\"00027\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00027\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781521103009</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00028\" summary=\"Risoluzione metriche\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781523534121</created>\r\n      <option name=\"number\" value=\"00028\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00028\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781523534121</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00029\" summary=\"Risoluzione metriche pt2\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781527448206</created>\r\n      <option name=\"number\" value=\"00029\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00029\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781527448206</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00030\" summary=\"risultato di comparison e dataset sintetico\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781531882405</created>\r\n      <option name=\"number\" value=\"00030\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00030\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781531882405</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00031\" summary=\"risultato di comparison e dataset sintetico pt2\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781531907035</created>\r\n      <option name=\"number\" value=\"00031\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00031\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781531907035</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00032\" summary=\"Modifica timeout\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781542076595</created>\r\n      <option name=\"number\" value=\"00032\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00032\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781542076595</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00033\" summary=\"aggiunte run local\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781711262553</created>\r\n      <option name=\"number\" value=\"00033\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00033\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781711262553</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00034\" summary=\"modifica compare\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781712818932</created>\r\n      <option name=\"number\" value=\"00034\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00034\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781712818932</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00035\" summary=\"sistemato problema fault\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781714822533</created>\r\n      <option name=\"number\" value=\"00035\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00035\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781714822533</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00036\" summary=\"modificate cose varie\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781778289201</created>\r\n      <option name=\"number\" value=\"00036\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00036\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781778289202</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00037\" summary=\"riaggiunte metrics su efs\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781866824019</created>\r\n      <option name=\"number\" value=\"00037\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00037\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781866824019</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00038\" summary=\"compare baseline 2milioni\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781874602565</created>\r\n      <option name=\"number\" value=\"00038\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00038\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781874602565</updated>\r\n    </task>\r\n    <option name=\"localTasksCounter\" value=\"39\" />\r\n    <servers />\r\n  </component>\r\n  <component name=\"TypeScriptGeneratedFilesManager\">\r\n    <option name=\"version\" value=\"3\" />\r\n  </component>\r\n  <component name=\"Vcs.Log.Tabs.Properties\">\r\n    <option name=\"TAB_STATES\">\r\n      <map>\r\n        <entry key=\"MAIN\">\r\n          <value>\r\n            <State />\r\n          </value>\r\n        </entry>\r\n      </map>\r\n    </option>\r\n  </component>\r\n  <component name=\"VcsManagerConfiguration\">\r\n    <MESSAGE value=\"Sistemato worker.sh\" />\r\n    <MESSAGE value=\"Sistemato update worker.sh\" />\r\n    <MESSAGE value=\"update worker.sh\" />\r\n    <MESSAGE value=\"fault tollerance worker zombie\" />\r\n    <MESSAGE value=\"Fault tolerance worker zombie\" />\r\n    <MESSAGE value=\"Implementazione recovery storm con 16 alberi per worker per recover\" />\r\n    <MESSAGE value=\"aggiunta loggers e tempo di timeout più breve\" />\r\n    <MESSAGE value=\"Tempo di timeout più breve per testing\" />\r\n    <MESSAGE value=\"Tempo di timeout più breve per testing pt.2\" />\r\n    <MESSAGE value=\"Implementazione resume training e script per ottenere i job falliti\" />\r\n    <MESSAGE value=\"test per allenamento locale e distribuito\" />\r\n    <MESSAGE value=\"Risoluzione race condition\" />\r\n    <MESSAGE value=\"Risoluzione race condition pt2\" />\r\n    <MESSAGE value=\"Risoluzione metriche\" />\r\n    <MESSAGE value=\"Risoluzione metriche pt2\" />\r\n    <MESSAGE value=\"risultato di comparison e dataset sintetico\" />\r\n    <MESSAGE value=\"risultato di comparison e dataset sintetico pt2\" />\r\n    <MESSAGE value=\"risultato di comparison e dataset sintetico pt3\" />\r\n    <MESSAGE value=\"Modifica timeout\" />\r\n    <MESSAGE value=\"aggiunte run local\" />\r\n    <MESSAGE value=\"modifica compare\" />\r\n    <MESSAGE value=\"sistemato problema fault\" />\r\n    <MESSAGE value=\"modificate cose varie\" />\r\n    <MESSAGE value=\"riaggiunte metrics su efs\" />\r\n    <MESSAGE value=\"compare baseline 2milioni\" />\r\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"compare baseline 2milioni\" />\r\n  </component>\r\n  <component name=\"com.intellij.coverage.CoverageDataManagerImpl\">\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$synthetic_dataset_cli.coverage\" NAME=\"synthetic_dataset_cli Coverage Results\" MODIFIED=\"1781537994580\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$/synthetic_data\" />\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$local_baseline_cli.coverage\" NAME=\"local_baseline_cli Coverage Results\" MODIFIED=\"1781529372677\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$/local_baseline\" />\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$submit_training_regression.coverage\" NAME=\"submit_training_regression Coverage Results\" MODIFIED=\"1779804927673\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$\" />\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$training_debug_cli.coverage\" NAME=\"training_debug_cli Coverage Results\" MODIFIED=\"1780844905316\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$\" />\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$compare_existing_job_cli.coverage\" NAME=\"compare_existing_job_cli Coverage Results\" MODIFIED=\"1781434093457\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$/performance_evaluation\" />\r\n  </component>\r\n  <component name=\"github-copilot-workspace\">\r\n    <instructionFileLocations>\r\n      <option value=\".github/instructions\" />\r\n    </instructionFileLocations>\r\n    <promptFileLocations>\r\n      <option value=\".github/prompts\" />\r\n    </promptFileLocations>\r\n  </component>\r\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision af85a7d22f02a11f7da9bfbf9304f4a92afc658b)
++++ b/.idea/workspace.xml	(date 1782485500707)
+@@ -7,8 +7,10 @@
+     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
+   </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="compare baseline 2milioni">
++    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="Schemi aggiornati">
++      <change beforePath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" afterDir="false" />
+       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+     </list>
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+@@ -38,8 +40,8 @@
+ }</component>
+   <component name="GithubPullRequestsUISettings">{
+   &quot;selectedUrlAndAccountId&quot;: {
+-    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,
+-    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
++    &quot;url&quot;: &quot;https://github.com/jadepics/ProgettoSDCCeML.git&quot;,
++    &quot;accountId&quot;: &quot;64b32a3e-6402-44ac-8316-64089203d618&quot;
+   }
+ }</component>
+   <component name="KubernetesApiPersistence">{}</component>
+@@ -52,39 +54,61 @@
+   <component name="ProjectId" id="3AWp9QFcSCr26GObyiuq4gjJYSa" />
+   <component name="ProjectLevelVcsManager">
+     <ConfirmationsSetting value="1" id="Add" />
++  </component>
++  <component name="ProjectSessionTemplates">
++    <option name="panelTemplate">
++      <template>
++        <option name="modeId" value="Agent" />
++        <option name="model">
++          <model>
++            <option name="modelType" value="builtin_family" />
++            <option name="modelValue" value="auto" />
++          </model>
++        </option>
++        <option name="targetType" value="BACKGROUND" />
++      </template>
++    </option>
+   </component>
+   <component name="ProjectViewState">
+     <option name="hideEmptyMiddlePackages" value="true" />
+     <option name="showLibraryContents" value="true" />
+   </component>
+-  <component name="PropertiesComponent"><![CDATA[{
+-  "keyToString": {
+-    "ModuleVcsDetector.initialDetectionPerformed": "true",
+-    "Python.compare_existing_job_cli.executor": "Run",
+-    "Python.local_baseline_cli.executor": "Run",
+-    "Python.submit_training_regression.executor": "Run",
+-    "Python.synthetic_dataset_cli.executor": "Run",
+-    "Python.training_debug_cli.executor": "Run",
+-    "RunOnceActivity.ShowReadmeOnStart": "true",
+-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+-    "RunOnceActivity.git.unshallow": "true",
+-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+-    "SHELLCHECK.PATH": "C:\\Users\\PC\\AppData\\Roaming\\JetBrains\\PyCharm2026.1\\plugins\\Shell Script\\shellcheck.exe",
+-    "ai.playground.ignore.import.keys.banner.in.settings": "true",
+-    "codeWithMe.voiceChat.enabledByDefault": "false",
+-    "git-widget-placeholder": "master",
+-    "ignore.virus.scanning.warn.message": "true",
+-    "kotlin-language-version-configured": "true",
+-    "last_opened_file_path": "C:/Users/micci/PycharmProjects/PythonProject1/Dataset",
+-    "node.js.detected.package.eslint": "true",
+-    "node.js.detected.package.tslint": "true",
+-    "node.js.selected.package.eslint": "(autodetect)",
+-    "node.js.selected.package.tslint": "(autodetect)",
+-    "nodejs_package_manager_path": "npm",
+-    "settings.editor.selected.configurable": "com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable",
+-    "vue.rearranger.settings.migration": "true"
++  <component name="PropertiesComponent">{
++  &quot;keyToString&quot;: {
++    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
++    &quot;Python.analyze_scalability.executor&quot;: &quot;Run&quot;,
++    &quot;Python.compare_existing_job_cli.executor&quot;: &quot;Run&quot;,
++    &quot;Python.local_baseline_cli.executor&quot;: &quot;Run&quot;,
++    &quot;Python.master.executor&quot;: &quot;Run&quot;,
++    &quot;Python.submit_training_regression.executor&quot;: &quot;Run&quot;,
++    &quot;Python.synthetic_dataset_cli.executor&quot;: &quot;Run&quot;,
++    &quot;Python.training_debug_cli.executor&quot;: &quot;Run&quot;,
++    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
++    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
++    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
++    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
++    &quot;SHELLCHECK.PATH&quot;: &quot;C:\\Users\\PC\\AppData\\Roaming\\JetBrains\\PyCharm2026.1\\plugins\\Shell Script\\shellcheck.exe&quot;,
++    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
++    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
++    &quot;copilot.chat.legacySessionMetadata.migrated&quot;: &quot;true&quot;,
++    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
++    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
++    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
++    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,
++    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
++    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
++    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
++    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
++    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
++    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,
++    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
++  },
++  &quot;keyToStringList&quot;: {
++    &quot;com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File&quot;: [
++      &quot;TEXT&quot;
++    ]
+   }
+-}]]></component>
++}</component>
+   <component name="RecentsManager">
+     <key name="CopyFile.RECENT_KEYS">
+       <recent name="C:\Users\micci\PycharmProjects\PythonProject1\Dataset" />
+@@ -101,7 +125,8 @@
+   <component name="SharedIndexes">
+     <attachedChunks>
+       <set>
+-        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
++        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.25134.203" />
++        <option value="bundled-python-sdk-245168a56dbd-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.25134.203" />
+       </set>
+     </attachedChunks>
+   </component>
+@@ -162,6 +187,20 @@
+       <workItem from="1781465799321" duration="728000" />
+       <workItem from="1781515326205" duration="11029000" />
+       <workItem from="1781535697356" duration="4855000" />
++      <workItem from="1781950587799" duration="4026000" />
++      <workItem from="1781980805104" duration="1506000" />
++      <workItem from="1782112022751" duration="9351000" />
++      <workItem from="1782122826226" duration="6989000" />
++      <workItem from="1782137819096" duration="10545000" />
++      <workItem from="1782203693389" duration="11526000" />
++      <workItem from="1782225210118" duration="1093000" />
++      <workItem from="1782290649066" duration="9591000" />
++      <workItem from="1782312258368" duration="5423000" />
++      <workItem from="1782385317895" duration="599000" />
++      <workItem from="1782409045798" duration="310000" />
++      <workItem from="1782409588169" duration="6006000" />
++      <workItem from="1782461052759" duration="7367000" />
++      <workItem from="1782482702208" duration="2771000" />
+     </task>
+     <task id="LOCAL-00001" summary="First commit">
+       <option name="closed" value="true" />
+@@ -467,7 +506,79 @@
+       <option name="project" value="LOCAL" />
+       <updated>1781874602565</updated>
+     </task>
+-    <option name="localTasksCounter" value="39" />
++    <task id="LOCAL-00039" summary="Creazione di file di env come esempi">
++      <option name="closed" value="true" />
++      <created>1781951609224</created>
++      <option name="number" value="00039" />
++      <option name="presentableId" value="LOCAL-00039" />
++      <option name="project" value="LOCAL" />
++      <updated>1781951609224</updated>
++    </task>
++    <task id="LOCAL-00040" summary="Creazione di limiti di alberi per shard">
++      <option name="closed" value="true" />
++      <created>1782116659426</created>
++      <option name="number" value="00040" />
++      <option name="presentableId" value="LOCAL-00040" />
++      <option name="project" value="LOCAL" />
++      <updated>1782116659426</updated>
++    </task>
++    <task id="LOCAL-00041" summary="Abbassato a 50 il limiti di alberi per shard">
++      <option name="closed" value="true" />
++      <created>1782118511706</created>
++      <option name="number" value="00041" />
++      <option name="presentableId" value="LOCAL-00041" />
++      <option name="project" value="LOCAL" />
++      <updated>1782118511706</updated>
++    </task>
++    <task id="LOCAL-00042" summary="Abbassato a 1 il limiti di shard per worker">
++      <option name="closed" value="true" />
++      <created>1782120138430</created>
++      <option name="number" value="00042" />
++      <option name="presentableId" value="LOCAL-00042" />
++      <option name="project" value="LOCAL" />
++      <updated>1782120138430</updated>
++    </task>
++    <task id="LOCAL-00043" summary="Abbassato a 1 il limiti di shard per worker pt2">
++      <option name="closed" value="true" />
++      <created>1782125861774</created>
++      <option name="number" value="00043" />
++      <option name="presentableId" value="LOCAL-00043" />
++      <option name="project" value="LOCAL" />
++      <updated>1782125861774</updated>
++    </task>
++    <task id="LOCAL-00044" summary="note di scalability">
++      <option name="closed" value="true" />
++      <created>1782126170744</created>
++      <option name="number" value="00044" />
++      <option name="presentableId" value="LOCAL-00044" />
++      <option name="project" value="LOCAL" />
++      <updated>1782126170744</updated>
++    </task>
++    <task id="LOCAL-00045" summary="inizio esperimenti di scalability">
++      <option name="closed" value="true" />
++      <created>1782204515525</created>
++      <option name="number" value="00045" />
++      <option name="presentableId" value="LOCAL-00045" />
++      <option name="project" value="LOCAL" />
++      <updated>1782204515525</updated>
++    </task>
++    <task id="LOCAL-00046" summary="Scalabilità dei worker">
++      <option name="closed" value="true" />
++      <created>1782299501942</created>
++      <option name="number" value="00046" />
++      <option name="presentableId" value="LOCAL-00046" />
++      <option name="project" value="LOCAL" />
++      <updated>1782299501942</updated>
++    </task>
++    <task id="LOCAL-00047" summary="Schemi aggiornati">
++      <option name="closed" value="true" />
++      <created>1782468711719</created>
++      <option name="number" value="00047" />
++      <option name="presentableId" value="LOCAL-00047" />
++      <option name="project" value="LOCAL" />
++      <updated>1782468711720</updated>
++    </task>
++    <option name="localTasksCounter" value="48" />
+     <servers />
+   </component>
+   <component name="TypeScriptGeneratedFilesManager">
+@@ -485,15 +596,6 @@
+     </option>
+   </component>
+   <component name="VcsManagerConfiguration">
+-    <MESSAGE value="Sistemato worker.sh" />
+-    <MESSAGE value="Sistemato update worker.sh" />
+-    <MESSAGE value="update worker.sh" />
+-    <MESSAGE value="fault tollerance worker zombie" />
+-    <MESSAGE value="Fault tolerance worker zombie" />
+-    <MESSAGE value="Implementazione recovery storm con 16 alberi per worker per recover" />
+-    <MESSAGE value="aggiunta loggers e tempo di timeout più breve" />
+-    <MESSAGE value="Tempo di timeout più breve per testing" />
+-    <MESSAGE value="Tempo di timeout più breve per testing pt.2" />
+     <MESSAGE value="Implementazione resume training e script per ottenere i job falliti" />
+     <MESSAGE value="test per allenamento locale e distribuito" />
+     <MESSAGE value="Risoluzione race condition" />
+@@ -510,14 +612,25 @@
+     <MESSAGE value="modificate cose varie" />
+     <MESSAGE value="riaggiunte metrics su efs" />
+     <MESSAGE value="compare baseline 2milioni" />
+-    <option name="LAST_COMMIT_MESSAGE" value="compare baseline 2milioni" />
++    <MESSAGE value="Creazione di file di env come esempi" />
++    <MESSAGE value="Creazione di limiti di alberi per shard" />
++    <MESSAGE value="Abbassato a 50 il limiti di alberi per shard" />
++    <MESSAGE value="Abbassato a 1 il limiti di shard per worker" />
++    <MESSAGE value="Abbassato a 1 il limiti di shard per worker pt2" />
++    <MESSAGE value="note di scalability" />
++    <MESSAGE value="inizio esperimenti di scalability" />
++    <MESSAGE value="Scalabilità dei worker" />
++    <MESSAGE value="Schemi aggiornati" />
++    <option name="LAST_COMMIT_MESSAGE" value="Schemi aggiornati" />
+   </component>
+   <component name="com.intellij.coverage.CoverageDataManagerImpl">
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$synthetic_dataset_cli.coverage" NAME="synthetic_dataset_cli Coverage Results" MODIFIED="1781537994580" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/synthetic_data" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$master.coverage" NAME="master Coverage Results" MODIFIED="1782128085483" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$local_baseline_cli.coverage" NAME="local_baseline_cli Coverage Results" MODIFIED="1781529372677" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/local_baseline" />
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$submit_training_regression.coverage" NAME="submit_training_regression Coverage Results" MODIFIED="1779804927673" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$training_debug_cli.coverage" NAME="training_debug_cli Coverage Results" MODIFIED="1780844905316" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$compare_existing_job_cli.coverage" NAME="compare_existing_job_cli Coverage Results" MODIFIED="1781434093457" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/performance_evaluation" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$analyze_scalability.coverage" NAME="analyze_scalability Coverage Results" MODIFIED="1782466448294" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/performance_evaluation" />
+   </component>
+   <component name="github-copilot-workspace">
+     <instructionFileLocations>
+Index: .idea/ProgSDCC&ML.iml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<module type=\"PYTHON_MODULE\" version=\"4\">\r\n  <component name=\"NewModuleRootManager\">\r\n    <content url=\"file://$MODULE_DIR$\">\r\n      <excludeFolder url=\"file://$MODULE_DIR$/.venv\" />\r\n    </content>\r\n    <orderEntry type=\"jdk\" jdkName=\"Python 3.13 (PythonProject1)\" jdkType=\"Python SDK\" />\r\n    <orderEntry type=\"sourceFolder\" forTests=\"false\" />\r\n  </component>\r\n</module>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/ProgSDCC&ML.iml b/.idea/ProgSDCC&ML.iml
+--- a/.idea/ProgSDCC&ML.iml	(revision af85a7d22f02a11f7da9bfbf9304f4a92afc658b)
++++ b/.idea/ProgSDCC&ML.iml	(date 1781951112947)
+@@ -4,7 +4,7 @@
+     <content url="file://$MODULE_DIR$">
+       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+     </content>
+-    <orderEntry type="jdk" jdkName="Python 3.13 (PythonProject1)" jdkType="Python SDK" />
++    <orderEntry type="jdk" jdkName="Python 3.13 (ProgettoSDCCeML) (3)" jdkType="Python SDK" />
+     <orderEntry type="sourceFolder" forTests="false" />
+   </component>
+ </module>
+\ No newline at end of file

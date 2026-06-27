@@ -106,6 +106,12 @@ get_runtime_config_value() {
     return
   fi
 
+  value="$(get_template_env_value "$key")"
+  if [[ -n "$value" ]]; then
+    echo "$value"
+    return
+  fi
+
   echo "$default"
 }
 
@@ -155,7 +161,7 @@ validate_positive_integer() {
 
 is_control_env_key() {
   case "$1" in
-    MASTER_CLUSTER_HOST|WORKER_COUNT|WORKER_ID_PREFIX|WORKER_INDEX_START|WORKER_BASE_PORT|WAIT_LEADER_TIMEOUT_SECONDS)
+    MASTER_CLUSTER_HOST|MASTER_DEPLOYMENT_MODE|MASTER1_PRIVATE_IP|MASTER2_PRIVATE_IP|MASTER3_PRIVATE_IP|MASTER_SEEDS|WORKER_COUNT|WORKER_ID_PREFIX|WORKER_INDEX_START|WORKER_BASE_PORT|WAIT_LEADER_TIMEOUT_SECONDS)
       return 0
       ;;
     *)
@@ -168,8 +174,33 @@ detect_private_ip() {
   hostname -I | awk '{print $1}'
 }
 
+master_deployment_mode() {
+  get_runtime_config_value "MASTER_DEPLOYMENT_MODE" "single-host"
+}
+
+master_node_private_ip() {
+  local node="$1"
+
+  case "$node" in
+    master1)
+      get_runtime_config_value "MASTER1_PRIVATE_IP" "172.31.37.47"
+      ;;
+    master2)
+      get_runtime_config_value "MASTER2_PRIVATE_IP" "172.31.33.26"
+      ;;
+    master3)
+      get_runtime_config_value "MASTER3_PRIVATE_IP" "172.31.35.187"
+      ;;
+    *)
+      echo "[ERROR] unknown master node: $node" >&2
+      exit 1
+      ;;
+  esac
+}
+
 master_cluster_host() {
   local value=""
+  local mode=""
 
   if value="$(get_extra_env_value "MASTER_CLUSTER_HOST" 2>/dev/null)"; then
     echo "$value"
@@ -178,6 +209,13 @@ master_cluster_host() {
 
   if [[ -n "${MASTER_CLUSTER_HOST:-}" ]]; then
     echo "$MASTER_CLUSTER_HOST"
+    return
+  fi
+
+  mode="$(master_deployment_mode)"
+
+  if [[ "$mode" == "multi-host" ]]; then
+    master_node_private_ip "master1"
     return
   fi
 
@@ -207,9 +245,34 @@ worker_advertise_host() {
 }
 
 master_seeds() {
-  local host
-  host="$(master_cluster_host)"
+  local value=""
+  local mode=""
+  local host=""
 
+  if value="$(get_extra_env_value "MASTER_SEEDS" 2>/dev/null)"; then
+    echo "$value"
+    return
+  fi
+
+  if [[ -n "${MASTER_SEEDS:-}" ]]; then
+    echo "$MASTER_SEEDS"
+    return
+  fi
+
+  value="$(get_template_env_value "MASTER_SEEDS")"
+  if [[ -n "$value" ]]; then
+    echo "$value"
+    return
+  fi
+
+  mode="$(master_deployment_mode)"
+
+  if [[ "$mode" == "multi-host" ]]; then
+    echo "$(master_node_private_ip master1):50051,$(master_node_private_ip master2):50052,$(master_node_private_ip master3):50053"
+    return
+  fi
+
+  host="$(master_cluster_host)"
   echo "${host}:50051,${host}:50052,${host}:50053"
 }
 
@@ -397,27 +460,46 @@ run_worker() {
 }
 
 wait_master_leader() {
-  local host
   local timeout_seconds
   local deadline
   local response
+  local mode
 
-  host="$(master_cluster_host)"
   timeout_seconds="${WAIT_LEADER_TIMEOUT_SECONDS:-60}"
   deadline=$((SECONDS + timeout_seconds))
+  mode="$(master_deployment_mode)"
 
-  echo "[WORKER] waiting for Raft leader on master cluster ${host}..."
+  echo "[WORKER] waiting for Raft leader..."
+  echo "[WORKER] master deployment mode: ${mode}"
 
   while (( SECONDS < deadline )); do
-    for port in 50151 50152 50153; do
-      response="$(curl -s --max-time 1 "http://${host}:${port}/status" || true)"
+    if [[ "$mode" == "multi-host" ]]; then
+      for node in master1 master2 master3; do
+        local host
+        host="$(master_node_private_ip "$node")"
 
-      if echo "$response" | grep -q '"role": "LEADER"'; then
-        echo "[WORKER] leader detected on Raft port ${port}"
-        echo "$response"
-        return 0
-      fi
-    done
+        response="$(curl -s --max-time 1 -X POST "http://${host}:50151/status" || true)"
+
+        if echo "$response" | grep -q '"role": "LEADER"'; then
+          echo "[WORKER] leader detected on ${node} ${host}:50151"
+          echo "$response"
+          return 0
+        fi
+      done
+    else
+      local host
+      host="$(master_cluster_host)"
+
+      for port in 50151 50152 50153; do
+        response="$(curl -s --max-time 1 -X POST "http://${host}:${port}/status" || true)"
+
+        if echo "$response" | grep -q '"role": "LEADER"'; then
+          echo "[WORKER] leader detected on Raft port ${port}"
+          echo "$response"
+          return 0
+        fi
+      done
+    fi
 
     sleep 1
   done

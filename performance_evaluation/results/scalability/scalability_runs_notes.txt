@@ -74,6 +74,7 @@ workers_per_instance = 3
 total_workers = 9
 job_id = job_8694995956964f2baf51c5a5201265d6
 3x3,3,3,9,job_8694995956964f2baf51c5a5201265d6,true,
+con retry: job_b7a0557e7eee400aa5473aaaedffee8d
 
 3x4:
 instances = 3
@@ -139,7 +140,7 @@ WORKERS:
 watch -n 5 "docker stats --no-stream"
 
 MASTER:
-JOB_ID="job_5511c62e1abe4862b51730555066bf84"
+JOB_ID="job_b7a0557e7eee400aa5473aaaedffee8d"
 EXP_ID="${JOB_ID}_exp_000"
 JOB_DIR="/mnt/efs/gp_artifacts/jobs/$JOB_ID"
 TREE_DIR="$JOB_DIR/experiments/$EXP_ID/trees"
@@ -151,14 +152,14 @@ watch -n 10 "echo '=== JOB DIR ==='; echo '$JOB_DIR'; echo; echo '=== JOB SIZE =
 # ================================
 
 # Job da scaricare
-$JOB_ID="job_5511c62e1abe4862b51730555066bf84"
+$JOB_ID="job_b7a0557e7eee400aa5473aaaedffee8d"
 $EXP_ID="${JOB_ID}_exp_000"
 
 # Chiave SSH
 $KEY="C:\Users\PC\Desktop\KeyCouple.pem"
 
 # IP pubblico attuale del master
-$MASTER_PUBLIC_IP="16.170.215.199"
+$MASTER_PUBLIC_IP="13.60.202.59"
 
 # Host remoto
 $REMOTE_HOST="ec2-user@$MASTER_PUBLIC_IP"
