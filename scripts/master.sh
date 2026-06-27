@@ -197,12 +197,7 @@ master_grpc_port() {
   local mode
   mode="$(master_deployment_mode)"
 
-  if [[ "$mode" == "multi-host" ]]; then
-    echo "50051"
-    return
-  fi
-
-  echo "${MASTER_PORTS[$node]}"
+echo "${MASTER_PORTS[$node]}"
 }
 
 master_raft_port() {

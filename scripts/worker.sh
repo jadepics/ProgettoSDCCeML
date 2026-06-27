@@ -268,7 +268,7 @@ master_seeds() {
   mode="$(master_deployment_mode)"
 
   if [[ "$mode" == "multi-host" ]]; then
-    echo "$(master_node_private_ip master1):50051,$(master_node_private_ip master2):50051,$(master_node_private_ip master3):50051"
+    echo "$(master_node_private_ip master1):50051,$(master_node_private_ip master2):50052,$(master_node_private_ip master3):50053"
     return
   fi
 
