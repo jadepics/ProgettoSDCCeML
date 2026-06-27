@@ -34,11 +34,6 @@ from common.prediction_io import (
     path_to_file_uri,
 )
 
-ARTIFACT_ROOT = Path(
-    os.getenv("SHARED_STORAGE_ROOT", "/mnt/efs/gp_artifacts")
-).resolve()
-
-
 def load_env_file(path: Path) -> None:
     if not path.exists():
         return
@@ -54,6 +49,13 @@ def load_env_file(path: Path) -> None:
             key.strip(),
             value.strip().strip('"').strip("'"),
         )
+
+load_env_file(PROJECT_ROOT / ".env.master")
+
+ARTIFACT_ROOT = Path(
+    os.getenv("SHARED_STORAGE_ROOT", "/mnt/efs/gp_artifacts")
+).resolve()
+
 def path_from_file_uri(uri: str) -> Path:
     uri = str(uri)
 
@@ -61,7 +63,6 @@ def path_from_file_uri(uri: str) -> Path:
         return Path(uri.replace("file://", "", 1))
 
     return Path(uri)
-
 
 def load_json(path: str | Path) -> dict[str, Any]:
     resolved_path = Path(path)
@@ -133,10 +134,37 @@ def load_master_addresses() -> list[str]:
         if addresses:
             return list(dict.fromkeys(addresses))
 
-    master_host = os.getenv("MASTER_HOST", "127.0.0.1").strip()
-    master_port = os.getenv("MASTER_PORT", "50051").strip()
+    deployment_mode = os.getenv(
+        "MASTER_DEPLOYMENT_MODE",
+        "single-host",
+    ).strip().lower()
 
-    return [f"{master_host}:{master_port}"]
+    master1_ip = os.getenv("MASTER1_PRIVATE_IP", "127.0.0.1").strip()
+    master2_ip = os.getenv("MASTER2_PRIVATE_IP", master1_ip).strip()
+    master3_ip = os.getenv("MASTER3_PRIVATE_IP", master1_ip).strip()
+
+    master1_port = os.getenv("MASTER1_PORT", "50051").strip()
+    master2_port = os.getenv("MASTER2_PORT", "50052").strip()
+    master3_port = os.getenv("MASTER3_PORT", "50053").strip()
+
+    if deployment_mode == "single-host":
+        return [
+            f"{master1_ip}:{master1_port}",
+            f"{master1_ip}:{master2_port}",
+            f"{master1_ip}:{master3_port}",
+        ]
+
+    if deployment_mode == "multi-host":
+        return [
+            f"{master1_ip}:{master1_port}",
+            f"{master2_ip}:{master2_port}",
+            f"{master3_ip}:{master3_port}",
+        ]
+
+    raise ValueError(
+        f"MASTER_DEPLOYMENT_MODE non valido: {deployment_mode}. "
+        "Valori ammessi: single-host, multi-host"
+    )
 
 def normalized_grpc_options() -> list[tuple[str, int | str]]:
     """
@@ -607,8 +635,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    load_env_file(PROJECT_ROOT / ".env.client")
-
     args = parse_args()
     result = run_benchmark(args)
 

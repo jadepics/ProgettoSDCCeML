@@ -161,7 +161,7 @@ validate_positive_integer() {
 
 is_control_env_key() {
   case "$1" in
-    MASTER_CLUSTER_HOST|MASTER_DEPLOYMENT_MODE|MASTER1_PRIVATE_IP|MASTER2_PRIVATE_IP|MASTER3_PRIVATE_IP|MASTER_SEEDS|WORKER_COUNT|WORKER_ID_PREFIX|WORKER_INDEX_START|WORKER_BASE_PORT|WAIT_LEADER_TIMEOUT_SECONDS)
+    MASTER_CLUSTER_HOST|MASTER_DEPLOYMENT_MODE|MASTER1_PRIVATE_IP|MASTER2_PRIVATE_IP|MASTER3_PRIVATE_IP|MASTER1_PORT|MASTER2_PORT|MASTER3_PORT|MASTER_SEEDS|WORKER_COUNT|WORKER_ID_PREFIX|WORKER_INDEX_START|WORKER_BASE_PORT|WAIT_LEADER_TIMEOUT_SECONDS)
       return 0
       ;;
     *)
@@ -178,18 +178,38 @@ master_deployment_mode() {
   get_runtime_config_value "MASTER_DEPLOYMENT_MODE" "single-host"
 }
 
+master_node_port() {
+  local node="$1"
+
+  case "$node" in
+    master1)
+      get_runtime_config_value "MASTER1_PORT" "50051"
+      ;;
+    master2)
+      get_runtime_config_value "MASTER2_PORT" "50052"
+      ;;
+    master3)
+      get_runtime_config_value "MASTER3_PORT" "50053"
+      ;;
+    *)
+      echo "[ERROR] unknown master node: $node" >&2
+      exit 1
+      ;;
+  esac
+}
+
 master_node_private_ip() {
   local node="$1"
 
   case "$node" in
     master1)
-      get_runtime_config_value "MASTER1_PRIVATE_IP" "172.31.37.47"
+      get_runtime_config_value "MASTER1_PRIVATE_IP" "127.0.0.1"
       ;;
     master2)
-      get_runtime_config_value "MASTER2_PRIVATE_IP" "172.31.33.26"
+      get_runtime_config_value "MASTER2_PRIVATE_IP" "127.0.0.1"
       ;;
     master3)
-      get_runtime_config_value "MASTER3_PRIVATE_IP" "172.31.35.187"
+      get_runtime_config_value "MASTER3_PRIVATE_IP" "127.0.0.1"
       ;;
     *)
       echo "[ERROR] unknown master node: $node" >&2
@@ -200,7 +220,6 @@ master_node_private_ip() {
 
 master_cluster_host() {
   local value=""
-  local mode=""
 
   if value="$(get_extra_env_value "MASTER_CLUSTER_HOST" 2>/dev/null)"; then
     echo "$value"
@@ -212,20 +231,7 @@ master_cluster_host() {
     return
   fi
 
-  mode="$(master_deployment_mode)"
-
-  if [[ "$mode" == "multi-host" ]]; then
-    master_node_private_ip "master1"
-    return
-  fi
-
-  value="$(get_template_env_value "MASTER_HOST")"
-  if [[ -n "$value" ]]; then
-    echo "$value"
-    return
-  fi
-
-  echo "172.31.37.47"
+  master_node_private_ip "master1"
 }
 
 worker_advertise_host() {
@@ -245,35 +251,46 @@ worker_advertise_host() {
 }
 
 master_seeds() {
-  local value=""
-  local mode=""
-  local host=""
+  local override
+  override="$(get_runtime_config_value "MASTER_SEEDS" "")"
 
-  if value="$(get_extra_env_value "MASTER_SEEDS" 2>/dev/null)"; then
-    echo "$value"
+  if [[ -n "$override" ]]; then
+    echo "$override"
     return
   fi
 
-  if [[ -n "${MASTER_SEEDS:-}" ]]; then
-    echo "$MASTER_SEEDS"
-    return
-  fi
-
-  value="$(get_template_env_value "MASTER_SEEDS")"
-  if [[ -n "$value" ]]; then
-    echo "$value"
-    return
-  fi
-
+  local mode
   mode="$(master_deployment_mode)"
 
-  if [[ "$mode" == "multi-host" ]]; then
-    echo "$(master_node_private_ip master1):50051,$(master_node_private_ip master2):50052,$(master_node_private_ip master3):50053"
+  local master1_ip
+  local master2_ip
+  local master3_ip
+
+  local master1_port
+  local master2_port
+  local master3_port
+
+  master1_ip="$(master_node_private_ip master1)"
+  master2_ip="$(master_node_private_ip master2)"
+  master3_ip="$(master_node_private_ip master3)"
+
+  master1_port="$(master_node_port master1)"
+  master2_port="$(master_node_port master2)"
+  master3_port="$(master_node_port master3)"
+
+  if [[ "$mode" == "single-host" ]]; then
+    echo "${master1_ip}:${master1_port},${master1_ip}:${master2_port},${master1_ip}:${master3_port}"
     return
   fi
 
-  host="$(master_cluster_host)"
-  echo "${host}:50051,${host}:50052,${host}:50053"
+  if [[ "$mode" == "multi-host" ]]; then
+    echo "${master1_ip}:${master1_port},${master2_ip}:${master2_port},${master3_ip}:${master3_port}"
+    return
+  fi
+
+  echo "[ERROR] invalid MASTER_DEPLOYMENT_MODE: $mode" >&2
+  echo "[ERROR] allowed values: single-host, multi-host" >&2
+  exit 1
 }
 
 container_name_from_worker_id() {
@@ -378,10 +395,10 @@ generate_env() {
   set_env_value "$runtime_env_file" "WORKER_ADVERTISE_HOST" "$advertise_host"
 
   set_env_value "$runtime_env_file" "MASTER_HOST" "$master_host"
-  set_env_value "$runtime_env_file" "MASTER_PORT" "50051"
+  set_env_value "$runtime_env_file" "MASTER_PORT" "$(master_node_port master1)"
 
   set_env_value "$runtime_env_file" "MASTER_LEADER_HOST" "$master_host"
-  set_env_value "$runtime_env_file" "MASTER_LEADER_PORT" "50051"
+  set_env_value "$runtime_env_file" "MASTER_LEADER_PORT" "$(master_node_port master1)"
 
   set_env_value "$runtime_env_file" "MASTER_SEEDS" "$seeds"
 

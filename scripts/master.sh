@@ -194,10 +194,22 @@ master_deployment_mode() {
 
 master_grpc_port() {
   local node="$1"
-  local mode
-  mode="$(master_deployment_mode)"
 
-echo "${MASTER_PORTS[$node]}"
+  case "$node" in
+    master1)
+      get_config_value "MASTER1_PORT" "50051"
+      ;;
+    master2)
+      get_config_value "MASTER2_PORT" "50052"
+      ;;
+    master3)
+      get_config_value "MASTER3_PORT" "50053"
+      ;;
+    *)
+      echo "[ERROR] unknown master node: $node" >&2
+      exit 1
+      ;;
+  esac
 }
 
 master_raft_port() {
