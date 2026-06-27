@@ -18,7 +18,7 @@ from .enums import (
 class HyperparameterSpace:
     n_estimators_candidates: list[int]
     max_depth_candidates: list[Optional[int]]
-    max_features_candidates: list[str | float | None]
+    max_features_candidates: list[str | int | float | None]
     min_samples_split_candidates: list[int]
     min_samples_leaf_candidates: list[int]
     criterion_candidates: list[str]
@@ -35,7 +35,7 @@ class ForestConfiguration:
     task_type: str
     n_estimators: int
     max_depth: Optional[int]
-    max_features: str | float | None
+    max_features: str | int | float | None
     min_samples_split: int
     min_samples_leaf: int
     criterion: str

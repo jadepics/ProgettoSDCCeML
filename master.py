@@ -669,6 +669,31 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         if request.validation_ratio + request.test_ratio >= 1.0:
             return "validation_ratio + test_ratio must be < 1.0"
 
+        for value in request.max_depth_candidates:
+            if value < 0:
+                return "max_depth_candidates must contain values >= 0; use 0 for unlimited depth"
+
+        for value in request.min_samples_split_candidates:
+            if value < 2:
+                return "min_samples_split_candidates must contain values >= 2"
+
+        for value in request.min_samples_leaf_candidates:
+            if value < 1:
+                return "min_samples_leaf_candidates must contain values >= 1"
+
+        max_features_error = self._validate_max_features_candidates(
+            request.max_features_candidates
+        )
+        if max_features_error is not None:
+            return max_features_error
+
+        criterion_error = self._validate_criterion_candidates(
+            task_type=task_type,
+            criterion_candidates=request.criterion_candidates,
+        )
+        if criterion_error is not None:
+            return criterion_error
+
         dataset_scenario = self._extract_dataset_scenario(request)
         if dataset_scenario not in SUPPORTED_DATASET_SCENARIOS:
             return (
@@ -814,10 +839,69 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         if lowered in {"none", "null"}:
             return None
 
+        if lowered in {"sqrt", "log2"}:
+            return lowered
+
         try:
+            if lowered.isdigit():
+                return int(lowered)
+
             return float(value)
         except ValueError:
-            return value
+            raise ValueError(f"Invalid max_features candidate: {raw_value}")
+
+    def _validate_max_features_candidates(self, candidates) -> Optional[str]:
+        for raw_value in candidates:
+            try:
+                parsed = self._parse_max_features_candidate(str(raw_value))
+            except ValueError as exc:
+                return str(exc)
+
+            if parsed is None or parsed in {"sqrt", "log2"}:
+                continue
+
+            if isinstance(parsed, int):
+                if parsed <= 0:
+                    return "max_features integer candidates must be > 0"
+                continue
+
+            if isinstance(parsed, float):
+                if parsed <= 0.0 or parsed > 1.0:
+                    return "max_features float candidates must be in the interval (0, 1]"
+                continue
+
+            return f"Invalid max_features candidate: {raw_value}"
+
+        return None
+
+    def _validate_criterion_candidates(
+        self,
+        task_type: str,
+        criterion_candidates,
+    ) -> Optional[str]:
+        if task_type == "classification":
+            allowed = {"gini", "entropy", "log_loss"}
+        else:
+            allowed = {"squared_error", "friedman_mse", "absolute_error", "poisson"}
+
+        candidates = list(criterion_candidates)
+
+        if not candidates:
+            return None
+
+        invalid = [
+            str(value).strip().lower()
+            for value in candidates
+            if str(value).strip().lower() not in allowed
+        ]
+
+        if invalid:
+            return (
+                f"criterion_candidates invalid for {task_type}: {invalid}. "
+                f"Allowed values: {sorted(allowed)}"
+            )
+
+        return None
 
     def _generate_job_id(self) -> str:
         from common.ids import generate_job_id

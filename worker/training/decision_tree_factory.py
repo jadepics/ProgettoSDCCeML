@@ -34,16 +34,48 @@ class DecisionTreeFactory:
             return value
 
         try:
+            if value.isdigit():
+                return int(value)
+
             return float(value)
         except ValueError:
             raise ValueError(f"Invalid max_features value: {value}")
+
+    def _normalize_criterion(self, task_type: str, criterion: str) -> str:
+        criterion = str(criterion or "").strip().lower()
+
+        if task_type == "classification":
+            if not criterion:
+                return "gini"
+
+            allowed = {"gini", "entropy", "log_loss"}
+            if criterion not in allowed:
+                raise ValueError(
+                    f"Invalid classification criterion: {criterion}. "
+                    f"Allowed values: {sorted(allowed)}"
+                )
+
+            return criterion
+
+        if not criterion:
+            return "squared_error"
+
+        allowed = {"squared_error", "friedman_mse", "absolute_error", "poisson"}
+        if criterion not in allowed:
+            raise ValueError(
+                f"Invalid regression criterion: {criterion}. "
+                f"Allowed values: {sorted(allowed)}"
+            )
+
+        return criterion
 
     def create(
         self,
         max_depth: Optional[int],
         min_samples_split: int,
         min_samples_leaf: int,
-        max_features: Union[str, float, None],
+        max_features: Union[str, int, float, None],
+        criterion: str,
         seed: int,
         task_type: str
     ):
@@ -55,9 +87,11 @@ class DecisionTreeFactory:
 
         self.task_type = task_type
         parsed_max_features = self._parse_max_features(max_features)
+        parsed_criterion = self._normalize_criterion(task_type, criterion)
 
         if self.task_type == "classification":
             return DecisionTreeClassifier(
+                criterion=parsed_criterion,
                 max_depth=max_depth,
                 min_samples_split=max(2, min_samples_split),
                 min_samples_leaf=max(1, min_samples_leaf),
@@ -67,6 +101,7 @@ class DecisionTreeFactory:
 
         else:
             return DecisionTreeRegressor(
+                criterion=parsed_criterion,
                 max_depth=max_depth,
                 min_samples_split=max(2, min_samples_split),
                 min_samples_leaf=max(1, min_samples_leaf),

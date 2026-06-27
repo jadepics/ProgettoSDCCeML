@@ -266,6 +266,7 @@ def is_not_leader_message(message: str) -> bool:
 def submit_training_with_leader_discovery(
     submit_function: Callable[..., Any],
     *submit_args,
+    **submit_kwargs,
 ) -> Optional[rf_pb2.SubmitTrainingResponse]:
     last_error = None
 
@@ -277,6 +278,7 @@ def submit_training_with_leader_discovery(
             response = submit_function(
                 master_address,
                 *submit_args,
+                **submit_kwargs,
             )
 
             if response is None:
@@ -462,6 +464,231 @@ def _n_estimators_total() -> int:
     except Exception:
         return 0
 
+
+def _parse_positive_int_list(
+    raw_value: str,
+    default: list[int],
+    label: str,
+    minimum: int,
+) -> list[int]:
+    value = raw_value.strip()
+
+    if not value:
+        return list(default)
+
+    result: list[int] = []
+
+    for item in value.split(","):
+        token = item.strip()
+
+        if not token:
+            continue
+
+        try:
+            parsed = int(token)
+        except ValueError as exc:
+            raise ValueError(f"{label} must contain integers") from exc
+
+        if parsed < minimum:
+            raise ValueError(f"{label} values must be >= {minimum}")
+
+        result.append(parsed)
+
+    if not result:
+        return list(default)
+
+    return result
+
+
+def _parse_max_depth_candidates(raw_value: str) -> list[int]:
+    value = raw_value.strip()
+
+    if not value:
+        return [5]
+
+    result: list[int] = []
+
+    for item in value.split(","):
+        token = item.strip().lower()
+
+        if not token:
+            continue
+
+        if token in {"none", "null", "unlimited", "0"}:
+            # Nel proto 0 viene interpretato dal master come None/unlimited.
+            result.append(0)
+            continue
+
+        try:
+            parsed = int(token)
+        except ValueError as exc:
+            raise ValueError(
+                "max_depth_candidates must contain integers or none"
+            ) from exc
+
+        if parsed <= 0:
+            raise ValueError(
+                "max_depth_candidates values must be > 0, or 0/none for unlimited"
+            )
+
+        result.append(parsed)
+
+    return result or [5]
+
+
+def _parse_string_candidates(
+    raw_value: str,
+    default: list[str],
+    label: str,
+) -> list[str]:
+    value = raw_value.strip()
+
+    if not value:
+        return list(default)
+
+    result = [item.strip() for item in value.split(",") if item.strip()]
+
+    if not result:
+        return list(default)
+
+    return result
+
+
+def _validate_max_features_candidates(values: list[str]) -> None:
+    for value in values:
+        normalized = str(value).strip().lower()
+
+        if normalized in {"sqrt", "log2", "none", "null"}:
+            continue
+
+        try:
+            numeric_value = float(normalized)
+        except ValueError as exc:
+            raise ValueError(
+                "max_features_candidates values must be sqrt, log2, none, "
+                "a positive integer, or a float in (0, 1]"
+            ) from exc
+
+        if numeric_value <= 0:
+            raise ValueError("max_features_candidates numeric values must be > 0")
+
+        if "." in normalized and numeric_value > 1.0:
+            raise ValueError(
+                "max_features float values represent fractions and must be <= 1"
+            )
+
+
+def _validate_criterion_candidates(task_type: str, values: list[str]) -> None:
+    if task_type == "classification":
+        allowed = {"gini", "entropy", "log_loss"}
+    else:
+        allowed = {"squared_error", "friedman_mse", "absolute_error", "poisson"}
+
+    invalid = [value for value in values if value.strip().lower() not in allowed]
+
+    if invalid:
+        raise ValueError(
+            f"criterion_candidates invalid for {task_type}: {invalid}. "
+            f"Allowed values: {sorted(allowed)}"
+        )
+
+
+def _ask_bool(label: str, default: bool) -> bool:
+    default_text = "y" if default else "n"
+    raw_value = input(f"{label} [{default_text}]: ").strip().lower()
+
+    if not raw_value:
+        return default
+
+    if raw_value in {"y", "yes", "true", "1", "s", "si", "sì"}:
+        return True
+
+    if raw_value in {"n", "no", "false", "0"}:
+        return False
+
+    raise ValueError(f"{label} must be yes/no")
+
+
+def _ask_int(label: str, default: int) -> int:
+    raw_value = input(f"{label} [{default}]: ").strip()
+
+    if not raw_value:
+        return default
+
+    return int(raw_value)
+
+
+def _choose_training_hyperparameters(
+    task_type: str,
+    default_criterion: str,
+) -> Optional[dict[str, Any]]:
+    print()
+    print("HYPERPARAMETERS")
+    print("=" * 80)
+    print("Comma-separated values create multiple candidate experiments.")
+    print("For max_depth use 0/none for an unlimited tree depth.")
+    print()
+
+    try:
+        n_estimators_total = _n_estimators_total()
+
+        if n_estimators_total <= 0:
+            raise ValueError("n_estimators_total must be > 0")
+
+        max_depth_candidates = _parse_max_depth_candidates(
+            input("max_depth candidates [5]: ")
+        )
+
+        default_max_features = ["sqrt"]
+        max_features_candidates = _parse_string_candidates(
+            input("max_features candidates [sqrt] (sqrt/log2/none/0.5/10): "),
+            default=default_max_features,
+            label="max_features_candidates",
+        )
+        _validate_max_features_candidates(max_features_candidates)
+
+        min_samples_split_candidates = _parse_positive_int_list(
+            input("min_samples_split candidates [2]: "),
+            default=[2],
+            label="min_samples_split_candidates",
+            minimum=2,
+        )
+
+        min_samples_leaf_candidates = _parse_positive_int_list(
+            input("min_samples_leaf candidates [1]: "),
+            default=[1],
+            label="min_samples_leaf_candidates",
+            minimum=1,
+        )
+
+        criterion_candidates = _parse_string_candidates(
+            input(f"criterion candidates [{default_criterion}]: "),
+            default=[default_criterion],
+            label="criterion_candidates",
+        )
+        criterion_candidates = [item.strip().lower() for item in criterion_candidates]
+        _validate_criterion_candidates(task_type, criterion_candidates)
+
+        bootstrap = _ask_bool("bootstrap", True)
+        global_random_seed = _ask_int("global_random_seed", 42)
+
+    except Exception as exc:
+        print()
+        print(f"[ERROR] Invalid hyperparameters: {exc}")
+        print()
+        return None
+
+    return {
+        "n_estimators_total": n_estimators_total,
+        "max_depth_candidates": max_depth_candidates,
+        "max_features_candidates": max_features_candidates,
+        "min_samples_split_candidates": min_samples_split_candidates,
+        "min_samples_leaf_candidates": min_samples_leaf_candidates,
+        "criterion_candidates": criterion_candidates,
+        "bootstrap": bootstrap,
+        "global_random_seed": global_random_seed,
+    }
+
 def choose_distributed_training_preset(task_type: str) -> Optional[dict[str, Any]]:
     matching_presets = [
         (key, config)
@@ -571,20 +798,29 @@ def _submit_training_regression():
     if preset is None:
         return
 
-    n_estimators_total = _n_estimators_total()
+    hyperparameters = _choose_training_hyperparameters(
+        task_type="regression",
+        default_criterion=preset["criterion"],
+    )
 
-    if n_estimators_total <= 0:
-        print("INSERT A NUMBER OF USABLE TREE, >0")
+    if hyperparameters is None:
         return
 
     response = submit_training_with_leader_discovery(
         submit_training_regression.main,
         preset["dataset_path"],
-        n_estimators_total,
+        hyperparameters["n_estimators_total"],
         preset["dataset_scenario"],
         preset["leakage_columns"],
         preset["target_column"],
         preset["criterion"],
+        max_depth_candidates=hyperparameters["max_depth_candidates"],
+        max_features_candidates=hyperparameters["max_features_candidates"],
+        min_samples_split_candidates=hyperparameters["min_samples_split_candidates"],
+        min_samples_leaf_candidates=hyperparameters["min_samples_leaf_candidates"],
+        criterion_candidates=hyperparameters["criterion_candidates"],
+        bootstrap=hyperparameters["bootstrap"],
+        global_random_seed=hyperparameters["global_random_seed"],
     )
 
     print_submit_training_response(response)
@@ -596,20 +832,29 @@ def _submit_training_classification():
     if preset is None:
         return
 
-    n_estimators_total = _n_estimators_total()
+    hyperparameters = _choose_training_hyperparameters(
+        task_type="classification",
+        default_criterion=preset["criterion"],
+    )
 
-    if n_estimators_total <= 0:
-        print("INSERT A NUMBER OF USABLE TREE, >0")
+    if hyperparameters is None:
         return
 
     response = submit_training_with_leader_discovery(
         submit_training_classification.main,
         preset["dataset_path"],
-        n_estimators_total,
+        hyperparameters["n_estimators_total"],
         preset["dataset_scenario"],
         preset["leakage_columns"],
         preset["target_column"],
         preset["criterion"],
+        max_depth_candidates=hyperparameters["max_depth_candidates"],
+        max_features_candidates=hyperparameters["max_features_candidates"],
+        min_samples_split_candidates=hyperparameters["min_samples_split_candidates"],
+        min_samples_leaf_candidates=hyperparameters["min_samples_leaf_candidates"],
+        criterion_candidates=hyperparameters["criterion_candidates"],
+        bootstrap=hyperparameters["bootstrap"],
+        global_random_seed=hyperparameters["global_random_seed"],
     )
 
     print_submit_training_response(response)

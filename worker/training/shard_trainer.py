@@ -20,8 +20,11 @@ from worker.training.tree_artifact_writer import TreeArtifactWriter
 from worker.progress.worker_progress_store import WorkerProgressStore
 from worker.utils.io_utils import DataLoader
 
+
 class TrainingCancelled(RuntimeError):
     pass
+
+
 class ShardTrainer:
     """
     Core del training lato worker.
@@ -32,12 +35,12 @@ class ShardTrainer:
     """
 
     def __init__(
-        self,
-        bootstrap_sampler: BootstrapSampler,
-        tree_factory: DecisionTreeFactory,
-        artifact_writer: TreeArtifactWriter,
-        progress_store: WorkerProgressStore,
-        data_loader: DataLoader,
+            self,
+            bootstrap_sampler: BootstrapSampler,
+            tree_factory: DecisionTreeFactory,
+            artifact_writer: TreeArtifactWriter,
+            progress_store: WorkerProgressStore,
+            data_loader: DataLoader,
     ):
         self.bootstrap_sampler = bootstrap_sampler
         self.tree_factory = tree_factory
@@ -77,8 +80,8 @@ class ShardTrainer:
             },
         )
 
-        #4️⃣ Eccezione globale fuori dal loop
-        #Esempio: errore in data loading errore in config
+        # 4️⃣ Eccezione globale fuori dal loop
+        # Esempio: errore in data loading errore in config
         self._ensure_rpc_active(
             context,
             "TrainShard cancelled before task execution",
@@ -139,9 +142,9 @@ class ShardTrainer:
             X: "np.ndarray" = self.data_loader.load_numpy(shard.train_features_uri)
             y: "np.ndarray" = self.data_loader.load_numpy(shard.train_labels_uri)
 
-            #linea aggiunta per adattare la dimensione di y da parquet a sklearn
+            # linea aggiunta per adattare la dimensione di y da parquet a sklearn
             y = y.ravel()
-            
+
             # ----------------------------------------
             # VALIDAZIONE DATASET
             # 1️⃣ Dataset inconsistente o vuoto
@@ -156,8 +159,8 @@ class ShardTrainer:
             if len(X) != len(y):
                 raise ValueError("Feature/label size mismatch")
 
-            #2️⃣tree_count = 0
-            #Caso reale (bug upstream o shard mal formato
+            # 2️⃣tree_count = 0
+            # Caso reale (bug upstream o shard mal formato
             if shard.tree_count == 0:
                 self.progress_store.complete_task(
                     job_id=shard.job_id,
@@ -178,7 +181,6 @@ class ShardTrainer:
                     error_message=None,
                     elapsed_time_seconds=0.0,
                 )
-
 
             # ----------------------------------------
             # Da qui partirà:
@@ -261,6 +263,7 @@ class ShardTrainer:
                         min_samples_split=fc.min_samples_split,
                         min_samples_leaf=fc.min_samples_leaf,
                         max_features=fc.max_features,
+                        criterion=fc.criterion,
                         seed=seed,
                         task_type=task_type
                     )
@@ -349,7 +352,6 @@ class ShardTrainer:
                     del tree
                     gc.collect()
 
-
             # ----------------------------------------
             # FINALIZZAZIONE
             # ----------------------------------------
@@ -425,6 +427,7 @@ class ShardTrainer:
                 error_message=str(exc),
                 elapsed_time_seconds=time.time() - start_time,
             )
+
     def _ensure_rpc_active(self, context, message: str) -> None:
         if context is not None and not context.is_active():
             raise TrainingCancelled(message)

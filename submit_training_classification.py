@@ -15,9 +15,31 @@ def main(
     leakage_columns: Optional[List[str]] = None,
     target_column: str = "diagnosed_diabetes",
     criterion: str = "gini",
+    max_depth_candidates: Optional[List[int]] = None,
+    max_features_candidates: Optional[List[str]] = None,
+    min_samples_split_candidates: Optional[List[int]] = None,
+    min_samples_leaf_candidates: Optional[List[int]] = None,
+    criterion_candidates: Optional[List[str]] = None,
+    bootstrap: bool = True,
+    global_random_seed: int = 42,
 ):
     if leakage_columns is None:
         leakage_columns = []
+
+    if max_depth_candidates is None:
+        max_depth_candidates = [5]
+
+    if max_features_candidates is None:
+        max_features_candidates = ["sqrt"]
+
+    if min_samples_split_candidates is None:
+        min_samples_split_candidates = [2]
+
+    if min_samples_leaf_candidates is None:
+        min_samples_leaf_candidates = [1]
+
+    if criterion_candidates is None:
+        criterion_candidates = [criterion]
 
     channel = grpc.insecure_channel(PrivateIp_Port)
     stub = pbgrpc.CoordinatorServiceStub(channel)
@@ -29,15 +51,15 @@ def main(
         dataset_scenario=dataset_scenario,
         validation_ratio=0.2,
         test_ratio=0.2,
-        bootstrap=True,
-        global_random_seed=42,
+        bootstrap=bootstrap,
+        global_random_seed=global_random_seed,
 
-        max_depth_candidates=[5],
+        max_depth_candidates=max_depth_candidates,
         n_estimators_total=n_estimators_total,
-        max_features_candidates=["sqrt"],
-        min_samples_split_candidates=[2],
-        min_samples_leaf_candidates=[1],
-        criterion_candidates=[criterion],
+        max_features_candidates=max_features_candidates,
+        min_samples_split_candidates=min_samples_split_candidates,
+        min_samples_leaf_candidates=min_samples_leaf_candidates,
+        criterion_candidates=criterion_candidates,
     )
 
     request.leakage_columns.extend(leakage_columns)
@@ -49,8 +71,14 @@ def main(
     print("task_type: classification")
     print("dataset_scenario:", dataset_scenario)
     print("leakage_columns:", leakage_columns)
-    print("criterion:", criterion)
     print("n_estimators_total:", n_estimators_total)
+    print("max_depth_candidates:", max_depth_candidates)
+    print("max_features_candidates:", max_features_candidates)
+    print("min_samples_split_candidates:", min_samples_split_candidates)
+    print("min_samples_leaf_candidates:", min_samples_leaf_candidates)
+    print("criterion_candidates:", criterion_candidates)
+    print("bootstrap:", bootstrap)
+    print("global_random_seed:", global_random_seed)
     print()
 
     response = stub.SubmitTraining(request, timeout=30)
