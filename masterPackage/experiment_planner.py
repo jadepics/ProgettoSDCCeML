@@ -13,7 +13,7 @@ from common.ids import generate_experiment_id
 
 class ExperimentPlanner:
     """
-    Responsabilità:
+    Responsabilità della classe:
     - trasformare una TrainingRequest in una lista di esperimenti candidati
     - costruire ForestConfiguration coerenti
     - assegnare experiment_id deterministici rispetto al job

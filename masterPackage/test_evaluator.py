@@ -52,10 +52,10 @@ class WorkerRegistryLike(Protocol):
 
 class TestEvaluator:
     """
-    Valutazione finale sul test split.
+    classe di valutazione finale sul test split.
 
-    Nuovo flusso scalabile:
-    - il master non invia più X_test dentro gRPC;
+   flusso scalabile:
+    - il master non invia X_test dentro gRPC; (inizialmente lo faceva per implementazione locale)
     - il master invia test_features_uri ai worker;
     - i worker leggono X_test da storage condiviso;
     - i worker salvano predizioni parziali su EFS;

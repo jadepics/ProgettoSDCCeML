@@ -18,7 +18,7 @@ class TaskLeaseManager:
     Nota importante:
     - acquire(...) NON persiste direttamente nel TaskLedger
     - acquire(...) restituisce uno shard con lease_expires_at_ts valorizzato
-    - spetta al chiamante persistire subito il relativo TaskRecord
+    - compito del chiamante persistire subito il relativo TaskRecord
       prima del dispatch al worker
     """
 

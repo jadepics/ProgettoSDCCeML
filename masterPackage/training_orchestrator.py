@@ -31,6 +31,14 @@ class WorkerLike(Protocol):
 
 
 class WorkerRegistryLike(Protocol):
+    """
+       Interfaccia minima del registro worker usata dall’orchestrator.
+
+       L’orchestrator ha bisogno di:
+       - conoscere i worker vivi per lo scheduling;
+       - elencare tutti i worker registrati per risolvere snapshot/heartbeat;
+       - trovare un worker alternativo in caso di retry.
+       """
     def alive_workers(self) -> list[WorkerLike]:
         ...
 
@@ -45,6 +53,27 @@ class WorkerRegistryLike(Protocol):
 
 
 class TrainingOrchestrator:
+    """
+       Coordina l’esecuzione distribuita del training di un esperimento.
+
+       Ruolo architetturale:
+       - opera nel control plane del master;
+       - prende un esperimento e ne pianifica/esegue gli shard sui worker vivi;
+       - aggiorna ledger e repository applicativi;
+       - gestisce lease, retry e recovery incrementale degli alberi mancanti;
+       - raccoglie gli artifact finali della foresta.
+
+       Proprietà importanti:
+       - leader-only: l’orchestrazione può avvenire solo sul master leader;
+       - durable-progress: il progresso reale è ricostruito da TaskLedger
+         e artifact persistiti, non solo dallo stato in memoria;
+       - minimal-recovery: in caso di fallimento non rifà tutta la foresta,
+         ma solo gli alberi ancora mancanti;
+       - attempt-aware: task e retry vengono distinti tramite attempt_id.
+
+       Questa classe non addestra direttamente gli alberi:
+       delega l’esecuzione ai worker tramite worker_client.
+       """
     def __init__(
         self,
         leadership_guard,
@@ -60,6 +89,28 @@ class TrainingOrchestrator:
         worker_heartbeat_monitor=None,
         recovery_planner=None,
     ) -> None:
+        """
+               Inizializza l’orchestrator con tutti i servizi collaboratori.
+
+               Args:
+                   leadership_guard: impedisce che un follower esegua operazioni
+                       di orchestrazione leader-only.
+                   worker_registry: sorgente dei worker disponibili e candidati al retry.
+                   task_ledger: stato persistito dei task/shard e delle attempt.
+                   job_repository: stato persistito di job ed esperimenti.
+                   shard_planner: costruisce shard iniziali e shard di recovery.
+                   worker_client: client RPC verso i worker.
+                   lease_timeout_seconds: durata della lease assegnata a uno shard.
+                   max_parallel_shards: limite opzionale al parallelismo locale del master.
+                   retry_policy: politica di retry per shard falliti.
+                   task_lease_manager: componente che assegna/rilascia lease.
+                   worker_heartbeat_monitor: monitor opzionale per filtrare i worker vivi.
+                   recovery_planner: planner opzionale che decide recovery mirato.
+
+               Nota:
+                   se max_parallel_shards non è specificato, il parallelismo effettivo
+                   viene limitato dal numero di worker vivi e dal numero di shard pianificati.
+               """
         if max_parallel_shards is not None and max_parallel_shards <= 0:
             raise ValueError("max_parallel_shards must be > 0 when provided")
 
@@ -86,6 +137,42 @@ class TrainingOrchestrator:
         forest_config: ForestConfiguration,
         metrics_collector: Optional[ScalabilityMetricsCollector] = None,
     ) -> list[TreeArtifactMetadata]:
+        """
+               Esegue completamente il training distribuito di un esperimento.
+
+               Flusso generale:
+               1. verifica che il master corrente sia leader;
+               2. carica job e dataset preparato;
+               3. inizializza o recupera l’esperimento;
+               4. entra in una sequenza di recovery rounds;
+               5. a ogni round ricostruisce il progresso durevole della foresta;
+               6. pianifica shard iniziali o shard di recovery;
+               7. dispatcha gli shard ai worker vivi;
+               8. aggiorna ledger, lease, progress e artifact;
+               9. termina quando tutti gli alberi attesi risultano completati.
+
+               Strategia di recovery:
+               il completamento non viene deciso solo dai risultati RPC del round corrente,
+               ma dall’unione di:
+               - alberi completati nel TaskLedger;
+               - metadata persistiti degli alberi;
+               - presenza effettiva degli artifact sullo storage condiviso.
+
+               Questo rende il training robusto rispetto a:
+               - crash di worker;
+               - risultati RPC persi;
+               - failover del master leader;
+               - retry parziali con attempt diverse.
+
+               Returns:
+                   Lista ordinata degli artifact finali degli alberi della foresta.
+
+               Raises:
+                   ValueError: se il job non esiste o non ha dataset preparato.
+                   RuntimeError: se non ci sono worker vivi, se non si riescono
+                       a pianificare shard utili, o se si supera il numero massimo
+                       di recovery rounds senza completare la foresta.
+               """
         self.leadership_guard.require_leader()
 
         experiment_started_at = time.time()
@@ -125,6 +212,8 @@ class TrainingOrchestrator:
         deferred_sleep_seconds = float(
             os.getenv("TRAINING_RECOVERY_DEFERRED_SLEEP_SECONDS", "5")
         )
+        # Cache locale degli artifact già osservati come COMPLETED.
+        # Non è sorgente di verità: la verità resta sul ledger + storage condiviso.
 
         artifact_by_tree_id: dict[str, TreeArtifactMetadata] = {}
         idle_rounds = 0
@@ -133,6 +222,8 @@ class TrainingOrchestrator:
         for recovery_round in range(1, max_recovery_rounds + 1):
             round_started_at = time.time()
 
+            # Ogni round ricontrolla la leadership, così un follower non continua
+            # a orchestrare dopo una nuova election.
             self.leadership_guard.require_leader()
 
             self._metrics_event(
@@ -1105,6 +1196,21 @@ class TrainingOrchestrator:
         shard: TrainingShard,
         metrics_collector: Optional[ScalabilityMetricsCollector] = None,
     ) -> tuple[TrainingShard, ShardTrainingResult]:
+        """
+               Esegue un singolo tentativo RPC di training verso un worker.
+
+               Sequenza:
+               1. acquisisce la lease sullo shard;
+               2. salva il task come PENDING;
+               3. marca il task RUNNING nel ledger;
+               4. invoca l’RPC train_shard sul worker;
+               5. normalizza il risultato ricevuto;
+               6. ritorna shard leased + risultato normalizzato.
+
+               Se l’RPC fallisce con eccezione, il metodo non propaga direttamente
+               l’errore al chiamante: lo converte in uno ShardTrainingResult fallito,
+               così la logica di retry può trattarlo in modo uniforme.
+               """
         leased_shard = self.task_lease_manager.acquire(shard)
 
         self._metrics_event(
@@ -1457,7 +1563,19 @@ class TrainingOrchestrator:
             experiment_id=experiment_id,
             forest_config=forest_config,
         )
+        """
+              Restituisce gli alberi completati in modo durevole.
 
+              Un tree_id viene considerato realmente completato se:
+              - è atteso dalla foresta corrente;
+              - risulta completato nel ledger, oppure
+              - esiste metadata COMPLETED coerente con un artifact fisico esistente.
+
+              Questo metodo protegge da casi in cui:
+              - il ledger sia stato aggiornato ma l’artifact non esista;
+              - l’artifact esista ma il ledger non sia stato ancora riallineato;
+              - il master riparta dopo crash e debba ricostruire il progresso.
+              """
         expected_set = set(expected_tree_ids)
 
         completed = {
@@ -1525,6 +1643,13 @@ class TrainingOrchestrator:
             experiment_id=experiment_id,
             forest_config=forest_config,
         )
+        """
+             Calcola gli alberi mancanti rispetto alla foresta attesa.
+
+             È uno dei metodi chiave del recovery incrementale:
+             l’orchestrator non ragiona per “shard interi da rifare”, ma per
+             tree_id deterministici ancora non completati.
+             """
 
         completed_tree_ids = set(
             self._durable_completed_tree_ids(
@@ -1553,6 +1678,14 @@ class TrainingOrchestrator:
             job_id=job_id,
             experiment_id=experiment_id,
         )
+        """
+           Pianifica gli shard da eseguire nel round corrente.
+
+           Due casi:
+           - prima pianificazione dell’esperimento: viene costruito il piano completo;
+           - recovery/pianificazione incrementale: vengono creati shard solo
+             per gli alberi mancanti.
+             """
 
         attempt_id = (
             1
@@ -1629,6 +1762,14 @@ class TrainingOrchestrator:
         worker_id: str,
         error_message: str,
     ) -> ShardTrainingResult:
+        """
+             Converte un fallimento RPC/locale in uno ShardTrainingResult coerente.
+
+             Così l’intera pipeline di retry può trattare allo stesso modo:
+             - eccezioni di trasporto;
+             - errori applicativi del worker;
+             - fallimenti parziali o completi.
+             """
         failed_tree_ids = self._tree_ids_for_shard(shard)
 
         return ShardTrainingResult(
@@ -1652,7 +1793,18 @@ class TrainingOrchestrator:
         result: ShardTrainingResult,
     ) -> ShardTrainingResult:
         completed_tree_ids = list(dict.fromkeys(result.completed_tree_ids))
+        """
+                Normalizza il risultato di training ricevuto dal worker.
 
+                Operazioni svolte:
+                - deduplica completed_tree_ids e failed_tree_ids;
+                - ricostruisce completed_tree_ids dagli artifact, se assenti;
+                - ricostruisce failed_tree_ids dagli alberi dello shard, se falliti ma non esplicitati;
+                - forza success=True solo se non restano tree falliti.
+
+                Questo rende i risultati worker robusti rispetto a implementazioni
+                parziali o risposte incomplete.
+                """
         if not completed_tree_ids and result.tree_artifacts:
             completed_tree_ids = [
                 artifact.tree_id
@@ -1692,6 +1844,16 @@ class TrainingOrchestrator:
         shard: TrainingShard,
         retry_worker: WorkerLike,
     ) -> TrainingShard:
+        """
+               Crea un nuovo shard di retry riusando il lavoro originario.
+
+               Cambiano solo:
+               - worker assegnato;
+               - attempt_id.
+
+               Il contenuto logico dello shard resta lo stesso, così il retry
+               mantiene identità applicativa coerente.
+               """
         return TrainingShard(
             task_id=shard.task_id,
             attempt_id=shard.attempt_id + 1,
@@ -1865,7 +2027,7 @@ class TrainingOrchestrator:
         )
 
         return max_workers
-    
+
     def _log_alive_workers(
         self,
         alive_workers: list[WorkerLike],

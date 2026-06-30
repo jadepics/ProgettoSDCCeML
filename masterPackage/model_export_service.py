@@ -32,7 +32,7 @@ class ModelExportResult:
 
 class ModelExportService:
     """
-    Costruisce un pacchetto scaricabile del modello finale.
+    Costruisce un pacchetto scaricabile del modello finale. implementazione opzionale per il download del modello allenato
 
     Formato corrente:
     - Pickle/Joblib: zip contenente model.joblib, manifest.json, metadata.json

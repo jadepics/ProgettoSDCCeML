@@ -97,7 +97,7 @@ class TrainingJobService:
     ) -> None:
         """
         Riprende un job già esistente dopo crash master / restart / failover.
-
+        possibile richiederlo da cli per job fallito
         Non deve:
         - ricreare il job;
         - rifare split/preprocessing se prepared_dataset esiste;

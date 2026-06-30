@@ -46,8 +46,8 @@ class InferenceCoordinator:
     """
     Inferenza distribuita tree-parallel.
 
-    Nuovo flusso scalabile:
-    - il client/master non invia più DenseMatrix dentro gRPC;
+   flusso per inferenza scalabile:
+    - il client/master non invia DenseMatrix dentro gRPC;
     - SubmitInference riceve features_uri;
     - i worker leggono le feature da storage condiviso;
     - ogni worker valuta un sottoinsieme di alberi sull'intero batch;

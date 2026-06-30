@@ -15,15 +15,15 @@ class ShardPlanner:
     """
     Responsabilità:
     - dividere una foresta candidata in shard assegnabili
-    - scegliere una distribuzione deterministica sugli worker vivi
+    - scegliere una distribuzione deterministica sui worker vivi
     - costruire TrainingShard coerenti con il layout condiviso
 
     Evoluzione restart-safe:
-    - plan(...) può pianificare l'intera foresta
-    - oppure solo i tree_id mancanti, comprimendoli in range contigui
+    - funzione plan(...) può pianificare l'intera foresta
+    - oppure solo i gli alberi mancanti dall'id, comprimendoli in range contigui
 
     Nota:
-    - gli worker sono ordinati per worker_id
+    - i worker sono ordinati per worker_id
     - gli shard sono deterministici
     - i task_id restano deterministici perché dipendono da experiment_id,
       tree_start_index e tree_count
