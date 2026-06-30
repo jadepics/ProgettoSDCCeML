@@ -41,7 +41,7 @@ def load_env_file(path: Path) -> None:
 
             os.environ.setdefault(key, value)
 
-ARTIFACT_ROOT = Path("/mnt/efs/gp_artifacts").resolve()
+ARTIFACT_ROOT = Path(os.getenv("SHARED_STORAGE_ROOT", "/mnt/efs/gp_artifacts")).resolve()
 dataset_path = Path(ARTIFACT_ROOT / "datasets" / "diabetes_dataset.csv").resolve()
 
 DATASETS_ROOT = ARTIFACT_ROOT / "datasets"
@@ -233,7 +233,7 @@ DEFAULT_LEAKAGE_COLUMNS = ["diabetes_stage"]
 # MASTER LEADER DISCOVERY
 # =========================================================
 PROJECT_ROOT = Path(__file__).resolve().parent
-load_env_file(PROJECT_ROOT / ".env.client")
+load_env_file(PROJECT_ROOT / ".env.master")
 
 def load_master_addresses() -> list[str]:
     raw_seeds = os.getenv("MASTER_SEEDS", "").strip()
@@ -248,11 +248,37 @@ def load_master_addresses() -> list[str]:
         if addresses:
             return list(dict.fromkeys(addresses))
 
-    master_host = os.getenv("MASTER_HOST", DEFAULT_MASTER_HOST).strip()
-    master_port = os.getenv("MASTER_PORT", DEFAULT_MASTER_PORT).strip()
+    deployment_mode = os.getenv(
+        "MASTER_DEPLOYMENT_MODE",
+        "single-host",
+    ).strip().lower()
 
-    return [f"{master_host}:{master_port}"]
+    master1_ip = os.getenv("MASTER1_PRIVATE_IP", "127.0.0.1").strip()
+    master2_ip = os.getenv("MASTER2_PRIVATE_IP", master1_ip).strip()
+    master3_ip = os.getenv("MASTER3_PRIVATE_IP", master1_ip).strip()
 
+    master1_port = os.getenv("MASTER1_PORT", "50051").strip()
+    master2_port = os.getenv("MASTER2_PORT", "50052").strip()
+    master3_port = os.getenv("MASTER3_PORT", "50053").strip()
+
+    if deployment_mode == "single-host":
+        return [
+            f"{master1_ip}:{master1_port}",
+            f"{master1_ip}:{master2_port}",
+            f"{master1_ip}:{master3_port}",
+        ]
+
+    if deployment_mode == "multi-host":
+        return [
+            f"{master1_ip}:{master1_port}",
+            f"{master2_ip}:{master2_port}",
+            f"{master3_ip}:{master3_port}",
+        ]
+
+    raise ValueError(
+        f"MASTER_DEPLOYMENT_MODE non valido: {deployment_mode}. "
+        "Valori ammessi: single-host, multi-host"
+    )
 
 def is_not_leader_message(message: str) -> bool:
     normalized = str(message or "").lower()
