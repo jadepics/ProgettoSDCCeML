@@ -517,6 +517,7 @@ def plot_duration(df: pd.DataFrame) -> None:
             format_minutes_seconds(y),
             ha="center",
             va="center",
+            color="#e6e6e6",
             fontsize=8,
             rotation=90,
             fontweight="bold",

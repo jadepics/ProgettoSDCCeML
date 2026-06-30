@@ -1,0 +1,579 @@
+Index: .gitignore
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>/performance_evaluation/distributed_jobs/\r\n/Dataset/\r\n\r\n/.env.master\r\n/.env.worker\r\n/runtime-env/\r\n\r\n/logs/\r\n/tmp/
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.gitignore b/.gitignore
+--- a/.gitignore	(revision 93ffd781788d18dc5eaa2e619291eb34c4dd913f)
++++ b/.gitignore	(date 1782814512784)
+@@ -1,4 +1,3 @@
+-/performance_evaluation/distributed_jobs/
+ /Dataset/
+ 
+ /.env.master
+Index: performance_evaluation/analyze_scalability.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import csv\r\nimport json\r\nimport math\r\nfrom asyncio.windows_events import NULL\r\nfrom pathlib import Path\r\nfrom datetime import datetime\r\nfrom typing import Any, Optional\r\n\r\nimport pandas as pd\r\nimport matplotlib.pyplot as plt\r\n\r\n\r\nBASE_DIR = Path(__file__).resolve().parent\r\nRUNS_CSV = BASE_DIR / \"scalability_runs.csv\"\r\nJOBS_DIR = BASE_DIR / \"distributed_jobs\"\r\nOUTPUT_DIR = BASE_DIR / \"plots\"\r\n\r\nOUTPUT_DIR.mkdir(parents=True, exist_ok=True)\r\n\r\n\r\ndef load_json(path: Path) -> dict[str, Any]:\r\n    if not path.exists():\r\n        print(f\"[WARN] File mancante: {path}\")\r\n        return {}\r\n\r\n    with path.open(\"r\", encoding=\"utf-8\") as f:\r\n        return json.load(f)\r\n\r\n\r\ndef load_jsonl(path: Path) -> list[dict[str, Any]]:\r\n    if not path.exists():\r\n        print(f\"[WARN] File mancante: {path}\")\r\n        return []\r\n\r\n    events = []\r\n    with path.open(\"r\", encoding=\"utf-8\") as f:\r\n        for line in f:\r\n            line = line.strip()\r\n            if not line:\r\n                continue\r\n            try:\r\n                events.append(json.loads(line))\r\n            except json.JSONDecodeError:\r\n                pass\r\n\r\n    return events\r\n\r\n\r\ndef find_first_numeric(obj: Any, candidate_keys: list[str]) -> Optional[float]:\r\n    \"\"\"\r\n    Cerca ricorsivamente il primo valore numerico associato a una delle chiavi candidate.\r\n    Serve perché i JSON possono avere nomi leggermente diversi.\r\n    \"\"\"\r\n    if isinstance(obj, dict):\r\n        for key, value in obj.items():\r\n            if key in candidate_keys and isinstance(value, (int, float)):\r\n                return float(value)\r\n\r\n        for value in obj.values():\r\n            result = find_first_numeric(value, candidate_keys)\r\n            if result is not None:\r\n                return result\r\n\r\n    elif isinstance(obj, list):\r\n        for item in obj:\r\n            result = find_first_numeric(item, candidate_keys)\r\n            if result is not None:\r\n                return result\r\n\r\n    return None\r\n\r\n\r\ndef parse_timestamp(value: Any) -> Optional[datetime]:\r\n    if not isinstance(value, str):\r\n        return None\r\n\r\n    value = value.strip()\r\n    if not value:\r\n        return None\r\n\r\n    # Gestione ISO con Z finale\r\n    value = value.replace(\"Z\", \"+00:00\")\r\n\r\n    try:\r\n        return datetime.fromisoformat(value)\r\n    except ValueError:\r\n        return None\r\n\r\n\r\ndef extract_event_timestamp(event: dict[str, Any]) -> Optional[datetime]:\r\n    for key in [\r\n        \"timestamp\",\r\n        \"created_at\",\r\n        \"time\",\r\n        \"event_time\",\r\n        \"recorded_at\",\r\n        \"started_at\",\r\n        \"completed_at\",\r\n    ]:\r\n        ts = parse_timestamp(event.get(key))\r\n        if ts is not None:\r\n            return ts\r\n    return None\r\n\r\n\r\ndef infer_duration_from_events(events: list[dict[str, Any]]) -> Optional[float]:\r\n    timestamps = []\r\n\r\n    for event in events:\r\n        ts = extract_event_timestamp(event)\r\n        if ts is not None:\r\n            timestamps.append(ts)\r\n\r\n    if len(timestamps) < 2:\r\n        return None\r\n\r\n    start = min(timestamps)\r\n    end = max(timestamps)\r\n\r\n    duration = (end - start).total_seconds()\r\n    if duration <= 0:\r\n        return None\r\n\r\n    return duration\r\n\r\n\r\ndef count_failed_attempts(events: list[dict[str, Any]]) -> int:\r\n    count = 0\r\n\r\n    for event in events:\r\n        text = json.dumps(event).lower()\r\n        if (\r\n            \"attempt failed\" in text\r\n            or \"attempt_failed\" in text\r\n            or \"shard_failed\" in text\r\n            or \"deadline_exceeded\" in text\r\n            or \"unavailable\" in text\r\n            or \"stream removed\" in text\r\n            or \"oom\" in text\r\n        ):\r\n            count += 1\r\n\r\n    return count\r\n\r\n\r\ndef count_retry_events(events: list[dict[str, Any]]) -> int:\r\n    count = 0\r\n\r\n    for event in events:\r\n        text = json.dumps(event).lower()\r\n        if \"retry\" in text:\r\n            count += 1\r\n\r\n    return count\r\n\r\n\r\ndef extract_completed_trees(\r\n    summary: dict[str, Any],\r\n    experiment_record: dict[str, Any],\r\n    task_ledger: dict[str, Any],\r\n) -> Optional[int]:\r\n    counters = summary.get(\"counters\", {})\r\n\r\n    if isinstance(counters, dict):\r\n        value = counters.get(\"completed_tree_count\")\r\n        if isinstance(value, (int, float)):\r\n            return int(value)\r\n\r\n    value = summary.get(\"completed_tree_count\")\r\n    if isinstance(value, (int, float)):\r\n        return int(value)\r\n\r\n    value = find_first_numeric(\r\n        summary,\r\n        [\r\n            \"completed_tree_count\",\r\n            \"completed_trees\",\r\n            \"trees_completed\",\r\n            \"n_completed_trees\",\r\n        ],\r\n    )\r\n    if value is not None:\r\n        return int(value)\r\n\r\n    value = find_first_numeric(\r\n        experiment_record,\r\n        [\r\n            \"completed_tree_count\",\r\n            \"completed_trees\",\r\n            \"trees_completed\",\r\n            \"n_completed_trees\",\r\n        ],\r\n    )\r\n    if value is not None:\r\n        return int(value)\r\n\r\n    value = find_first_numeric(\r\n        task_ledger,\r\n        [\r\n            \"completed_tree_count\",\r\n            \"completed_trees\",\r\n            \"trees_completed\",\r\n            \"n_completed_trees\",\r\n        ],\r\n    )\r\n    if value is not None:\r\n        return int(value)\r\n\r\n    return None\r\n\r\n\r\ndef extract_expected_trees(\r\n    summary: dict[str, Any],\r\n    experiment_record: dict[str, Any],\r\n) -> Optional[int]:\r\n    value = summary.get(\"n_estimators_total\")\r\n    if isinstance(value, (int, float)):\r\n        return int(value)\r\n\r\n    value = summary.get(\"expected_tree_count\")\r\n    if isinstance(value, (int, float)):\r\n        return int(value)\r\n\r\n    value = find_first_numeric(\r\n        summary,\r\n        [\r\n            \"n_estimators_total\",\r\n            \"expected_tree_count\",\r\n            \"expected_trees\",\r\n            \"total_trees\",\r\n            \"n_estimators\",\r\n            \"tree_count\",\r\n        ],\r\n    )\r\n    if value is not None:\r\n        return int(value)\r\n\r\n    value = find_first_numeric(\r\n        experiment_record,\r\n        [\r\n            \"n_estimators_total\",\r\n            \"expected_tree_count\",\r\n            \"expected_trees\",\r\n            \"total_trees\",\r\n            \"n_estimators\",\r\n            \"tree_count\",\r\n        ],\r\n    )\r\n    if value is not None:\r\n        return int(value)\r\n\r\n    return None\r\n\r\n\r\n\r\ndef extract_duration_seconds(\r\n    summary: dict[str, Any],\r\n    job_record: dict[str, Any],\r\n    experiment_record: dict[str, Any],\r\n    events: list[dict[str, Any]],\r\n) -> Optional[float]:\r\n    \"\"\"\r\n    Durata principale usata per il confronto end-to-end.\r\n    Nel nostro progetto il campo corretto è summary[\"total_time_seconds\"].\r\n    \"\"\"\r\n\r\n    # Caso principale del tuo progetto\r\n    value = summary.get(\"total_time_seconds\")\r\n    if isinstance(value, (int, float)) and value > 0:\r\n        return float(value)\r\n\r\n    # Fallback: solo tempo di training distribuito\r\n    value = summary.get(\"training_time_seconds\")\r\n    if isinstance(value, (int, float)) and value > 0:\r\n        return float(value)\r\n\r\n    candidates = [\r\n        \"total_time_seconds\",\r\n        \"training_time_seconds\",\r\n        \"total_training_seconds\",\r\n        \"total_duration_seconds\",\r\n        \"duration_seconds\",\r\n        \"elapsed_seconds\",\r\n        \"wall_clock_seconds\",\r\n        \"wall_time_seconds\",\r\n        \"job_duration_seconds\",\r\n        \"makespan_seconds\",\r\n        \"runtime_seconds\",\r\n        \"total_wall_time_seconds\",\r\n        \"fit_time_seconds\",\r\n        \"execution_time_seconds\",\r\n        \"elapsed_time_seconds\",\r\n    ]\r\n\r\n    for source in [summary, job_record, experiment_record]:\r\n        value = find_first_numeric(source, candidates)\r\n        if value is not None and value > 0:\r\n            return float(value)\r\n\r\n    millisecond_candidates = [\r\n        \"duration_ms\",\r\n        \"elapsed_ms\",\r\n        \"wall_time_ms\",\r\n        \"runtime_ms\",\r\n        \"training_duration_ms\",\r\n        \"total_duration_ms\",\r\n    ]\r\n\r\n    for source in [summary, job_record, experiment_record]:\r\n        value = find_first_numeric(source, millisecond_candidates)\r\n        if value is not None and value > 0:\r\n            return float(value) / 1000.0\r\n\r\n    return infer_duration_from_events(events)\r\n\r\n\r\ndef load_runs() -> list[dict[str, str]]:\r\n    with RUNS_CSV.open(\"r\", encoding=\"utf-8-sig\", newline=\"\") as f:\r\n        return list(csv.DictReader(f))\r\n\r\n\r\ndef analyze() -> pd.DataFrame:\r\n    rows = []\r\n\r\n    for run in load_runs():\r\n        include = run.get(\"include\", \"true\").strip().lower()\r\n        if include not in [\"true\", \"1\", \"yes\", \"y\", \"si\", \"sì\"]:\r\n            continue\r\n\r\n        label = run[\"label\"].strip()\r\n        job_id = run[\"job_id\"].strip()\r\n\r\n        if not job_id or job_id == \"...\":\r\n            continue\r\n\r\n        instances = int(run[\"instances\"])\r\n        workers_per_instance = int(run[\"workers_per_instance\"])\r\n        total_workers = int(run[\"total_workers\"])\r\n\r\n        job_dir = JOBS_DIR / job_id\r\n        exp_id = f\"{job_id}_exp_000\"\r\n\r\n        job_record_path = job_dir / \"job_record.json\"\r\n        task_ledger_path = job_dir / \"task_ledger.json\"\r\n        summary_path = job_dir / \"metrics\" / \"scalability_summary.json\"\r\n        events_path = job_dir / \"metrics\" / \"scalability_events.jsonl\"\r\n        experiment_record_path = job_dir / \"experiments\" / exp_id / \"experiment_record.json\"\r\n\r\n        job_record = load_json(job_record_path)\r\n        task_ledger = load_json(task_ledger_path)\r\n        summary = load_json(summary_path)\r\n        experiment_record = load_json(experiment_record_path)\r\n        events = load_jsonl(events_path)\r\n\r\n        duration_seconds = extract_duration_seconds(\r\n            summary=summary,\r\n            job_record=job_record,\r\n            experiment_record=experiment_record,\r\n            events=events,\r\n        )\r\n\r\n        completed_trees = extract_completed_trees(\r\n            summary=summary,\r\n            experiment_record=experiment_record,\r\n            task_ledger=task_ledger,\r\n        )\r\n\r\n        expected_trees = extract_expected_trees(\r\n            summary=summary,\r\n            experiment_record=experiment_record,\r\n        )\r\n\r\n        if expected_trees is None:\r\n            expected_trees = 400\r\n\r\n        if completed_trees is None:\r\n            completed_trees = expected_trees\r\n\r\n        training_time_seconds = summary.get(\"training_time_seconds\")\r\n        if not isinstance(training_time_seconds, (int, float)):\r\n            training_time_seconds = None\r\n\r\n        total_time_seconds = summary.get(\"total_time_seconds\")\r\n        if not isinstance(total_time_seconds, (int, float)):\r\n            total_time_seconds = duration_seconds\r\n\r\n        throughput = summary.get(\"throughput_trees_per_second\")\r\n        if not isinstance(throughput, (int, float)):\r\n            throughput = None\r\n            if duration_seconds is not None and duration_seconds > 0:\r\n                throughput = completed_trees / duration_seconds\r\n\r\n        failed_attempts = count_failed_attempts(events)\r\n        retry_events = count_retry_events(events)\r\n\r\n        rows.append(\r\n            {\r\n                \"label\": label,\r\n                \"job_id\": job_id,\r\n                \"instances\": instances,\r\n                \"workers_per_instance\": workers_per_instance,\r\n                \"total_workers\": total_workers,\r\n                \"expected_trees\": expected_trees,\r\n                \"completed_trees\": completed_trees,\r\n                \"duration_seconds\": duration_seconds,\r\n                \"duration_minutes\": None if duration_seconds is None else duration_seconds / 60,\r\n                \"total_time_seconds\": total_time_seconds,\r\n                \"training_time_seconds\": training_time_seconds,\r\n                \"training_time_minutes\": None if training_time_seconds is None else training_time_seconds / 60,\r\n                \"throughput_trees_per_second\": throughput,\r\n                \"failed_attempts\": failed_attempts,\r\n                \"retry_events\": retry_events,\r\n                \"notes\": run.get(\"notes\", \"\"),\r\n            }\r\n        )\r\n\r\n    df = pd.DataFrame(rows)\r\n\r\n    if df.empty:\r\n        return df\r\n\r\n    df = df.sort_values(\r\n        by=[\"total_workers\", \"instances\", \"workers_per_instance\", \"label\"]\r\n    ).reset_index(drop=True)\r\n\r\n    # Baseline: preferisce 1x1, altrimenti usa il job più lento/piccolo disponibile\r\n    baseline_rows = df[df[\"label\"] == \"1x1\"]\r\n\r\n    if not baseline_rows.empty and not pd.isna(baseline_rows.iloc[0][\"duration_seconds\"]):\r\n        baseline_time = float(baseline_rows.iloc[0][\"duration_seconds\"])\r\n    else:\r\n        baseline_time = float(df[\"duration_seconds\"].dropna().max())\r\n\r\n    df[\"speedup\"] = baseline_time / df[\"duration_seconds\"]\r\n    df[\"efficiency\"] = df[\"speedup\"] / df[\"total_workers\"]\r\n\r\n    return df\r\n\r\n\r\ndef save_results(df: pd.DataFrame) -> None:\r\n    output_csv = BASE_DIR / \"scalability_results.csv\"\r\n    df.to_csv(output_csv, index=False, encoding=\"utf-8\")\r\n    print(f\"[OK] Risultati salvati in: {output_csv}\")\r\n\r\ndef add_grouped_bar_positions(\r\n    plot_df: pd.DataFrame,\r\n        spacing: float,\r\n        group_column: str = \"total_workers\",\r\n) -> pd.DataFrame:\r\n    \"\"\"\r\n    Aggiunge una colonna x_position per disegnare barre affiancate\r\n    quando più configurazioni hanno lo stesso numero totale di worker.\r\n    \"\"\"\r\n    plot_df = plot_df.copy()\r\n\r\n    group_sizes = plot_df.groupby(group_column)[\"label\"].transform(\"count\")\r\n    group_index = plot_df.groupby(group_column).cumcount()\r\n\r\n    plot_df[\"x_position\"] = (\r\n        plot_df[group_column]\r\n        + (group_index - (group_sizes - 1) / 2) * spacing\r\n    )\r\n\r\n    return plot_df\r\n\r\ndef format_minutes_seconds(minutes: float) -> str:\r\n    total_seconds = int(round(float(minutes) * 60))\r\n    mins = total_seconds // 60\r\n    secs = total_seconds % 60\r\n    return f\"{mins}m {secs:02d}s\"\r\n\r\ndef plot_duration(df: pd.DataFrame) -> None:\r\n    plot_df = df.dropna(subset=[\"duration_minutes\", \"total_workers\"]).copy()\r\n\r\n    if plot_df.empty:\r\n        print(\"[WARN] Grafico tempo non generato: nessuna durata valida trovata.\")\r\n        return\r\n\r\n    plot_df[\"total_workers\"] = pd.to_numeric(plot_df[\"total_workers\"]).astype(int)\r\n    plot_df[\"duration_minutes\"] = pd.to_numeric(plot_df[\"duration_minutes\"])\r\n\r\n    plot_df = plot_df.sort_values(\r\n        by=[\"total_workers\", \"instances\", \"workers_per_instance\", \"label\"]\r\n    ).reset_index(drop=True)\r\n\r\n    bar_width = 0.40\r\n\r\n    plot_df = add_grouped_bar_positions(plot_df, bar_width+0.10)\r\n\r\n    plt.figure(figsize=(13, 6))\r\n\r\n    plt.bar(\r\n        plot_df[\"x_position\"],\r\n        plot_df[\"duration_minutes\"],\r\n        width=bar_width,\r\n    )\r\n\r\n    y_max = plot_df[\"duration_minutes\"].max()\r\n    label_offset = y_max * 0.015\r\n\r\n    for _, row in plot_df.iterrows():\r\n        x = row[\"x_position\"]\r\n        y = row[\"duration_minutes\"]\r\n\r\n        plt.text(\r\n            x,\r\n            y + label_offset,\r\n            row[\"label\"],\r\n            ha=\"center\",\r\n            va=\"bottom\",\r\n            fontsize=9,\r\n        )\r\n\r\n        plt.text(\r\n            x,\r\n            y * 0.5,\r\n            format_minutes_seconds(y),\r\n            ha=\"center\",\r\n            va=\"center\",\r\n            fontsize=8,\r\n            rotation=90,\r\n            fontweight=\"bold\",\r\n        )\r\n\r\n    worker_ticks = sorted(plot_df[\"total_workers\"].unique())\r\n\r\n    plt.xticks(\r\n        worker_ticks,\r\n        [str(worker) for worker in worker_ticks],\r\n    )\r\n\r\n    plt.xlabel(\"Numero totale di worker\")\r\n    plt.ylabel(\"Tempo totale training (minuti)\")\r\n    plt.title(\"Tempo di training al crescere del numero di worker\")\r\n    plt.ylim(0, y_max * 1.15)\r\n    plt.grid(axis=\"y\", alpha=0.25)\r\n    plt.tight_layout()\r\n\r\n    output = OUTPUT_DIR / \"training_time_by_workers_grouped.png\"\r\n    plt.savefig(output, dpi=200)\r\n    plt.close()\r\n\r\n    print(f\"[OK] Grafico salvato in: {output}\")\r\n\r\ndef plot_speedup(df: pd.DataFrame) -> None:\r\n    plot_df = df.dropna(subset=[\"speedup\", \"total_workers\"]).copy()\r\n\r\n    if plot_df.empty:\r\n        print(\"[WARN] Grafico speedup non generato: nessun valore valido trovato.\")\r\n        return\r\n\r\n    plot_df[\"total_workers\"] = pd.to_numeric(plot_df[\"total_workers\"]).astype(int)\r\n    plot_df[\"speedup\"] = pd.to_numeric(plot_df[\"speedup\"])\r\n\r\n    plot_df = plot_df.sort_values(\r\n        by=[\"total_workers\", \"instances\", \"workers_per_instance\", \"label\"]\r\n    ).reset_index(drop=True)\r\n\r\n    bar_width = 0.40\r\n\r\n    plot_df = add_grouped_bar_positions(plot_df, bar_width+0.10)\r\n\r\n    plt.figure(figsize=(13, 6))\r\n\r\n    plt.bar(\r\n        plot_df[\"x_position\"],\r\n        plot_df[\"speedup\"],\r\n        width=bar_width,\r\n        label=\"Speedup reale\",\r\n    )\r\n\r\n    y_max = plot_df[\"speedup\"].max()\r\n    label_offset = y_max * 0.02\r\n\r\n    for _, row in plot_df.iterrows():\r\n        x = row[\"x_position\"]\r\n        y = row[\"speedup\"]\r\n\r\n        plt.text(\r\n            x,\r\n            y + label_offset,\r\n            row[\"label\"],\r\n            ha=\"center\",\r\n            va=\"bottom\",\r\n            fontsize=9,\r\n        )\r\n\r\n        plt.text(\r\n            x,\r\n            y * 0.5,\r\n            f\"{y:.2f}x\",\r\n            ha=\"center\",\r\n            va=\"center\",\r\n            fontsize=8,\r\n            rotation=90,\r\n            fontweight=\"bold\",\r\n        )\r\n\r\n    worker_ticks = sorted(plot_df[\"total_workers\"].unique())\r\n\r\n    plt.xticks(\r\n        worker_ticks,\r\n        [str(worker) for worker in worker_ticks],\r\n    )\r\n\r\n    # Linea ideale: speedup = numero worker.\r\n    # È utile come riferimento teorico.\r\n    ideal_x = worker_ticks\r\n    ideal_y = worker_ticks\r\n\r\n    plt.plot(\r\n        ideal_x,\r\n        ideal_y,\r\n        linestyle=\"--\",\r\n        linewidth=1,\r\n        label=\"Speedup ideale\",\r\n    )\r\n\r\n    plt.xlabel(\"Numero totale di worker\")\r\n    plt.ylabel(\"Speedup\")\r\n    plt.title(\"Speedup rispetto alla baseline locale\")\r\n    plt.ylim(0, max(max(ideal_y), y_max) * 1.15)\r\n    plt.grid(axis=\"y\", alpha=0.25)\r\n    plt.legend()\r\n    plt.tight_layout()\r\n\r\n    output = OUTPUT_DIR / \"speedup_by_workers.png\"\r\n    plt.savefig(output, dpi=200)\r\n    plt.close()\r\n\r\n    print(f\"[OK] Grafico salvato in: {output}\")\r\n\r\n\r\ndef plot_throughput(df: pd.DataFrame) -> None:\r\n    plot_df = df.dropna(subset=[\"throughput_trees_per_second\", \"total_workers\"]).copy()\r\n\r\n    if plot_df.empty:\r\n        print(\"[WARN] Grafico throughput non generato: nessun valore valido trovato.\")\r\n        return\r\n\r\n    plot_df[\"total_workers\"] = pd.to_numeric(plot_df[\"total_workers\"]).astype(int)\r\n    plot_df[\"throughput_trees_per_second\"] = pd.to_numeric(\r\n        plot_df[\"throughput_trees_per_second\"]\r\n    )\r\n\r\n    plot_df = plot_df.sort_values(\r\n        by=[\"total_workers\", \"instances\", \"workers_per_instance\", \"label\"]\r\n    ).reset_index(drop=True)\r\n\r\n    bar_width = 0.40\r\n\r\n    plot_df = add_grouped_bar_positions(plot_df,bar_width+0.10)\r\n\r\n    plt.figure(figsize=(13, 6))\r\n\r\n    plt.bar(\r\n        plot_df[\"x_position\"],\r\n        plot_df[\"throughput_trees_per_second\"],\r\n        width=bar_width,\r\n    )\r\n\r\n    y_max = plot_df[\"throughput_trees_per_second\"].max()\r\n    label_offset = y_max * 0.02\r\n\r\n    for _, row in plot_df.iterrows():\r\n        x = row[\"x_position\"]\r\n        y = row[\"throughput_trees_per_second\"]\r\n\r\n        plt.text(\r\n            x,\r\n            y + label_offset,\r\n            row[\"label\"],\r\n            ha=\"center\",\r\n            va=\"bottom\",\r\n            fontsize=9,\r\n        )\r\n\r\n        plt.text(\r\n            x,\r\n            y * 0.5,\r\n            f\"{y:.2f}\",\r\n            ha=\"center\",\r\n            va=\"center\",\r\n            fontsize=8,\r\n            rotation=90,\r\n            fontweight=\"bold\",\r\n        )\r\n\r\n    worker_ticks = sorted(plot_df[\"total_workers\"].unique())\r\n\r\n    plt.xticks(\r\n        worker_ticks,\r\n        [str(worker) for worker in worker_ticks],\r\n    )\r\n\r\n    plt.xlabel(\"Numero totale di worker\")\r\n    plt.ylabel(\"Throughput (alberi/sec)\")\r\n    plt.title(\"Throughput al crescere del numero di worker\")\r\n    plt.ylim(0, y_max * 1.18)\r\n    plt.grid(axis=\"y\", alpha=0.25)\r\n    plt.tight_layout()\r\n\r\n    output = OUTPUT_DIR / \"throughput_by_workers.png\"\r\n    plt.savefig(output, dpi=200)\r\n    plt.close()\r\n\r\n    print(f\"[OK] Grafico salvato in: {output}\")\r\n\r\ndef plot_efficiency(df: pd.DataFrame) -> None:\r\n    plot_df = df.dropna(subset=[\"efficiency\", \"total_workers\"]).copy()\r\n\r\n    if plot_df.empty:\r\n        print(\"[WARN] Grafico efficienza non generato: nessun valore valido trovato.\")\r\n        return\r\n\r\n    plot_df[\"total_workers\"] = pd.to_numeric(plot_df[\"total_workers\"]).astype(int)\r\n    plot_df[\"efficiency\"] = pd.to_numeric(plot_df[\"efficiency\"])\r\n\r\n    plot_df[\"efficiency_percent\"] = plot_df[\"efficiency\"] * 100.0\r\n\r\n    plot_df = plot_df.sort_values(\r\n        by=[\"total_workers\", \"instances\", \"workers_per_instance\", \"label\"]\r\n    ).reset_index(drop=True)\r\n\r\n    bar_width = 0.40\r\n\r\n    plot_df = add_grouped_bar_positions(plot_df, bar_width+0.10)\r\n\r\n    plt.figure(figsize=(13, 6))\r\n\r\n    plt.bar(\r\n        plot_df[\"x_position\"],\r\n        plot_df[\"efficiency_percent\"],\r\n        width=bar_width,\r\n        label=\"Efficienza reale\",\r\n    )\r\n\r\n    y_max = plot_df[\"efficiency_percent\"].max()\r\n    label_offset = y_max * 0.02\r\n\r\n    for _, row in plot_df.iterrows():\r\n        x = row[\"x_position\"]\r\n        y = row[\"efficiency_percent\"]\r\n\r\n        plt.text(\r\n            x,\r\n            y + label_offset,\r\n            row[\"label\"],\r\n            ha=\"center\",\r\n            va=\"bottom\",\r\n            fontsize=9,\r\n        )\r\n\r\n        plt.text(\r\n            x,\r\n            y * 0.5,\r\n            f\"{y:.1f}%\",\r\n            ha=\"center\",\r\n            va=\"center\",\r\n            fontsize=8,\r\n            rotation=90,\r\n            fontweight=\"bold\",\r\n        )\r\n\r\n    worker_ticks = sorted(plot_df[\"total_workers\"].unique())\r\n\r\n    plt.xticks(\r\n        worker_ticks,\r\n        [str(worker) for worker in worker_ticks],\r\n    )\r\n\r\n    plt.axhline(\r\n        100,\r\n        linestyle=\"--\",\r\n        linewidth=1,\r\n        label=\"Efficienza ideale 100%\",\r\n    )\r\n\r\n    plt.xlabel(\"Numero totale di worker\")\r\n    plt.ylabel(\"Efficienza (%)\")\r\n    plt.title(\"Efficienza al crescere del numero di worker\")\r\n    plt.ylim(0, max(y_max * 1.18, 110))\r\n    plt.grid(axis=\"y\", alpha=0.25)\r\n    plt.legend()\r\n    plt.tight_layout()\r\n\r\n    output = OUTPUT_DIR / \"efficiency_by_workers.png\"\r\n    plt.savefig(output, dpi=200)\r\n    plt.close()\r\n\r\n    print(f\"[OK] Grafico salvato in: {output}\")\r\n\r\n\r\ndef main() -> None:\r\n    df = analyze()\r\n\r\n    if df.empty:\r\n        print(\"[ERRORE] Nessun job valido trovato. Controlla scalability_runs.csv e distributed_jobs/\")\r\n        return\r\n\r\n    print(\"\\n=== RISULTATI ESTRATTI ===\")\r\n    print(\r\n        df[\r\n            [\r\n                \"label\",\r\n                \"job_id\",\r\n                \"instances\",\r\n                \"workers_per_instance\",\r\n                \"total_workers\",\r\n                \"duration_minutes\",\r\n                \"throughput_trees_per_second\",\r\n                \"speedup\",\r\n                \"efficiency\",\r\n                \"failed_attempts\",\r\n                \"retry_events\",\r\n            ]\r\n        ].to_string(index=False)\r\n    )\r\n\r\n    save_results(df)\r\n\r\n    plot_duration(df)\r\n    plot_speedup(df)\r\n    plot_throughput(df)\r\n    plot_efficiency(df)\r\n\r\n\r\nif __name__ == \"__main__\":\r\n    main()
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/performance_evaluation/analyze_scalability.py b/performance_evaluation/analyze_scalability.py
+--- a/performance_evaluation/analyze_scalability.py	(revision 93ffd781788d18dc5eaa2e619291eb34c4dd913f)
++++ b/performance_evaluation/analyze_scalability.py	(date 1782667970336)
+@@ -517,6 +517,7 @@
+             format_minutes_seconds(y),
+             ha="center",
+             va="center",
++            color="#e6e6e6",
+             fontsize=8,
+             rotation=90,
+             fontweight="bold",
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"SELECTIVE\" />\r\n  </component>\r\n  <component name=\"BufProjectSettings\">\r\n    <option name=\"bufCLIPath\" value=\"$ brew install bufbuild/buf/buf\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"compare baseline 2milioni\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"CopilotPersistence\">\r\n    <persistenceIdMap>\r\n      <entry key=\"_C:/Users/PC/Desktop/materie/ISW/Mvn/ProgettoSDCCeML\" value=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n    </persistenceIdMap>\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;jadepics&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\">{\r\n  &quot;selectedUrlAndAccountId&quot;: {\r\n    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,\r\n    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;\r\n  }\r\n}</component>\r\n  <component name=\"KubernetesApiPersistence\">{}</component>\r\n  <component name=\"KubernetesApiProvider\">{\r\n  &quot;isMigrated&quot;: true\r\n}</component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 8\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3AWp9QFcSCr26GObyiuq4gjJYSa\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\"><![CDATA[{\r\n  \"keyToString\": {\r\n    \"ModuleVcsDetector.initialDetectionPerformed\": \"true\",\r\n    \"Python.compare_existing_job_cli.executor\": \"Run\",\r\n    \"Python.local_baseline_cli.executor\": \"Run\",\r\n    \"Python.submit_training_regression.executor\": \"Run\",\r\n    \"Python.synthetic_dataset_cli.executor\": \"Run\",\r\n    \"Python.training_debug_cli.executor\": \"Run\",\r\n    \"RunOnceActivity.ShowReadmeOnStart\": \"true\",\r\n    \"RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252\": \"true\",\r\n    \"RunOnceActivity.git.unshallow\": \"true\",\r\n    \"RunOnceActivity.typescript.service.memoryLimit.init\": \"true\",\r\n    \"SHELLCHECK.PATH\": \"C:\\\\Users\\\\PC\\\\AppData\\\\Roaming\\\\JetBrains\\\\PyCharm2026.1\\\\plugins\\\\Shell Script\\\\shellcheck.exe\",\r\n    \"ai.playground.ignore.import.keys.banner.in.settings\": \"true\",\r\n    \"codeWithMe.voiceChat.enabledByDefault\": \"false\",\r\n    \"git-widget-placeholder\": \"master\",\r\n    \"ignore.virus.scanning.warn.message\": \"true\",\r\n    \"kotlin-language-version-configured\": \"true\",\r\n    \"last_opened_file_path\": \"C:/Users/micci/PycharmProjects/PythonProject1/Dataset\",\r\n    \"node.js.detected.package.eslint\": \"true\",\r\n    \"node.js.detected.package.tslint\": \"true\",\r\n    \"node.js.selected.package.eslint\": \"(autodetect)\",\r\n    \"node.js.selected.package.tslint\": \"(autodetect)\",\r\n    \"nodejs_package_manager_path\": \"npm\",\r\n    \"settings.editor.selected.configurable\": \"com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable\",\r\n    \"vue.rearranger.settings.migration\": \"true\"\r\n  }\r\n}]]></component>\r\n  <component name=\"RecentsManager\">\r\n    <key name=\"CopyFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\micci\\PycharmProjects\\PythonProject1\\Dataset\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\performance_evaluation\\distributed_jobs\" />\r\n    </key>\r\n    <key name=\"MoveFile.RECENT_KEYS\">\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\performance_evaluation\\distributed_jobs\\job_af645a3fd97b4a66b6bbc18c46eb74f6\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\performance_evaluation\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\boh\" />\r\n      <recent name=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\worker\" />\r\n    </key>\r\n  </component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"4a4ea7c6-2667-4a62-a119-c58e5ee8242f\" name=\"Changes\" comment=\"\" />\r\n      <created>1772718028304</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1772718028304</updated>\r\n      <workItem from=\"1774557139933\" duration=\"1949000\" />\r\n      <workItem from=\"1774559557015\" duration=\"480000\" />\r\n      <workItem from=\"1774600460605\" duration=\"10626000\" />\r\n      <workItem from=\"1774694994766\" duration=\"3422000\" />\r\n      <workItem from=\"1774720403281\" duration=\"207000\" />\r\n      <workItem from=\"1774730844650\" duration=\"5746000\" />\r\n      <workItem from=\"1774964855112\" duration=\"688000\" />\r\n      <workItem from=\"1779263574177\" duration=\"624000\" />\r\n      <workItem from=\"1779266908342\" duration=\"2183000\" />\r\n      <workItem from=\"1779277413235\" duration=\"124000\" />\r\n      <workItem from=\"1779277767156\" duration=\"1430000\" />\r\n      <workItem from=\"1779282016019\" duration=\"4319000\" />\r\n      <workItem from=\"1779364505669\" duration=\"5140000\" />\r\n      <workItem from=\"1779370545584\" duration=\"1243000\" />\r\n      <workItem from=\"1779377569243\" duration=\"718000\" />\r\n      <workItem from=\"1779439480187\" duration=\"878000\" />\r\n      <workItem from=\"1779441751102\" duration=\"3017000\" />\r\n      <workItem from=\"1779614781225\" duration=\"335000\" />\r\n      <workItem from=\"1779642332598\" duration=\"4169000\" />\r\n      <workItem from=\"1779728510992\" duration=\"1472000\" />\r\n      <workItem from=\"1779784048930\" duration=\"16439000\" />\r\n      <workItem from=\"1779888735354\" duration=\"601000\" />\r\n      <workItem from=\"1779962688140\" duration=\"4957000\" />\r\n      <workItem from=\"1779972775664\" duration=\"1887000\" />\r\n      <workItem from=\"1779975108322\" duration=\"1664000\" />\r\n      <workItem from=\"1780072526235\" duration=\"12327000\" />\r\n      <workItem from=\"1780135591851\" duration=\"7076000\" />\r\n      <workItem from=\"1780165392523\" duration=\"202000\" />\r\n      <workItem from=\"1780165648182\" duration=\"5423000\" />\r\n      <workItem from=\"1780218283708\" duration=\"5762000\" />\r\n      <workItem from=\"1780315250667\" duration=\"595000\" />\r\n      <workItem from=\"1780328703391\" duration=\"4108000\" />\r\n      <workItem from=\"1780642990702\" duration=\"10000\" />\r\n      <workItem from=\"1780643112020\" duration=\"1677000\" />\r\n      <workItem from=\"1780645173444\" duration=\"4864000\" />\r\n      <workItem from=\"1780826629839\" duration=\"2568000\" />\r\n      <workItem from=\"1780842941419\" duration=\"2857000\" />\r\n      <workItem from=\"1780871228325\" duration=\"1802000\" />\r\n      <workItem from=\"1780915643641\" duration=\"1148000\" />\r\n      <workItem from=\"1781165343765\" duration=\"1019000\" />\r\n      <workItem from=\"1781166852232\" duration=\"3097000\" />\r\n      <workItem from=\"1781253627449\" duration=\"5255000\" />\r\n      <workItem from=\"1781268867842\" duration=\"5212000\" />\r\n      <workItem from=\"1781286702703\" duration=\"3008000\" />\r\n      <workItem from=\"1781431922369\" duration=\"3602000\" />\r\n      <workItem from=\"1781447944852\" duration=\"7075000\" />\r\n      <workItem from=\"1781462137533\" duration=\"394000\" />\r\n      <workItem from=\"1781465799321\" duration=\"728000\" />\r\n      <workItem from=\"1781515326205\" duration=\"11029000\" />\r\n      <workItem from=\"1781535697356\" duration=\"4855000\" />\r\n    </task>\r\n    <task id=\"LOCAL-00001\" summary=\"First commit\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1772718604332</created>\r\n      <option name=\"number\" value=\"00001\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00001\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1772718604332</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00002\" summary=\"Introduzione artifact_store, filesystem_stoere e paths\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774605271956</created>\r\n      <option name=\"number\" value=\"00002\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00002\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774605271956</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00003\" summary=\"refactoring worker.py e paths.py\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774698083683</created>\r\n      <option name=\"number\" value=\"00003\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00003\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774698083683</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00004\" summary=\"aggiunto commento\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774875188528</created>\r\n      <option name=\"number\" value=\"00004\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00004\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774875188528</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00005\" summary=\"ristrutturato master\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1774886067552</created>\r\n      <option name=\"number\" value=\"00005\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00005\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1774886067552</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00006\" summary=\"introduzione Monitor.sh per l'analisi delle statistiche su log\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779267177978</created>\r\n      <option name=\"number\" value=\"00006\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00006\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779267177978</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00007\" summary=\"Refactoring monitor.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779267655059</created>\r\n      <option name=\"number\" value=\"00007\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00007\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779267655060</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00008\" summary=\"Correzione monitor.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779277941088</created>\r\n      <option name=\"number\" value=\"00008\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00008\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779277941088</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00009\" summary=\"monitor.sh in background\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779282339366</created>\r\n      <option name=\"number\" value=\"00009\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00009\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779282339366</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00010\" summary=\"update monitor.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779366565339</created>\r\n      <option name=\"number\" value=\"00010\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00010\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779366565339</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00011\" summary=\"introduzione feature importance\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779443662224</created>\r\n      <option name=\"number\" value=\"00011\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00011\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779443662224</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00012\" summary=\"completamento della fault tolerance su worker e master\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779792342651</created>\r\n      <option name=\"number\" value=\"00012\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00012\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779792342651</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00013\" summary=\"testing fault tolerance sistema\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779798283775</created>\r\n      <option name=\"number\" value=\"00013\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00013\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779798283775</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00014\" summary=\"Introduzione dell'iperparametro Numero degli alberi come parametro da cli\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779805159717</created>\r\n      <option name=\"number\" value=\"00014\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00014\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779805159717</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00015\" summary=\"Sistemato worker.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1779976993221</created>\r\n      <option name=\"number\" value=\"00015\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00015\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1779976993222</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00016\" summary=\"Sistemato update worker.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780074164744</created>\r\n      <option name=\"number\" value=\"00016\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00016\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780074164744</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00017\" summary=\"update worker.sh\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780074564671</created>\r\n      <option name=\"number\" value=\"00017\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00017\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780074564671</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00018\" summary=\"fault tollerance worker zombie\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780075709131</created>\r\n      <option name=\"number\" value=\"00018\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00018\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780075709131</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00019\" summary=\"Fault tolerance worker zombie\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780087658962</created>\r\n      <option name=\"number\" value=\"00019\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00019\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780087658962</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00020\" summary=\"Implementazione recovery storm con 16 alberi per worker per recover\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780173968854</created>\r\n      <option name=\"number\" value=\"00020\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00020\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780173968855</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00021\" summary=\"aggiunta loggers e tempo di timeout più breve\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780227221854</created>\r\n      <option name=\"number\" value=\"00021\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00021\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780227221855</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00022\" summary=\"Tempo di timeout più breve per testing\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780644070262</created>\r\n      <option name=\"number\" value=\"00022\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00022\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780644070262</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00023\" summary=\"Tempo di timeout più breve per testing pt.2\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1780650154467</created>\r\n      <option name=\"number\" value=\"00023\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00023\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1780650154467</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00024\" summary=\"Implementazione resume training e script per ottenere i job falliti\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781169512638</created>\r\n      <option name=\"number\" value=\"00024\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00024\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781169512638</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00025\" summary=\"test per allenamento locale e distribuito\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781457122726</created>\r\n      <option name=\"number\" value=\"00025\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00025\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781457122726</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00026\" summary=\"Risoluzione race condition\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781519613723</created>\r\n      <option name=\"number\" value=\"00026\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00026\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781519613724</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00027\" summary=\"Risoluzione race condition pt2\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781521103009</created>\r\n      <option name=\"number\" value=\"00027\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00027\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781521103009</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00028\" summary=\"Risoluzione metriche\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781523534121</created>\r\n      <option name=\"number\" value=\"00028\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00028\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781523534121</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00029\" summary=\"Risoluzione metriche pt2\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781527448206</created>\r\n      <option name=\"number\" value=\"00029\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00029\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781527448206</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00030\" summary=\"risultato di comparison e dataset sintetico\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781531882405</created>\r\n      <option name=\"number\" value=\"00030\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00030\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781531882405</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00031\" summary=\"risultato di comparison e dataset sintetico pt2\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781531907035</created>\r\n      <option name=\"number\" value=\"00031\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00031\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781531907035</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00032\" summary=\"Modifica timeout\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781542076595</created>\r\n      <option name=\"number\" value=\"00032\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00032\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781542076595</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00033\" summary=\"aggiunte run local\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781711262553</created>\r\n      <option name=\"number\" value=\"00033\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00033\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781711262553</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00034\" summary=\"modifica compare\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781712818932</created>\r\n      <option name=\"number\" value=\"00034\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00034\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781712818932</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00035\" summary=\"sistemato problema fault\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781714822533</created>\r\n      <option name=\"number\" value=\"00035\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00035\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781714822533</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00036\" summary=\"modificate cose varie\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781778289201</created>\r\n      <option name=\"number\" value=\"00036\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00036\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781778289202</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00037\" summary=\"riaggiunte metrics su efs\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781866824019</created>\r\n      <option name=\"number\" value=\"00037\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00037\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781866824019</updated>\r\n    </task>\r\n    <task id=\"LOCAL-00038\" summary=\"compare baseline 2milioni\">\r\n      <option name=\"closed\" value=\"true\" />\r\n      <created>1781874602565</created>\r\n      <option name=\"number\" value=\"00038\" />\r\n      <option name=\"presentableId\" value=\"LOCAL-00038\" />\r\n      <option name=\"project\" value=\"LOCAL\" />\r\n      <updated>1781874602565</updated>\r\n    </task>\r\n    <option name=\"localTasksCounter\" value=\"39\" />\r\n    <servers />\r\n  </component>\r\n  <component name=\"TypeScriptGeneratedFilesManager\">\r\n    <option name=\"version\" value=\"3\" />\r\n  </component>\r\n  <component name=\"Vcs.Log.Tabs.Properties\">\r\n    <option name=\"TAB_STATES\">\r\n      <map>\r\n        <entry key=\"MAIN\">\r\n          <value>\r\n            <State />\r\n          </value>\r\n        </entry>\r\n      </map>\r\n    </option>\r\n  </component>\r\n  <component name=\"VcsManagerConfiguration\">\r\n    <MESSAGE value=\"Sistemato worker.sh\" />\r\n    <MESSAGE value=\"Sistemato update worker.sh\" />\r\n    <MESSAGE value=\"update worker.sh\" />\r\n    <MESSAGE value=\"fault tollerance worker zombie\" />\r\n    <MESSAGE value=\"Fault tolerance worker zombie\" />\r\n    <MESSAGE value=\"Implementazione recovery storm con 16 alberi per worker per recover\" />\r\n    <MESSAGE value=\"aggiunta loggers e tempo di timeout più breve\" />\r\n    <MESSAGE value=\"Tempo di timeout più breve per testing\" />\r\n    <MESSAGE value=\"Tempo di timeout più breve per testing pt.2\" />\r\n    <MESSAGE value=\"Implementazione resume training e script per ottenere i job falliti\" />\r\n    <MESSAGE value=\"test per allenamento locale e distribuito\" />\r\n    <MESSAGE value=\"Risoluzione race condition\" />\r\n    <MESSAGE value=\"Risoluzione race condition pt2\" />\r\n    <MESSAGE value=\"Risoluzione metriche\" />\r\n    <MESSAGE value=\"Risoluzione metriche pt2\" />\r\n    <MESSAGE value=\"risultato di comparison e dataset sintetico\" />\r\n    <MESSAGE value=\"risultato di comparison e dataset sintetico pt2\" />\r\n    <MESSAGE value=\"risultato di comparison e dataset sintetico pt3\" />\r\n    <MESSAGE value=\"Modifica timeout\" />\r\n    <MESSAGE value=\"aggiunte run local\" />\r\n    <MESSAGE value=\"modifica compare\" />\r\n    <MESSAGE value=\"sistemato problema fault\" />\r\n    <MESSAGE value=\"modificate cose varie\" />\r\n    <MESSAGE value=\"riaggiunte metrics su efs\" />\r\n    <MESSAGE value=\"compare baseline 2milioni\" />\r\n    <option name=\"LAST_COMMIT_MESSAGE\" value=\"compare baseline 2milioni\" />\r\n  </component>\r\n  <component name=\"com.intellij.coverage.CoverageDataManagerImpl\">\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$synthetic_dataset_cli.coverage\" NAME=\"synthetic_dataset_cli Coverage Results\" MODIFIED=\"1781537994580\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$/synthetic_data\" />\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$local_baseline_cli.coverage\" NAME=\"local_baseline_cli Coverage Results\" MODIFIED=\"1781529372677\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$/local_baseline\" />\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$submit_training_regression.coverage\" NAME=\"submit_training_regression Coverage Results\" MODIFIED=\"1779804927673\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$\" />\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$training_debug_cli.coverage\" NAME=\"training_debug_cli Coverage Results\" MODIFIED=\"1780844905316\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$\" />\r\n    <SUITE FILE_PATH=\"coverage/ProgSDCC_ML$compare_existing_job_cli.coverage\" NAME=\"compare_existing_job_cli Coverage Results\" MODIFIED=\"1781434093457\" SOURCE_PROVIDER=\"com.intellij.coverage.DefaultCoverageFileProvider\" RUNNER=\"coverage.py\" COVERAGE_BY_TEST_ENABLED=\"false\" COVERAGE_TRACING_ENABLED=\"false\" WORKING_DIRECTORY=\"$PROJECT_DIR$/performance_evaluation\" />\r\n  </component>\r\n  <component name=\"github-copilot-workspace\">\r\n    <instructionFileLocations>\r\n      <option value=\".github/instructions\" />\r\n    </instructionFileLocations>\r\n    <promptFileLocations>\r\n      <option value=\".github/prompts\" />\r\n    </promptFileLocations>\r\n  </component>\r\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision 93ffd781788d18dc5eaa2e619291eb34c4dd913f)
++++ b/.idea/workspace.xml	(date 1782814381014)
+@@ -7,13 +7,24 @@
+     <option name="bufCLIPath" value="$ brew install bufbuild/buf/buf" />
+   </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="compare baseline 2milioni">
++    <list default="true" id="4a4ea7c6-2667-4a62-a119-c58e5ee8242f" name="Changes" comment="Sistemato Porte per master multihost">
++      <change beforePath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ProgSDCC&amp;ML.iml" afterDir="false" />
+       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/client/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/config.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/performance_evaluation/analyze_scalability.py" beforeDir="false" afterPath="$PROJECT_DIR$/performance_evaluation/analyze_scalability.py" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/performance_evaluation/plots/training_time_by_workers_grouped.png" beforeDir="false" afterPath="$PROJECT_DIR$/performance_evaluation/plots/training_time_by_workers_grouped.png" afterDir="false" />
++      <change beforePath="$PROJECT_DIR$/performance_evaluation/results/scalability/scalability_runs_notes.txt" beforeDir="false" afterPath="$PROJECT_DIR$/performance_evaluation/results/scalability/scalability_runs_notes.txt" afterDir="false" />
+     </list>
+     <option name="SHOW_DIALOG" value="false" />
+     <option name="HIGHLIGHT_CONFLICTS" value="true" />
+     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+     <option name="LAST_RESOLUTION" value="IGNORE" />
++  </component>
++  <component name="ChangesViewManager">
++    <option name="groupingKeys">
++      <option value="directory" />
++      <option value="repository" />
++    </option>
+   </component>
+   <component name="CopilotPersistence">
+     <persistenceIdMap>
+@@ -38,8 +49,8 @@
+ }</component>
+   <component name="GithubPullRequestsUISettings">{
+   &quot;selectedUrlAndAccountId&quot;: {
+-    &quot;url&quot;: &quot;git@github.com:jadepics/ProgettoSDCCeML.git&quot;,
+-    &quot;accountId&quot;: &quot;4de1de33-8135-4705-97f1-e05732611c9e&quot;
++    &quot;url&quot;: &quot;https://github.com/jadepics/ProgettoSDCCeML.git&quot;,
++    &quot;accountId&quot;: &quot;64b32a3e-6402-44ac-8316-64089203d618&quot;
+   }
+ }</component>
+   <component name="KubernetesApiPersistence">{}</component>
+@@ -52,39 +63,63 @@
+   <component name="ProjectId" id="3AWp9QFcSCr26GObyiuq4gjJYSa" />
+   <component name="ProjectLevelVcsManager">
+     <ConfirmationsSetting value="1" id="Add" />
++  </component>
++  <component name="ProjectSessionTemplates">
++    <option name="panelTemplate">
++      <template>
++        <option name="modeId" value="Agent" />
++        <option name="model">
++          <model>
++            <option name="modelType" value="builtin_family" />
++            <option name="modelValue" value="auto" />
++          </model>
++        </option>
++        <option name="targetType" value="BACKGROUND" />
++      </template>
++    </option>
+   </component>
+   <component name="ProjectViewState">
+     <option name="hideEmptyMiddlePackages" value="true" />
+     <option name="showLibraryContents" value="true" />
+   </component>
+-  <component name="PropertiesComponent"><![CDATA[{
+-  "keyToString": {
+-    "ModuleVcsDetector.initialDetectionPerformed": "true",
+-    "Python.compare_existing_job_cli.executor": "Run",
+-    "Python.local_baseline_cli.executor": "Run",
+-    "Python.submit_training_regression.executor": "Run",
+-    "Python.synthetic_dataset_cli.executor": "Run",
+-    "Python.training_debug_cli.executor": "Run",
+-    "RunOnceActivity.ShowReadmeOnStart": "true",
+-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+-    "RunOnceActivity.git.unshallow": "true",
+-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+-    "SHELLCHECK.PATH": "C:\\Users\\PC\\AppData\\Roaming\\JetBrains\\PyCharm2026.1\\plugins\\Shell Script\\shellcheck.exe",
+-    "ai.playground.ignore.import.keys.banner.in.settings": "true",
+-    "codeWithMe.voiceChat.enabledByDefault": "false",
+-    "git-widget-placeholder": "master",
+-    "ignore.virus.scanning.warn.message": "true",
+-    "kotlin-language-version-configured": "true",
+-    "last_opened_file_path": "C:/Users/micci/PycharmProjects/PythonProject1/Dataset",
+-    "node.js.detected.package.eslint": "true",
+-    "node.js.detected.package.tslint": "true",
+-    "node.js.selected.package.eslint": "(autodetect)",
+-    "node.js.selected.package.tslint": "(autodetect)",
+-    "nodejs_package_manager_path": "npm",
+-    "settings.editor.selected.configurable": "com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable",
+-    "vue.rearranger.settings.migration": "true"
++  <component name="PropertiesComponent">{
++  &quot;keyToString&quot;: {
++    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
++    &quot;Python.analyze_scalability.executor&quot;: &quot;Run&quot;,
++    &quot;Python.compare_existing_job_cli.executor&quot;: &quot;Run&quot;,
++    &quot;Python.local_baseline_cli.executor&quot;: &quot;Run&quot;,
++    &quot;Python.master.executor&quot;: &quot;Run&quot;,
++    &quot;Python.plot_retry_comparison.executor&quot;: &quot;Run&quot;,
++    &quot;Python.python -m grpc_tools.protoc \\.executor&quot;: &quot;Run&quot;,
++    &quot;Python.submit_training_regression.executor&quot;: &quot;Run&quot;,
++    &quot;Python.synthetic_dataset_cli.executor&quot;: &quot;Run&quot;,
++    &quot;Python.training_debug_cli.executor&quot;: &quot;Run&quot;,
++    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
++    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
++    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
++    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
++    &quot;SHELLCHECK.PATH&quot;: &quot;C:\\Users\\PC\\AppData\\Roaming\\JetBrains\\PyCharm2026.1\\plugins\\Shell Script\\shellcheck.exe&quot;,
++    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
++    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
++    &quot;copilot.chat.legacySessionMetadata.migrated&quot;: &quot;true&quot;,
++    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
++    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
++    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
++    &quot;last_opened_file_path&quot;: &quot;C:/Users/micci/PycharmProjects/PythonProject1/Dataset&quot;,
++    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
++    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
++    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
++    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
++    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
++    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,
++    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
++  },
++  &quot;keyToStringList&quot;: {
++    &quot;com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File&quot;: [
++      &quot;TEXT&quot;
++    ]
+   }
+-}]]></component>
++}</component>
+   <component name="RecentsManager">
+     <key name="CopyFile.RECENT_KEYS">
+       <recent name="C:\Users\micci\PycharmProjects\PythonProject1\Dataset" />
+@@ -101,7 +136,8 @@
+   <component name="SharedIndexes">
+     <attachedChunks>
+       <set>
+-        <option value="bundled-python-sdk-164cda30dcd9-0af03a5fa574-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26830.99" />
++        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.25134.203" />
++        <option value="bundled-python-sdk-245168a56dbd-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.25134.203" />
+       </set>
+     </attachedChunks>
+   </component>
+@@ -162,30 +198,27 @@
+       <workItem from="1781465799321" duration="728000" />
+       <workItem from="1781515326205" duration="11029000" />
+       <workItem from="1781535697356" duration="4855000" />
+-    </task>
+-    <task id="LOCAL-00001" summary="First commit">
+-      <option name="closed" value="true" />
+-      <created>1772718604332</created>
+-      <option name="number" value="00001" />
+-      <option name="presentableId" value="LOCAL-00001" />
+-      <option name="project" value="LOCAL" />
+-      <updated>1772718604332</updated>
+-    </task>
+-    <task id="LOCAL-00002" summary="Introduzione artifact_store, filesystem_stoere e paths">
+-      <option name="closed" value="true" />
+-      <created>1774605271956</created>
+-      <option name="number" value="00002" />
+-      <option name="presentableId" value="LOCAL-00002" />
+-      <option name="project" value="LOCAL" />
+-      <updated>1774605271956</updated>
+-    </task>
+-    <task id="LOCAL-00003" summary="refactoring worker.py e paths.py">
+-      <option name="closed" value="true" />
+-      <created>1774698083683</created>
+-      <option name="number" value="00003" />
+-      <option name="presentableId" value="LOCAL-00003" />
+-      <option name="project" value="LOCAL" />
+-      <updated>1774698083683</updated>
++      <workItem from="1781950587799" duration="4026000" />
++      <workItem from="1781980805104" duration="1506000" />
++      <workItem from="1782112022751" duration="9351000" />
++      <workItem from="1782122826226" duration="6989000" />
++      <workItem from="1782137819096" duration="10545000" />
++      <workItem from="1782203693389" duration="11526000" />
++      <workItem from="1782225210118" duration="1093000" />
++      <workItem from="1782290649066" duration="9591000" />
++      <workItem from="1782312258368" duration="5423000" />
++      <workItem from="1782385317895" duration="599000" />
++      <workItem from="1782409045798" duration="310000" />
++      <workItem from="1782409588169" duration="6006000" />
++      <workItem from="1782461052759" duration="7367000" />
++      <workItem from="1782482702208" duration="18389000" />
++      <workItem from="1782548743785" duration="10378000" />
++      <workItem from="1782571655860" duration="18069000" />
++      <workItem from="1782635144005" duration="4273000" />
++      <workItem from="1782666801128" duration="3676000" />
++      <workItem from="1782726864219" duration="953000" />
++      <workItem from="1782748027022" duration="1909000" />
++      <workItem from="1782812561483" duration="789000" />
+     </task>
+     <task id="LOCAL-00004" summary="aggiunto commento">
+       <option name="closed" value="true" />
+@@ -467,7 +500,119 @@
+       <option name="project" value="LOCAL" />
+       <updated>1781874602565</updated>
+     </task>
+-    <option name="localTasksCounter" value="39" />
++    <task id="LOCAL-00039" summary="Creazione di file di env come esempi">
++      <option name="closed" value="true" />
++      <created>1781951609224</created>
++      <option name="number" value="00039" />
++      <option name="presentableId" value="LOCAL-00039" />
++      <option name="project" value="LOCAL" />
++      <updated>1781951609224</updated>
++    </task>
++    <task id="LOCAL-00040" summary="Creazione di limiti di alberi per shard">
++      <option name="closed" value="true" />
++      <created>1782116659426</created>
++      <option name="number" value="00040" />
++      <option name="presentableId" value="LOCAL-00040" />
++      <option name="project" value="LOCAL" />
++      <updated>1782116659426</updated>
++    </task>
++    <task id="LOCAL-00041" summary="Abbassato a 50 il limiti di alberi per shard">
++      <option name="closed" value="true" />
++      <created>1782118511706</created>
++      <option name="number" value="00041" />
++      <option name="presentableId" value="LOCAL-00041" />
++      <option name="project" value="LOCAL" />
++      <updated>1782118511706</updated>
++    </task>
++    <task id="LOCAL-00042" summary="Abbassato a 1 il limiti di shard per worker">
++      <option name="closed" value="true" />
++      <created>1782120138430</created>
++      <option name="number" value="00042" />
++      <option name="presentableId" value="LOCAL-00042" />
++      <option name="project" value="LOCAL" />
++      <updated>1782120138430</updated>
++    </task>
++    <task id="LOCAL-00043" summary="Abbassato a 1 il limiti di shard per worker pt2">
++      <option name="closed" value="true" />
++      <created>1782125861774</created>
++      <option name="number" value="00043" />
++      <option name="presentableId" value="LOCAL-00043" />
++      <option name="project" value="LOCAL" />
++      <updated>1782125861774</updated>
++    </task>
++    <task id="LOCAL-00044" summary="note di scalability">
++      <option name="closed" value="true" />
++      <created>1782126170744</created>
++      <option name="number" value="00044" />
++      <option name="presentableId" value="LOCAL-00044" />
++      <option name="project" value="LOCAL" />
++      <updated>1782126170744</updated>
++    </task>
++    <task id="LOCAL-00045" summary="inizio esperimenti di scalability">
++      <option name="closed" value="true" />
++      <created>1782204515525</created>
++      <option name="number" value="00045" />
++      <option name="presentableId" value="LOCAL-00045" />
++      <option name="project" value="LOCAL" />
++      <updated>1782204515525</updated>
++    </task>
++    <task id="LOCAL-00046" summary="Scalabilità dei worker">
++      <option name="closed" value="true" />
++      <created>1782299501942</created>
++      <option name="number" value="00046" />
++      <option name="presentableId" value="LOCAL-00046" />
++      <option name="project" value="LOCAL" />
++      <updated>1782299501942</updated>
++    </task>
++    <task id="LOCAL-00047" summary="Schemi aggiornati">
++      <option name="closed" value="true" />
++      <created>1782468711719</created>
++      <option name="number" value="00047" />
++      <option name="presentableId" value="LOCAL-00047" />
++      <option name="project" value="LOCAL" />
++      <updated>1782468711720</updated>
++    </task>
++    <task id="LOCAL-00048" summary="RPC per client">
++      <option name="closed" value="true" />
++      <created>1782497422758</created>
++      <option name="number" value="00048" />
++      <option name="presentableId" value="LOCAL-00048" />
++      <option name="project" value="LOCAL" />
++      <updated>1782497422759</updated>
++    </task>
++    <task id="LOCAL-00049" summary="modifiche per worker su istanze differenti">
++      <option name="closed" value="true" />
++      <created>1782505046327</created>
++      <option name="number" value="00049" />
++      <option name="presentableId" value="LOCAL-00049" />
++      <option name="project" value="LOCAL" />
++      <updated>1782505046327</updated>
++    </task>
++    <task id="LOCAL-00050" summary="Sistemati i wait_leader in master e worker">
++      <option name="closed" value="true" />
++      <created>1782508253364</created>
++      <option name="number" value="00050" />
++      <option name="presentableId" value="LOCAL-00050" />
++      <option name="project" value="LOCAL" />
++      <updated>1782508253365</updated>
++    </task>
++    <task id="LOCAL-00051" summary="Codice Client e ultimo schema">
++      <option name="closed" value="true" />
++      <created>1782574172355</created>
++      <option name="number" value="00051" />
++      <option name="presentableId" value="LOCAL-00051" />
++      <option name="project" value="LOCAL" />
++      <updated>1782574172356</updated>
++    </task>
++    <task id="LOCAL-00052" summary="Sistemato Porte per master multihost">
++      <option name="closed" value="true" />
++      <created>1782591464083</created>
++      <option name="number" value="00052" />
++      <option name="presentableId" value="LOCAL-00052" />
++      <option name="project" value="LOCAL" />
++      <updated>1782591464088</updated>
++    </task>
++    <option name="localTasksCounter" value="53" />
+     <servers />
+   </component>
+   <component name="TypeScriptGeneratedFilesManager">
+@@ -485,20 +630,6 @@
+     </option>
+   </component>
+   <component name="VcsManagerConfiguration">
+-    <MESSAGE value="Sistemato worker.sh" />
+-    <MESSAGE value="Sistemato update worker.sh" />
+-    <MESSAGE value="update worker.sh" />
+-    <MESSAGE value="fault tollerance worker zombie" />
+-    <MESSAGE value="Fault tolerance worker zombie" />
+-    <MESSAGE value="Implementazione recovery storm con 16 alberi per worker per recover" />
+-    <MESSAGE value="aggiunta loggers e tempo di timeout più breve" />
+-    <MESSAGE value="Tempo di timeout più breve per testing" />
+-    <MESSAGE value="Tempo di timeout più breve per testing pt.2" />
+-    <MESSAGE value="Implementazione resume training e script per ottenere i job falliti" />
+-    <MESSAGE value="test per allenamento locale e distribuito" />
+-    <MESSAGE value="Risoluzione race condition" />
+-    <MESSAGE value="Risoluzione race condition pt2" />
+-    <MESSAGE value="Risoluzione metriche" />
+     <MESSAGE value="Risoluzione metriche pt2" />
+     <MESSAGE value="risultato di comparison e dataset sintetico" />
+     <MESSAGE value="risultato di comparison e dataset sintetico pt2" />
+@@ -510,14 +641,32 @@
+     <MESSAGE value="modificate cose varie" />
+     <MESSAGE value="riaggiunte metrics su efs" />
+     <MESSAGE value="compare baseline 2milioni" />
+-    <option name="LAST_COMMIT_MESSAGE" value="compare baseline 2milioni" />
++    <MESSAGE value="Creazione di file di env come esempi" />
++    <MESSAGE value="Creazione di limiti di alberi per shard" />
++    <MESSAGE value="Abbassato a 50 il limiti di alberi per shard" />
++    <MESSAGE value="Abbassato a 1 il limiti di shard per worker" />
++    <MESSAGE value="Abbassato a 1 il limiti di shard per worker pt2" />
++    <MESSAGE value="note di scalability" />
++    <MESSAGE value="inizio esperimenti di scalability" />
++    <MESSAGE value="Scalabilità dei worker" />
++    <MESSAGE value="Schemi aggiornati" />
++    <MESSAGE value="RPC per client" />
++    <MESSAGE value="modifiche per worker su istanze differenti" />
++    <MESSAGE value="Sistemati i wait_leader in master e worker" />
++    <MESSAGE value="Codice Client e ultimo schema" />
++    <MESSAGE value="Sistemato Porte per master multihost" />
++    <option name="LAST_COMMIT_MESSAGE" value="Sistemato Porte per master multihost" />
+   </component>
+   <component name="com.intellij.coverage.CoverageDataManagerImpl">
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$plot_retry_comparison.coverage" NAME="plot_retry_comparison Coverage Results" MODIFIED="1782559724473" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/performance_evaluation" />
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$synthetic_dataset_cli.coverage" NAME="synthetic_dataset_cli Coverage Results" MODIFIED="1781537994580" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/synthetic_data" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$master.coverage" NAME="master Coverage Results" MODIFIED="1782128085483" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$local_baseline_cli.coverage" NAME="local_baseline_cli Coverage Results" MODIFIED="1781529372677" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/local_baseline" />
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$submit_training_regression.coverage" NAME="submit_training_regression Coverage Results" MODIFIED="1779804927673" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$training_debug_cli.coverage" NAME="training_debug_cli Coverage Results" MODIFIED="1780844905316" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+     <SUITE FILE_PATH="coverage/ProgSDCC_ML$compare_existing_job_cli.coverage" NAME="compare_existing_job_cli Coverage Results" MODIFIED="1781434093457" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/performance_evaluation" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$analyze_scalability.coverage" NAME="analyze_scalability Coverage Results" MODIFIED="1782667970355" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/performance_evaluation" />
++    <SUITE FILE_PATH="coverage/ProgSDCC_ML$python__m_grpc_tools_protoc__.coverage" NAME="python -m grpc_tools.protoc \ Coverage Results" MODIFIED="1782549048216" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+   </component>
+   <component name="github-copilot-workspace">
+     <instructionFileLocations>
+Index: client/config.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>from __future__ import annotations\r\n\r\nimport os\r\nfrom dataclasses import dataclass\r\nfrom pathlib import Path\r\n\r\n\r\nCLIENT_DIR = Path(__file__).resolve().parent\r\nDEFAULT_ENV_FILE = CLIENT_DIR / \".env.client\"\r\n\r\nDEFAULT_MASTER_HOST = \"127.0.0.1\"\r\nDEFAULT_MASTER_PORT = \"50051\"\r\nDEFAULT_GRPC_MAX_MESSAGE_LENGTH_MB = 256\r\nDEFAULT_CLIENT_GRPC_TIMEOUT_SECONDS = 120.0\r\n\r\n\r\n@dataclass(frozen=True)\r\nclass ClientConfig:\r\n    master_addresses: list[str]\r\n    grpc_max_message_length_mb: int\r\n    grpc_timeout_seconds: float\r\n\r\n    @property\r\n    def grpc_max_message_length_bytes(self) -> int:\r\n        return self.grpc_max_message_length_mb * 1024 * 1024\r\n\r\n\r\ndef load_env_file(path: Path = DEFAULT_ENV_FILE) -> None:\r\n    if not path.exists():\r\n        return\r\n\r\n    with path.open(\"r\", encoding=\"utf-8\") as file:\r\n        for raw_line in file:\r\n            line = raw_line.strip()\r\n\r\n            if not line or line.startswith(\"#\"):\r\n                continue\r\n\r\n            if \"=\" not in line:\r\n                continue\r\n\r\n            key, value = line.split(\"=\", 1)\r\n            key = key.strip()\r\n            value = value.strip().strip('\"').strip(\"'\")\r\n\r\n            if key:\r\n                os.environ.setdefault(key, value)\r\n\r\n\r\ndef load_client_config(env_file: Path | None = None) -> ClientConfig:\r\n    load_env_file(env_file or DEFAULT_ENV_FILE)\r\n\r\n    return ClientConfig(\r\n        master_addresses=load_master_addresses(),\r\n        grpc_max_message_length_mb=_read_positive_int_env(\r\n            \"GRPC_MAX_MESSAGE_LENGTH_MB\",\r\n            DEFAULT_GRPC_MAX_MESSAGE_LENGTH_MB,\r\n        ),\r\n        grpc_timeout_seconds=_read_positive_float_env(\r\n            \"CLIENT_GRPC_TIMEOUT_SECONDS\",\r\n            DEFAULT_CLIENT_GRPC_TIMEOUT_SECONDS,\r\n        ),\r\n    )\r\n\r\n\r\ndef load_master_addresses() -> list[str]:\r\n    raw_seeds = os.getenv(\"MASTER_SEEDS\", \"\").strip()\r\n\r\n    if raw_seeds:\r\n        addresses = [\r\n            _normalize_master_address(item)\r\n            for item in raw_seeds.split(\",\")\r\n            if item.strip()\r\n        ]\r\n\r\n        addresses = _deduplicate(addresses)\r\n        if addresses:\r\n            return addresses\r\n\r\n    master_host = os.getenv(\"MASTER_HOST\", DEFAULT_MASTER_HOST).strip()\r\n    master_port = os.getenv(\"MASTER_PORT\", DEFAULT_MASTER_PORT).strip()\r\n\r\n    return [_normalize_master_address(f\"{master_host}:{master_port}\")]\r\n\r\n\r\ndef build_grpc_options(config: ClientConfig) -> list[tuple[str, int]]:\r\n    max_message_length = config.grpc_max_message_length_bytes\r\n\r\n    return [\r\n        (\"grpc.max_send_message_length\", max_message_length),\r\n        (\"grpc.max_receive_message_length\", max_message_length),\r\n    ]\r\n\r\n\r\ndef _normalize_master_address(value: str) -> str:\r\n    address = value.strip()\r\n\r\n    if not address:\r\n        raise ValueError(\"Master address cannot be empty\")\r\n\r\n    if address.startswith(\"http://\"):\r\n        address = address.removeprefix(\"http://\")\r\n\r\n    if address.startswith(\"https://\"):\r\n        address = address.removeprefix(\"https://\")\r\n\r\n    if \":\" not in address:\r\n        address = f\"{address}:{DEFAULT_MASTER_PORT}\"\r\n\r\n    host, port = address.rsplit(\":\", 1)\r\n    host = host.strip()\r\n    port = port.strip()\r\n\r\n    if not host:\r\n        raise ValueError(f\"Invalid master address '{value}': missing host\")\r\n\r\n    if not port.isdigit():\r\n        raise ValueError(f\"Invalid master address '{value}': port must be numeric\")\r\n\r\n    port_number = int(port)\r\n    if port_number <= 0 or port_number > 65535:\r\n        raise ValueError(f\"Invalid master address '{value}': port out of range\")\r\n\r\n    return f\"{host}:{port_number}\"\r\n\r\n\r\ndef _deduplicate(values: list[str]) -> list[str]:\r\n    result: list[str] = []\r\n    seen: set[str] = set()\r\n\r\n    for value in values:\r\n        if value in seen:\r\n            continue\r\n\r\n        result.append(value)\r\n        seen.add(value)\r\n\r\n    return result\r\n\r\n\r\ndef _read_positive_int_env(name: str, default: int) -> int:\r\n    raw_value = os.getenv(name, str(default)).strip()\r\n\r\n    try:\r\n        value = int(raw_value)\r\n    except ValueError as exc:\r\n        raise ValueError(f\"{name} must be an integer\") from exc\r\n\r\n    if value <= 0:\r\n        raise ValueError(f\"{name} must be > 0\")\r\n\r\n    return value\r\n\r\n\r\ndef _read_positive_float_env(name: str, default: float) -> float:\r\n    raw_value = os.getenv(name, str(default)).strip()\r\n\r\n    try:\r\n        value = float(raw_value)\r\n    except ValueError as exc:\r\n        raise ValueError(f\"{name} must be a number\") from exc\r\n\r\n    if value <= 0:\r\n        raise ValueError(f\"{name} must be > 0\")\r\n\r\n    return value
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/client/config.py b/client/config.py
+--- a/client/config.py	(revision 93ffd781788d18dc5eaa2e619291eb34c4dd913f)
++++ b/client/config.py	(date 1782587880661)
+@@ -64,24 +64,37 @@
+ 
+ 
+ def load_master_addresses() -> list[str]:
+-    raw_seeds = os.getenv("MASTER_SEEDS", "").strip()
++    master_seeds = os.getenv("MASTER_SEEDS", "").strip()
+ 
+-    if raw_seeds:
+-        addresses = [
+-            _normalize_master_address(item)
+-            for item in raw_seeds.split(",")
+-            if item.strip()
++    if master_seeds:
++        return [
++            seed.strip()
++            for seed in master_seeds.split(",")
++            if seed.strip()
+         ]
+ 
+-        addresses = _deduplicate(addresses)
+-        if addresses:
+-            return addresses
++    deployment_mode = os.getenv("MASTER_DEPLOYMENT_MODE", "single-host").strip()
++
++    master1_ip = os.getenv("MASTER1_PRIVATE_IP", "127.0.0.1").strip()
++    master2_ip = os.getenv("MASTER2_PRIVATE_IP", master1_ip).strip()
++    master3_ip = os.getenv("MASTER3_PRIVATE_IP", master1_ip).strip()
+ 
+-    master_host = os.getenv("MASTER_HOST", DEFAULT_MASTER_HOST).strip()
+-    master_port = os.getenv("MASTER_PORT", DEFAULT_MASTER_PORT).strip()
++    master1_port = os.getenv("MASTER1_PORT", "50051").strip()
++    master2_port = os.getenv("MASTER2_PORT", "50052").strip()
++    master3_port = os.getenv("MASTER3_PORT", "50053").strip()
+ 
+-    return [_normalize_master_address(f"{master_host}:{master_port}")]
++    if deployment_mode == "single-host":
++        return [
++            f"{master1_ip}:{master1_port}",
++            f"{master1_ip}:{master2_port}",
++            f"{master1_ip}:{master3_port}",
++        ]
+ 
++    return [
++        f"{master1_ip}:{master1_port}",
++        f"{master2_ip}:{master2_port}",
++        f"{master3_ip}:{master3_port}",
++    ]
+ 
+ def build_grpc_options(config: ClientConfig) -> list[tuple[str, int]]:
+     max_message_length = config.grpc_max_message_length_bytes
+Index: performance_evaluation/results/scalability/scalability_runs_notes.txt
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>SCALABILITY REGRESSION 2M 400 TREES\r\n\r\nNotation: <instances>x<workers_per_instance> = total workers\r\n\r\nFixed configuration:\r\ndataset =\r\n/mnt/efs/gp_artifacts/datasets/synthetic_regression_2000000_samples_42_features.csv\r\ntask_type = regression\r\ntarget_column = target\r\ndataset_scenario = baseline_original\r\nn_estimators = 400\r\nmax_depth = 5\r\nmax_features = sqrt\r\ncriterion = squared_error\r\nbootstrap = true\r\nrandom_seed = 42\r\nsplit = 60/20/20\r\n\r\nRuns:\r\n\r\n1x1:\r\ninstances = 1\r\nworkers_per_instance = 1\r\ntotal_workers = 1\r\njob_id =\r\nBaseline\r\n\r\n1x2:\r\ninstances = 1\r\nworkers_per_instance = 2\r\ntotal_workers = 2\r\njob_id = job_5511c62e1abe4862b51730555066bf84\r\n\r\n\r\n1x4:\r\ninstances = 1\r\nworkers_per_instance = 4\r\ntotal_workers = 4\r\njob_id = job_bec7e60cb02f4f75aa032e3d917a8359\r\n\r\n2x1:\r\ninstances = 2\r\nworkers_per_instance = 2\r\ntotal_workers = 4\r\njob_id = job_9931fabfe3834b8aa78079e45c394541\r\n\r\n2x2:\r\ninstances = 2\r\nworkers_per_instance = 2\r\ntotal_workers = 4\r\njob_id = job_d619c1a8a7d546e8b6987341eec9e3d9\r\n\r\n2x3:\r\ninstances = 2\r\nworkers_per_instance = 2\r\ntotal_workers = 4\r\njob_id = job_5d505682c8b846bba7d1fcf02648c6eb\r\n\r\n2x4:\r\ninstances = 2\r\nworkers_per_instance = 4\r\ntotal_workers = 8\r\njob_id = job_17b66deb76704a0aae4dbeb635489cbf\r\n\r\n3x2:\r\ninstances = 3\r\nworkers_per_instance = 2\r\ntotal_workers = 6\r\njob_id = job_21e38181c63949adb9010bb1869d08b1\r\n\r\n3x3:\r\ninstances = 3\r\nworkers_per_instance = 3\r\ntotal_workers = 9\r\njob_id = job_8694995956964f2baf51c5a5201265d6\r\n3x3,3,3,9,job_8694995956964f2baf51c5a5201265d6,true,\r\ncon retry: job_b7a0557e7eee400aa5473aaaedffee8d\r\n\r\n3x4:\r\ninstances = 3\r\nworkers_per_instance = 4\r\ntotal_workers = 12\r\njob_id = job_e420bade934a4076b06f11271a89e0be\r\n\r\n4x1:\r\ninstances = 4\r\nworkers_per_instance = 1\r\ntotal_workers = 4\r\njob_id = job_b594f838244849e0a093b95e823bda55\r\n\r\n4x2:\r\ninstances = 4\r\nworkers_per_instance = 2\r\ntotal_workers = 8\r\njob_id = job_d0bc3a8f2c8c4aadb27f8a5491d9282a\r\n\r\n4x3:\r\ninstances = 4\r\nworkers_per_instance = 3\r\ntotal_workers = 12\r\njob_id = job_f9e95a90329c492c9c39ae0e6de1f9fc\r\n\r\n4x4:\r\ninstances = 4\r\nworkers_per_instance = 4\r\ntotal_workers = 16\r\njob_id = job_54907fa2477f40928e7115e684124b30\r\n\r\n6x1:\r\ninstances = 6\r\nworkers_per_instance = 1\r\ntotal_workers = 6\r\njob_id = job_efc55db071b34684be24abf8f13071b6\r\n\r\n6x2:\r\ninstances = 6\r\nworkers_per_instance = 2\r\ntotal_workers = 12\r\njob_id = job_058aafba47794dc7ad08a686f1567e38\r\n\r\n8x1:\r\ninstances = 8\r\nworkers_per_instance = 1\r\ntotal_workers = 8\r\njob_id = job_0c79c0847f294325a843439ad53eda43\r\njob_5a445e641aee47228340290d1129c0dd\r\n\r\n8x2:\r\ninstances = 8\r\nworkers_per_instance = 2\r\ntotal_workers = 16\r\njob_id = job_ad2a4f8fb7c84b00b430112347e4af46\r\njob_356f180845df4b17a2c55c6ec9f22f70\r\n\r\nJOB_ID=\"job_d0bc3a8f2c8c4aadb27f8a5491d9282a\"\r\nsudo rm -rf \"/mnt/efs/gp_artifacts/jobs/$JOB_ID\"\r\n\r\n\r\nWORKERS:\r\nwatch -n 5 \"docker stats --no-stream\"\r\n\r\nMASTER:\r\nJOB_ID=\"job_b7a0557e7eee400aa5473aaaedffee8d\"\r\nEXP_ID=\"${JOB_ID}_exp_000\"\r\nJOB_DIR=\"/mnt/efs/gp_artifacts/jobs/$JOB_ID\"\r\nTREE_DIR=\"$JOB_DIR/experiments/$EXP_ID/trees\"\r\nwatch -n 10 \"echo '=== JOB DIR ==='; echo '$JOB_DIR'; echo; echo '=== JOB SIZE ==='; du -sh '$JOB_DIR' 2>/dev/null; echo; echo '=== JOBLIB TREES ==='; find '$TREE_DIR' -name 'tree_*.joblib' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== JSON TREES ==='; find '$TREE_DIR' -name 'tree_*.json' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== RECENT JOB FILES ==='; find '$JOB_DIR' -type f -printf '%TY-%Tm-%Td %TH:%TM %s %p\\n' 2>/dev/null | sort | tail -12\"\r\n\r\n\r\n# ================================\r\n# DOWNLOAD LIGHT JOB ARTIFACTS\r\n# ================================\r\n\r\n# Job da scaricare\r\n$JOB_ID=\"job_b7a0557e7eee400aa5473aaaedffee8d\"\r\n$EXP_ID=\"${JOB_ID}_exp_000\"\r\n\r\n# Chiave SSH\r\n$KEY=\"C:\\Users\\PC\\Desktop\\KeyCouple.pem\"\r\n\r\n# IP pubblico attuale del master\r\n$MASTER_PUBLIC_IP=\"13.60.202.59\"\r\n\r\n# Host remoto\r\n$REMOTE_HOST=\"ec2-user@$MASTER_PUBLIC_IP\"\r\n\r\n# Path remoto su EFS\r\n$REMOTE_JOB=\"/mnt/efs/gp_artifacts/jobs/$JOB_ID\"\r\n\r\n# Path locale nel progetto\r\n$LOCAL_JOB=\"C:\\Users\\PC\\Desktop\\materie\\ISW\\Mvn\\ProgettoSDCCeML\\performance_evaluation\\distributed_jobs\\$JOB_ID\"\r\n\r\n# ================================\r\n# CREAZIONE CARTELLE LOCALI\r\n# ================================\r\n\r\nNew-Item -ItemType Directory -Force \"$LOCAL_JOB\" | Out-Null\r\nNew-Item -ItemType Directory -Force \"$LOCAL_JOB\\metrics\" | Out-Null\r\nNew-Item -ItemType Directory -Force \"$LOCAL_JOB\\experiments\\$EXP_ID\" | Out-Null\r\n\r\n# ================================\r\n# DOWNLOAD FILE PRINCIPALI\r\n# ================================\r\n\r\nscp -i $KEY \"$REMOTE_HOST`:$REMOTE_JOB/job_record.json\" \"$LOCAL_JOB\\\"\r\nscp -i $KEY \"$REMOTE_HOST`:$REMOTE_JOB/task_ledger.json\" \"$LOCAL_JOB\\\"\r\n\r\n# ================================\r\n# DOWNLOAD METRICHE\r\n# ================================\r\n\r\nscp -i $KEY \"$REMOTE_HOST`:$REMOTE_JOB/metrics/scalability_summary.json\" \"$LOCAL_JOB\\metrics\\\"\r\nscp -i $KEY \"$REMOTE_HOST`:$REMOTE_JOB/metrics/scalability_events.jsonl\" \"$LOCAL_JOB\\metrics\\\"\r\n\r\n# ================================\r\n# DOWNLOAD EXPERIMENT RECORD\r\n# ================================\r\n\r\nscp -i $KEY \"$REMOTE_HOST`:$REMOTE_JOB/experiments/$EXP_ID/experiment_record.json\" \"$LOCAL_JOB\\experiments\\$EXP_ID\\\"\r\n\r\n# ================================\r\n# VERIFICA FINALE\r\n# ================================\r\n\r\nGet-ChildItem -Recurse \"$LOCAL_JOB\"
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/performance_evaluation/results/scalability/scalability_runs_notes.txt b/performance_evaluation/results/scalability/scalability_runs_notes.txt
+--- a/performance_evaluation/results/scalability/scalability_runs_notes.txt	(revision 93ffd781788d18dc5eaa2e619291eb34c4dd913f)
++++ b/performance_evaluation/results/scalability/scalability_runs_notes.txt	(date 1782598268652)
+@@ -140,26 +140,66 @@
+ watch -n 5 "docker stats --no-stream"
+ 
+ MASTER:
+-JOB_ID="job_b7a0557e7eee400aa5473aaaedffee8d"
++JOB_ID="job_5de0c4d2054f496386bdd1d66d826cf5"
+ EXP_ID="${JOB_ID}_exp_000"
+ JOB_DIR="/mnt/efs/gp_artifacts/jobs/$JOB_ID"
+ TREE_DIR="$JOB_DIR/experiments/$EXP_ID/trees"
+ watch -n 10 "echo '=== JOB DIR ==='; echo '$JOB_DIR'; echo; echo '=== JOB SIZE ==='; du -sh '$JOB_DIR' 2>/dev/null; echo; echo '=== JOBLIB TREES ==='; find '$TREE_DIR' -name 'tree_*.joblib' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== JSON TREES ==='; find '$TREE_DIR' -name 'tree_*.json' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== RECENT JOB FILES ==='; find '$JOB_DIR' -type f -printf '%TY-%Tm-%Td %TH:%TM %s %p\n' 2>/dev/null | sort | tail -12"
+ 
++$PP="13.61.7.237"
++
++ssh -i KeyCouple.pem ec2-user@$PP 'watch -n 10 '"'"'
++ROOT="/mnt/efs/gp_artifacts/jobs"
++
++JOB_DIR=$(find "$ROOT" -mindepth 1 -maxdepth 1 -type d -name "job_*" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d" " -f2-)
++JOB_ID=$(basename "$JOB_DIR" 2>/dev/null)
++
++EXP_DIR=$(find "$JOB_DIR/experiments" -mindepth 1 -maxdepth 1 -type d -name "*_exp_*" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d" " -f2-)
++TREE_DIR="$EXP_DIR/trees"
++
++EXPECTED=$(find "$JOB_DIR" -maxdepth 4 -type f -name "*.json" -exec grep -h "\"n_estimators\"" {} \; 2>/dev/null | head -1 | sed -E "s/.*\"n_estimators\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/")
++[ -z "$EXPECTED" ] && EXPECTED="?"
++
++echo "=== LATEST ACTIVE JOB ==="
++echo "$JOB_ID"
++echo
++echo "=== JOB DIR ==="
++echo "$JOB_DIR"
++echo
++echo "=== EXP DIR ==="
++echo "$EXP_DIR"
++echo
++echo "=== JOB SIZE ==="
++du -sh "$JOB_DIR" 2>/dev/null
++echo
++echo "=== JOBLIB TREES ==="
++find "$TREE_DIR" -name "tree_*.joblib" 2>/dev/null | wc -l
++echo "/ $EXPECTED"
++echo
++echo "=== JSON TREES ==="
++find "$TREE_DIR" -name "tree_*.json" 2>/dev/null | wc -l
++echo "/ $EXPECTED"
++echo
++echo "=== RECENT FILES IN ACTIVE JOB ==="
++find "$JOB_DIR" -type f -printf "%TY-%Tm-%Td %TH:%TM:%TS %s %p\n" 2>/dev/null | sort | tail -20
++echo
++echo "=== RECENT FILES ACROSS ALL JOBS ==="
++find "$ROOT" -type f -printf "%TY-%Tm-%Td %TH:%TM:%TS %s %p\n" 2>/dev/null | sort | tail -10
++'"'"
+ 
+ # ================================
+ # DOWNLOAD LIGHT JOB ARTIFACTS
+ # ================================
+ 
+ # Job da scaricare
+-$JOB_ID="job_b7a0557e7eee400aa5473aaaedffee8d"
++$JOB_ID="job_d37e68e528734fbfb342118ec9d21fd7"
+ $EXP_ID="${JOB_ID}_exp_000"
+ 
+ # Chiave SSH
+ $KEY="C:\Users\PC\Desktop\KeyCouple.pem"
+ 
+ # IP pubblico attuale del master
+-$MASTER_PUBLIC_IP="13.60.202.59"
++$MASTER_PUBLIC_IP="13.61.7.237"
+ 
+ # Host remoto
+ $REMOTE_HOST="ec2-user@$MASTER_PUBLIC_IP"
+@@ -198,8 +238,3 @@
+ 
+ scp -i $KEY "$REMOTE_HOST`:$REMOTE_JOB/experiments/$EXP_ID/experiment_record.json" "$LOCAL_JOB\experiments\$EXP_ID\"
+ 
+-# ================================
+-# VERIFICA FINALE
+-# ================================
+-
+-Get-ChildItem -Recurse "$LOCAL_JOB"
+\ No newline at end of file
+Index: .idea/ProgSDCC&ML.iml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<module type=\"PYTHON_MODULE\" version=\"4\">\r\n  <component name=\"NewModuleRootManager\">\r\n    <content url=\"file://$MODULE_DIR$\">\r\n      <excludeFolder url=\"file://$MODULE_DIR$/.venv\" />\r\n    </content>\r\n    <orderEntry type=\"jdk\" jdkName=\"Python 3.13 (PythonProject1)\" jdkType=\"Python SDK\" />\r\n    <orderEntry type=\"sourceFolder\" forTests=\"false\" />\r\n  </component>\r\n</module>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/ProgSDCC&ML.iml b/.idea/ProgSDCC&ML.iml
+--- a/.idea/ProgSDCC&ML.iml	(revision 93ffd781788d18dc5eaa2e619291eb34c4dd913f)
++++ b/.idea/ProgSDCC&ML.iml	(date 1782485540637)
+@@ -4,7 +4,7 @@
+     <content url="file://$MODULE_DIR$">
+       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+     </content>
+-    <orderEntry type="jdk" jdkName="Python 3.13 (PythonProject1)" jdkType="Python SDK" />
++    <orderEntry type="jdk" jdkName="Python 3.13 (ProgettoSDCCeML) (3)" jdkType="Python SDK" />
+     <orderEntry type="sourceFolder" forTests="false" />
+   </component>
+ </module>
+\ No newline at end of file

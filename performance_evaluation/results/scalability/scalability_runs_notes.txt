@@ -140,26 +140,66 @@ WORKERS:
 watch -n 5 "docker stats --no-stream"
 
 MASTER:
-JOB_ID="job_b7a0557e7eee400aa5473aaaedffee8d"
+JOB_ID="job_5de0c4d2054f496386bdd1d66d826cf5"
 EXP_ID="${JOB_ID}_exp_000"
 JOB_DIR="/mnt/efs/gp_artifacts/jobs/$JOB_ID"
 TREE_DIR="$JOB_DIR/experiments/$EXP_ID/trees"
 watch -n 10 "echo '=== JOB DIR ==='; echo '$JOB_DIR'; echo; echo '=== JOB SIZE ==='; du -sh '$JOB_DIR' 2>/dev/null; echo; echo '=== JOBLIB TREES ==='; find '$TREE_DIR' -name 'tree_*.joblib' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== JSON TREES ==='; find '$TREE_DIR' -name 'tree_*.json' 2>/dev/null | wc -l; echo '/ 400'; echo; echo '=== RECENT JOB FILES ==='; find '$JOB_DIR' -type f -printf '%TY-%Tm-%Td %TH:%TM %s %p\n' 2>/dev/null | sort | tail -12"
 
+$PP="13.61.7.237"
+
+ssh -i KeyCouple.pem ec2-user@$PP 'watch -n 10 '"'"'
+ROOT="/mnt/efs/gp_artifacts/jobs"
+
+JOB_DIR=$(find "$ROOT" -mindepth 1 -maxdepth 1 -type d -name "job_*" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d" " -f2-)
+JOB_ID=$(basename "$JOB_DIR" 2>/dev/null)
+
+EXP_DIR=$(find "$JOB_DIR/experiments" -mindepth 1 -maxdepth 1 -type d -name "*_exp_*" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d" " -f2-)
+TREE_DIR="$EXP_DIR/trees"
+
+EXPECTED=$(find "$JOB_DIR" -maxdepth 4 -type f -name "*.json" -exec grep -h "\"n_estimators\"" {} \; 2>/dev/null | head -1 | sed -E "s/.*\"n_estimators\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/")
+[ -z "$EXPECTED" ] && EXPECTED="?"
+
+echo "=== LATEST ACTIVE JOB ==="
+echo "$JOB_ID"
+echo
+echo "=== JOB DIR ==="
+echo "$JOB_DIR"
+echo
+echo "=== EXP DIR ==="
+echo "$EXP_DIR"
+echo
+echo "=== JOB SIZE ==="
+du -sh "$JOB_DIR" 2>/dev/null
+echo
+echo "=== JOBLIB TREES ==="
+find "$TREE_DIR" -name "tree_*.joblib" 2>/dev/null | wc -l
+echo "/ $EXPECTED"
+echo
+echo "=== JSON TREES ==="
+find "$TREE_DIR" -name "tree_*.json" 2>/dev/null | wc -l
+echo "/ $EXPECTED"
+echo
+echo "=== RECENT FILES IN ACTIVE JOB ==="
+find "$JOB_DIR" -type f -printf "%TY-%Tm-%Td %TH:%TM:%TS %s %p\n" 2>/dev/null | sort | tail -20
+echo
+echo "=== RECENT FILES ACROSS ALL JOBS ==="
+find "$ROOT" -type f -printf "%TY-%Tm-%Td %TH:%TM:%TS %s %p\n" 2>/dev/null | sort | tail -10
+'"'"
 
 # ================================
 # DOWNLOAD LIGHT JOB ARTIFACTS
 # ================================
 
 # Job da scaricare
-$JOB_ID="job_b7a0557e7eee400aa5473aaaedffee8d"
+$JOB_ID="job_d37e68e528734fbfb342118ec9d21fd7"
 $EXP_ID="${JOB_ID}_exp_000"
 
 # Chiave SSH
 $KEY="C:\Users\PC\Desktop\KeyCouple.pem"
 
 # IP pubblico attuale del master
-$MASTER_PUBLIC_IP="13.60.202.59"
+$MASTER_PUBLIC_IP="13.61.7.237"
 
 # Host remoto
 $REMOTE_HOST="ec2-user@$MASTER_PUBLIC_IP"
@@ -198,8 +238,3 @@ scp -i $KEY "$REMOTE_HOST`:$REMOTE_JOB/metrics/scalability_events.jsonl" "$LOCAL
 
 scp -i $KEY "$REMOTE_HOST`:$REMOTE_JOB/experiments/$EXP_ID/experiment_record.json" "$LOCAL_JOB\experiments\$EXP_ID\"
 
-# ================================
-# VERIFICA FINALE
-# ================================
-
-Get-ChildItem -Recurse "$LOCAL_JOB"

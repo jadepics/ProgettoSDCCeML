@@ -64,24 +64,37 @@ def load_client_config(env_file: Path | None = None) -> ClientConfig:
 
 
 def load_master_addresses() -> list[str]:
-    raw_seeds = os.getenv("MASTER_SEEDS", "").strip()
+    master_seeds = os.getenv("MASTER_SEEDS", "").strip()
 
-    if raw_seeds:
-        addresses = [
-            _normalize_master_address(item)
-            for item in raw_seeds.split(",")
-            if item.strip()
+    if master_seeds:
+        return [
+            seed.strip()
+            for seed in master_seeds.split(",")
+            if seed.strip()
         ]
 
-        addresses = _deduplicate(addresses)
-        if addresses:
-            return addresses
+    deployment_mode = os.getenv("MASTER_DEPLOYMENT_MODE", "single-host").strip()
 
-    master_host = os.getenv("MASTER_HOST", DEFAULT_MASTER_HOST).strip()
-    master_port = os.getenv("MASTER_PORT", DEFAULT_MASTER_PORT).strip()
+    master1_ip = os.getenv("MASTER1_PRIVATE_IP", "127.0.0.1").strip()
+    master2_ip = os.getenv("MASTER2_PRIVATE_IP", master1_ip).strip()
+    master3_ip = os.getenv("MASTER3_PRIVATE_IP", master1_ip).strip()
 
-    return [_normalize_master_address(f"{master_host}:{master_port}")]
+    master1_port = os.getenv("MASTER1_PORT", "50051").strip()
+    master2_port = os.getenv("MASTER2_PORT", "50052").strip()
+    master3_port = os.getenv("MASTER3_PORT", "50053").strip()
 
+    if deployment_mode == "single-host":
+        return [
+            f"{master1_ip}:{master1_port}",
+            f"{master1_ip}:{master2_port}",
+            f"{master1_ip}:{master3_port}",
+        ]
+
+    return [
+        f"{master1_ip}:{master1_port}",
+        f"{master2_ip}:{master2_port}",
+        f"{master3_ip}:{master3_port}",
+    ]
 
 def build_grpc_options(config: ClientConfig) -> list[tuple[str, int]]:
     max_message_length = config.grpc_max_message_length_bytes
