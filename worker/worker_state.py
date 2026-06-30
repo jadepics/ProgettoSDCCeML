@@ -5,7 +5,7 @@ from typing import Dict, List, Set
 
 class WorkerState:
     """
-    Runtime state del worker (NON persistente).
+    Runtime dello stato del worker (NON persistente).
 
     Responsabilità:
     - tracciare task attivi (source of truth)
@@ -16,10 +16,10 @@ class WorkerState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
 
-        # 🔴 SOURCE OF TRUTH
+        #  source of truth
         self._active_tasks: Set[str] = set()
 
-        # opzionale ma utile per debug/monitoring
+        #  utile per debug/monitoring
         self._task_status: Dict[str, str] = {}
 
         # ultimo progresso osservato per task
@@ -78,13 +78,6 @@ class WorkerState:
         """
         Snapshot usato per heartbeat verso master.
 
-        Output:
-        [
-            {
-                "task_id": "...",
-                "last_progress_ts": 1234567890.0
-            }
-        ]
         """
 
         with self._lock:

@@ -5,6 +5,10 @@ from urllib.request import Request, urlopen
 
 from worker.utils.id_utils import generate_worker_id
 
+# Configurazione runtime del worker: raccoglie tutti i parametri necessari
+# per avviare il nodo (identità, endpoint locale, indirizzo del master,
+# percorso degli artifact e parallelismo massimo), con inizializzazione
+# automatica a partire dalle variabili d'ambiente.
 
 @dataclass
 class WorkerConfig:

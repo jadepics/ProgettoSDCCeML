@@ -145,13 +145,13 @@ class WorkerNode:
 
     def start(self):
         # ----------------------------------------
-        # 1. START gRPC SERVER (PRIMA!)
+        #  START gRPC SERVER (PRIMA!)
         # ----------------------------------------
         self.server.start()
         print(f"[WorkerNode] gRPC server started on port {self.config.port}")
 
         # ----------------------------------------
-        # 2. REGISTER (ora il worker è raggiungibile)
+        # REGISTER (ora il worker è raggiungibile)
         # ----------------------------------------
         advertise_host=self._resolve_advertise_host()
 
@@ -164,12 +164,12 @@ class WorkerNode:
         print(f"[WorkerNode] Registered as {advertise_host}:{self.config.port}")
 
         # ----------------------------------------
-        # 3. START HEARTBEAT
+        #  START HEARTBEAT
         # ----------------------------------------
         self.heartbeat_loop.start()
 
         # ----------------------------------------
-        # 4. LOOP
+        #  LOOP
         # ----------------------------------------
         try:
             while True:

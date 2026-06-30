@@ -9,6 +9,11 @@ from worker.mappers.tree_artifact_mapper import to_proto_tree_artifact
 from worker.utils.proto_utils import matrix_from_proto
 
 
+# Facciata RPC del worker: espone via gRPC le operazioni di training e prediction,
+# converte le richieste protobuf in oggetti di dominio, delega l'esecuzione ai
+# componenti applicativi interni (trainer/predictor) e aggiorna lo stato locale
+# del worker durante il ciclo di vita dei task.
+
 class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 
     def __init__(
@@ -30,7 +35,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
 
         try:
             # ----------------------------------------
-            # 1. Mapping proto → domain
+            #  Mapping proto → domain
             # ----------------------------------------
             shard = TrainingShard(
                 task_id=request.task_id,
@@ -62,7 +67,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             maybe_fail("worker.train.before_trainer")
 
             # ----------------------------------------
-            # 2. Delega totale al trainer
+            #  Delega totale al trainer
             # ----------------------------------------
             result = self.shard_trainer.train(
                 shard,
@@ -71,7 +76,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             )
 
             # ----------------------------------------
-            # 3. Stato worker
+            #  Stato worker
             # ----------------------------------------
             if result.success:
                 self.state.on_task_success(task_id)
@@ -79,7 +84,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 self.state.on_task_failure(task_id, result.error_message or "")
 
             # ----------------------------------------
-            # 4. Mapping result → proto
+            #  Mapping result → proto
             # ----------------------------------------
             return rf_pb2.TrainShardResponse(
                 task_id=result.task_id,
@@ -118,9 +123,6 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
         """
         Prediction distribuita per sottoinsiemi di alberi.
 
-        Modalità legacy:
-          - input: request.features DenseMatrix
-          - output: response.values dentro gRPC
 
         Modalità scalabile:
           - input: request.features_uri
@@ -137,7 +139,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 raise ValueError("No tree artifacts provided")
 
             # ----------------------------------------
-            # 1. Input features
+            # Input features
             # ----------------------------------------
             if request.features_uri:
                 if not request.prediction_output_dir:
@@ -158,7 +160,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             maybe_fail("worker.predict.before_predictor")
 
             # ----------------------------------------
-            # 2. Prediction parziale
+            #  Prediction parziale
             # ----------------------------------------
             # Classification:
             #   result = voti parziali per classe.
@@ -188,7 +190,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
             self.state.on_task_success(task_id)
 
             # ----------------------------------------
-            # 3. Output scalabile: salva .npy e ritorna URI
+            # Output scalabile: salva .npy e ritorna URI
             # ----------------------------------------
             if request.prediction_output_dir:
                 prediction_uri = save_prediction_array(
@@ -208,7 +210,7 @@ class WorkerService(rf_pb2_grpc.WorkerServiceServicer):
                 )
 
             # ----------------------------------------
-            # 4. Output legacy: ritorna values dentro gRPC
+            # Output legacy: ritorna values dentro gRPC
             # ----------------------------------------
             return rf_pb2.PredictShardResponse(
                 worker_id=self.config.worker_id,
