@@ -17,7 +17,8 @@ import submit_training_regression
 from common.grpc_config import GRPC_OPTIONS
 
 from common.prediction_io import load_prediction_array, path_to_file_uri
-
+# cli principale di accesso, eseguibile da master o worker per sistema completo è stata riadattata per client e clien
+# ne ha una versione propria
 # =========================================================
 # CONFIG
 # =========================================================

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-
+# configurazioni grpc
 def _message_limit_bytes() -> int:
     raw_value = os.getenv("GRPC_MAX_MESSAGE_LENGTH_MB", "256").strip()
 
