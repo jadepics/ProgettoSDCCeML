@@ -4,11 +4,8 @@ from pathlib import Path
 
 
 class StorageLayout:
-    """Deterministic storage layout shared by masterPackage and workers.
+    """Layout di archiviazione deterministico condiviso da masterPackage e worker.
 
-    This is the first class both developers should use, because it freezes the
-    naming convention of all artifacts and prevents path drift between masterPackage- and
-    worker-side implementations.
     """
 
     def __init__(self, root: str | Path):

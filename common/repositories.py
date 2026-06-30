@@ -24,12 +24,26 @@ from common.contracts import ModelManifest
 
 
 class JsonFileStore:
-    """Small atomic JSON store suitable for durable JSON persistence."""
+    """
+      archiviazione JSON minimale con scrittura atomica su file.
 
+      È pensato per persistenza semplice ma durevole dei metadata applicativi:
+      prima scrive su un file temporaneo e poi sostituisce il file finale,
+      riducendo il rischio di file parziali o corrotti in caso di crash.
+      """
     def __init__(self) -> None:
+        # Lock locale al processo per serializzare le scritture concorrenti.
         self._lock = threading.Lock()
 
     def write_json(self, path: str | Path, payload: dict[str, Any]) -> None:
+        """
+          Scrive un payload JSON in modo atomico.
+
+          Strategia:
+          1. crea la directory se manca;
+          2. scrive il contenuto su un file temporaneo;
+          3. sostituisce atomicamente il file di destinazione.
+          """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -45,18 +59,31 @@ class JsonFileStore:
 
                 temp_path.replace(path)
             finally:
+                # Cleanup difensivo del file temporaneo in caso di errore.
                 if temp_path.exists():
                     temp_path.unlink()
 
     def read_json(self, path: str | Path) -> dict[str, Any]:
+        """Legge e deserializza un file JSON."""
         path = Path(path)
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
 
     def exists(self, path: str | Path) -> bool:
+        """Verifica l'esistenza di un file sul filesystem."""
         return Path(path).exists()
 
 class SharedArtifactStore:
+    """
+    Facciata di persistenza condivisa usata dal control plane.
+
+    Incapsula:
+    - il layout logico dei path sullo storage condiviso;
+    - il backend di persistenza JSON.
+
+    In questo modo repository e ledger non dipendono direttamente
+    dai dettagli del filesystem.
+    """
     def __init__(self, root: str | Path, json_store: Optional[JsonFileStore] = None):
         self.layout = StorageLayout(root)
         self.json_store = json_store or JsonFileStore()
@@ -73,18 +100,21 @@ class SharedArtifactStore:
 
 
 def _job_status_from_raw(value: str | JobStatus) -> JobStatus:
+    #normalizza uno status di job da enum o stringa raw
     if isinstance(value, JobStatus):
         return value
     return JobStatus(value)
 
 
 def _experiment_status_from_raw(value: str | ExperimentStatus) -> ExperimentStatus:
+    #normalizza uno status di esperimento da enum o stringa raw
     if isinstance(value, ExperimentStatus):
         return value
     return ExperimentStatus(value)
 
 
 def _hyperparameter_space_from_dict(payload: dict[str, Any]) -> HyperparameterSpace:
+    # ricostruisce da json
     return HyperparameterSpace(
         n_estimators_candidates=payload["n_estimators_candidates"],
         max_depth_candidates=payload["max_depth_candidates"],
@@ -267,6 +297,14 @@ class JobRepository:
     def __init__(self, artifact_store: SharedArtifactStore):
         self.artifact_store = artifact_store
 
+    """
+     Repository persistente dei training job e dei relativi esperimenti.
+
+     Responsabilità:
+     - salvare/caricare il record principale del job;
+     - salvare/caricare gli esperimenti associati;
+     - offrire helper semantici per aggiornare status e campi chiave.
+     """
     # --------------------------------------------------------
     # basic persistence
     # --------------------------------------------------------
@@ -565,7 +603,12 @@ class ModelRepository:
     # --------------------------------------------------------
     # basic persistence
     # --------------------------------------------------------
+    """
+    Repository persistente dei manifest dei modelli pubblicati.
 
+    Il manifest rappresenta la vista globale del modello finale:
+    configurazione, split, artifact degli alberi e metriche.
+    """
     def save(self, manifest: ModelManifest) -> None:
         path = self.artifact_store.layout.model_manifest_path(manifest.model_id)
         self.artifact_store.write_json(path, manifest.to_dict())
@@ -662,7 +705,15 @@ class TaskLedger:
     # --------------------------------------------------------
     # internal persistence
     # --------------------------------------------------------
+    """
+    Ledger persistente dei task di training.
 
+    Proprietà chiave:
+    - raggruppa per task logico;
+    - versiona per attempt_id;
+    - mantiene lease, stato e alberi completati/falliti;
+    - supporta recovery e retry senza perdere la cronologia.
+    """
     def _empty_payload(self) -> dict[str, Any]:
         return {"tasks": {}}
 
@@ -679,33 +730,6 @@ class TaskLedger:
         self.artifact_store.write_json(path, payload)
 
     def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """
-        Normalizes the on-disk JSON so both old and new formats are accepted.
-
-        Old format:
-        {
-          "tasks": {
-            "task-1": { ... TaskRecord ... }
-          }
-        }
-
-        New format:
-        {
-          "tasks": {
-            "task-1": {
-              "task_id": "task-1",
-              "job_id": "...",
-              "experiment_id": "...",
-              "latest_attempt_id": 2,
-              "updated_at": ...,
-              "attempts": {
-                "1": { ... TaskRecord ... },
-                "2": { ... TaskRecord ... }
-              }
-            }
-          }
-        }
-        """
         tasks_payload = payload.get("tasks")
         if not isinstance(tasks_payload, dict):
             return self._empty_payload()
@@ -716,7 +740,7 @@ class TaskLedger:
             if not isinstance(raw_value, dict):
                 continue
 
-            # New format already grouped by attempts
+
             if "attempts" in raw_value:
                 attempts_payload = raw_value.get("attempts", {})
                 normalized_attempts: dict[str, Any] = {}
@@ -755,7 +779,7 @@ class TaskLedger:
                     }
                 continue
 
-            # Old flat format: single TaskRecord directly under task_id
+
             attempt_id = int(raw_value.get("attempt_id", 1))
             normalized_tasks[task_id] = {
                 "task_id": raw_value.get("task_id", task_id),

@@ -21,7 +21,7 @@ inference, monitoring, recovery e pubblicazione del modello.
 
 @dataclass(slots=True)
 class HyperparameterSpace:
-    #spazio degli hyperparametri esplorabile durante la pianificazione degli exp di train
+    # spazio degli hyperparametri esplorabile durante la pianificazione degli exp di train
     n_estimators_candidates: list[int]
     max_depth_candidates: list[Optional[int]]
     max_features_candidates: list[str | int | float | None]

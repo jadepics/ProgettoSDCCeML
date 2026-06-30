@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 
+#generazione identificativi
 
 def generate_job_id() -> str:
     return f"job_{uuid.uuid4().hex}"
