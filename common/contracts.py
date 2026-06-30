@@ -12,10 +12,16 @@ from .enums import (
     TaskStatus,
     TreeStatus,
 )
+"""
+Contratti di dominio condivisi tra master, worker e layer di persistenza.
 
+Il modulo definisce le strutture dati serializzabili usate per training,
+inference, monitoring, recovery e pubblicazione del modello.
+"""
 
 @dataclass(slots=True)
 class HyperparameterSpace:
+    #spazio degli hyperparametri esplorabile durante la pianificazione degli exp di train
     n_estimators_candidates: list[int]
     max_depth_candidates: list[Optional[int]]
     max_features_candidates: list[str | int | float | None]
@@ -31,6 +37,12 @@ class HyperparameterSpace:
 
 @dataclass(slots=True)
 class ForestConfiguration:
+    """
+       Configurazione concreta di una foresta per un singolo esperimento.
+
+       A differenza di HyperparameterSpace, qui ogni parametro ha già
+       un valore fissato e pronto per essere usato nel training.
+       """
     experiment_id: str
     task_type: str
     n_estimators: int
@@ -48,6 +60,12 @@ class ForestConfiguration:
 
 @dataclass(slots=True)
 class TrainingRequest:
+    """
+    Richiesta logica di training inviata dal client al master.
+
+    Contiene il riferimento al dataset, il target, i parametri globali
+    del job e lo spazio di ricerca degli iperparametri.
+    """
     job_id: str
     dataset_uri: str
     target_column: str
@@ -68,6 +86,16 @@ class TrainingRequest:
 #introduco per baseline no leakage, estendo per dati da tenere keep e rimuovere drop
 @dataclass(slots=True)
 class DatasetPreparationMetadata:
+    """
+    Metadata del preprocessing e della preparazione del dataset.
+
+    Serve a tracciare in modo esplicito:
+    - scenario applicato;
+    - colonne richieste in keep/drop/leakage;
+    - colonne effettivamente mantenute o rimosse;
+    - eventuali richieste non soddisfatte;
+    - dimensioni iniziali e finali del dataset.
+    """
     dataset_scenario: str = "baseline_original"
     scenario_type: str = "none"
 
@@ -95,6 +123,12 @@ class DatasetPreparationMetadata:
 
 @dataclass(slots=True)
 class DatasetSchema:
+    """
+    Schema logico del dataset preparato.
+
+    Descrive il target, le feature finali e gli eventuali artefatti
+    di preprocessing necessari per training e inferenza.
+    """
     dataset_uri: str
     target_column: str
     feature_names: list[str]
@@ -108,6 +142,12 @@ class DatasetSchema:
 
 @dataclass(slots=True)
 class PreparedDataset:
+    """
+    Dataset già validato, trasformato e suddiviso nei tre split standard:
+    train, validation e test.
+
+    Questo è il formato che il master passa alla pipeline di training.
+    """
     dataset_id: str
     schema: DatasetSchema
     train_features_uri: str
@@ -130,6 +170,16 @@ class PreparedDataset:
 
 @dataclass(slots=True)
 class TrainingShard:
+    """
+    Unità di lavoro assegnata a un worker durante il training distribuito.
+
+    Ogni shard identifica:
+    - il task e la sua attempt;
+    - il worker destinatario;
+    - il sottoinsieme di alberi da addestrare;
+    - i riferimenti ai dati di training;
+    - i parametri della foresta da usare.
+    """
     task_id: str
     attempt_id: int
     job_id: str
@@ -154,6 +204,12 @@ class TrainingShard:
 
 @dataclass(slots=True)
 class TreeArtifactMetadata:
+    """
+    Metadata persistiti per un singolo albero addestrato.
+
+    Non contiene l'albero, ma le informazioni necessarie
+    per identificarlo, localizzarlo e verificarne lo stato.
+    """
     tree_id: str
     job_id: str
     experiment_id: str
@@ -173,6 +229,7 @@ class TreeArtifactMetadata:
 
     @staticmethod
     def from_dict(data: dict) -> "TreeArtifactMetadata":
+        #riscostruisce i metadata da una rappresentazione serializzata
         return TreeArtifactMetadata(
             tree_id=data["tree_id"],
             job_id=data["job_id"],
@@ -189,6 +246,12 @@ class TreeArtifactMetadata:
 
 @dataclass(slots=True)
 class ShardTrainingResult:
+    """
+    Risultato restituito da un worker dopo l'esecuzione di uno shard di training.
+
+    Riporta sia gli artifact prodotti sia il dettaglio degli alberi completati
+    o falliti, così il master può aggiornare ledger e recovery state.
+    """
     task_id: str
     attempt_id: int
     worker_id: str
@@ -220,7 +283,12 @@ class ShardTrainingResult:
 @dataclass(slots=True)
 class ValidationMetrics:
     experiment_id: str
+    """
+    Contenitore uniforme delle metriche di valutazione.
 
+    Include sia metriche di classificazione sia metriche di regressione,
+    così lo stesso contratto può essere riusato in task_type diversi.
+    """
     # Classification metrics
     accuracy: Optional[float] = None
     balanced_accuracy: Optional[float] = None
@@ -254,6 +322,12 @@ class ValidationMetrics:
 
 @dataclass(slots=True)
 class ExperimentRecord:
+    """
+    Stato persistito di un singolo esperimento.
+
+    Un job può contenere più esperimenti, ciascuno con una diversa
+    configurazione della foresta.
+    """
     experiment_id: str
     forest_config: ForestConfiguration
     status: ExperimentStatus
@@ -272,6 +346,12 @@ class ExperimentRecord:
 
 @dataclass(slots=True)
 class TrainingJobRecord:
+    """
+    Stato persistito dell'intero training job.
+
+    Tiene insieme richiesta iniziale, dataset preparato, esperimenti creati,
+    modello selezionato e messaggi di stato leggibili dal client.
+    """
     job_id: str
     status: JobStatus
     training_request: TrainingRequest
@@ -291,6 +371,13 @@ class TrainingJobRecord:
 
 @dataclass(slots=True)
 class ModelManifest:
+    """
+    Descrizione completa del modello pubblicato.
+
+    Il manifest è la vista logica globale del modello:
+    dice quali artifact lo compongono, con quali feature è stato costruito,
+    su quali split è stato valutato e con quali metriche.
+    """
     model_id: str
     job_id: str
     experiment_id: str
@@ -325,6 +412,12 @@ class ModelManifest:
 
 @dataclass(slots=True)
 class MasterCommand:
+    """
+     Comando logico del control plane del master.
+
+     È il formato adatto a rappresentare decisioni critiche da tracciare
+     o, in futuro, da replicare formalmente tramite consenso.
+     """
     command_id: str
     job_id: str
     command_type: CommandType
@@ -339,6 +432,12 @@ class MasterCommand:
 
 @dataclass(slots=True)
 class WorkerProgressSnapshot:
+    """
+    Snapshot del progresso locale osservato su un worker.
+
+    Serve al master per monitorare avanzamento, stalli e possibili
+    recovery dei task distribuiti.
+    """
     worker_id: str
     task_id: str
     experiment_id: str
@@ -353,6 +452,12 @@ class WorkerProgressSnapshot:
 
 @dataclass(slots=True)
 class TaskRecord:
+    """
+     Stato persistito di un task/shard assegnato a un worker.
+
+     Include attempt-aware bookkeeping, lease e dettaglio degli alberi
+     completati o falliti in quello specifico task.
+     """
     task_id: str
     attempt_id: int
     job_id: str

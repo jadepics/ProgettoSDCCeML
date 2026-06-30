@@ -4,7 +4,21 @@ import os
 import signal
 import time
 
+"""
+file comune che inietta un fault artificiale se il punto di esecuzione richiesto
+coincide con quello configurato via environment.
 
+Variabili d'ambiente usate:
+- CHAOS_POINT: nome del punto in cui attivare il fault
+- CHAOS_ACTION: tipo di fault da simulare ("crash", "freeze", "sleep")
+- CHAOS_DELAY_SECONDS: ritardo opzionale prima di attivare il fault
+- CHAOS_SLEEP_SECONDS: durata del fault se l'azione è "sleep"
+
+Uso tipico:
+il chiamante inserisce maybe_fail("nome_punto") in punti strategici
+del workflow per simulare crash o blocchi controllati durante i test
+di fault tolerance.
+"""
 def maybe_fail(point: str) -> None:
     target = os.getenv("CHAOS_POINT", "").strip()
     if target != point:
