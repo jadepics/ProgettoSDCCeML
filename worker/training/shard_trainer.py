@@ -80,8 +80,8 @@ class ShardTrainer:
             },
         )
 
-        # 4️⃣ Eccezione globale fuori dal loop
-        # Esempio: errore in data loading errore in config
+        # Eccezione globale fuori dal loop
+
         self._ensure_rpc_active(
             context,
             "TrainShard cancelled before task execution",
@@ -147,7 +147,7 @@ class ShardTrainer:
 
             # ----------------------------------------
             # VALIDAZIONE DATASET
-            # 1️⃣ Dataset inconsistente o vuoto
+            # Dataset inconsistente o vuoto
             # Problemi: X o y vuoti shape mismatch
             # ----------------------------------------
             if X is None or y is None:
@@ -159,7 +159,7 @@ class ShardTrainer:
             if len(X) != len(y):
                 raise ValueError("Feature/label size mismatch")
 
-            # 2️⃣tree_count = 0
+            # tree_count = 0
             # Caso reale (bug upstream o shard mal formato
             if shard.tree_count == 0:
                 self.progress_store.complete_task(
@@ -268,11 +268,6 @@ class ShardTrainer:
                         task_type=task_type
                     )
 
-                    # ----------------------------------------
-                    # Da qui partirà:
-                    # try:
-                    #     tree.fit(...)
-                    # ----------------------------------------
                     try:
                         """
                         Training + persistenza atomica albero
@@ -351,10 +346,6 @@ class ShardTrainer:
                     del y_sample
                     del tree
                     gc.collect()
-
-            # ----------------------------------------
-            # FINALIZZAZIONE
-            # ----------------------------------------
             # ----------------------------------------
             # FINALIZZAZIONE TASK
             # ----------------------------------------

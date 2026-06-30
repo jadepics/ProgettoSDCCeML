@@ -35,25 +35,9 @@ class TreeArtifactWriter:
         seed: int,
         training_time_seconds: float,
     ) -> TreeArtifactMetadata:
-        """
-        model: object
-        job_id: str
-        experiment_id: str
-        task_id: str
-        tree_index: int
-        seed: int
-        training_time_seconds: float
-
-        return: TreeArtifactMetadata
-
-        Idempotente:
-        - metadata esiste → ritorna
-        - artifact esiste ma metadata no → ricostruisce
-        - niente esiste → scrive tutto
-        """
 
         # --------------------------------------------------
-        # 1. Path deterministici
+        # Path deterministici
         # --------------------------------------------------
         artifact_key = tree_artifact_path(
             job_id=job_id,
@@ -72,7 +56,7 @@ class TreeArtifactWriter:
         tree_id = generate_tree_id(experiment_id, tree_index)
 
         # --------------------------------------------------
-        # 2. FAST PATH → metadata già esiste
+        # FAST PATH → metadata già esiste
         # (più veloce + evita load modello inutile)
         # --------------------------------------------------
         if self.store.exists(metadata_key):
@@ -85,17 +69,17 @@ class TreeArtifactWriter:
             self.store.delete(metadata_key)
 
         # --------------------------------------------------
-        # 3. Scrittura artifact (idempotente)
+        #  Scrittura artifact (idempotente)
         # --------------------------------------------------
         self.store.save_tree_artifact_if_not_exists(artifact_key, model)
 
         # --------------------------------------------------
-        # 4. Feature importances dal modello addestrato
+        #  Feature importances dal modello addestrato
         # --------------------------------------------------
         feature_importances = self._extract_feature_importances(model)
 
         # --------------------------------------------------
-        # 5. COSTRUZIONE METADATA (sempre)
+        #  COSTRUZIONE METADATA (sempre)
         # --------------------------------------------------
         metadata = TreeArtifactMetadata(
             tree_id=tree_id,
@@ -112,7 +96,7 @@ class TreeArtifactWriter:
         )
 
         # --------------------------------------------------
-        # 6. Scrittura metadata ATOMICA (sempre)
+        #  Scrittura metadata ATOMICA (sempre)
         # --------------------------------------------------
         self.store.save_json_atomic(metadata_key, metadata.to_dict())
         return metadata

@@ -16,6 +16,12 @@ from common.contracts import WorkerProgressSnapshot
 
 @dataclass(slots=True)
 class TaskProgressSnapshot:
+    """
+       Snapshot locale del progresso di un singolo task sul worker.
+
+       Contiene lo stato operativo del task, il livello di avanzamento stimato
+       e il dettaglio degli alberi completati o falliti durante l'esecuzione.
+       """
     task_id: str
     attempt_id: int
     status: str  # RUNNING | COMPLETED | FAILED
@@ -41,6 +47,12 @@ class TaskProgressSnapshot:
 
 @dataclass(slots=True)
 class WorkerProgressState:
+    """
+     Stato aggregato del worker per uno specifico job/esperimento.
+
+     Raccoglie tutti i task noti al worker in quel contesto e il timestamp
+     dell'ultimo aggiornamento persistito.
+     """
     worker_id: str
     job_id: str
     experiment_id: str
@@ -67,7 +79,23 @@ class WorkerProgressState:
 # ======================================================
 
 class WorkerProgressStore:
+    """
+       Store persistente del progresso locale dei task eseguiti dal singolo worker.
 
+       Questa classe mantiene uno snapshot durevole dello stato di avanzamento
+       dei task di training assegnati a uno specifico worker, organizzato per
+       job ed esperimento.
+
+       Responsabilità:
+       - caricare e salvare lo stato locale del worker su artifact store;
+       - tracciare lo stato dei task (RUNNING, COMPLETED, FAILED);
+       - aggiornare progresso, alberi completati e alberi falliti;
+       - garantire idempotenza nelle operazioni di start/retry dei task;
+       - fornire query semplici e sicure sullo stato corrente.
+
+       Il file può essere usato sia per monitoring sia per recovery dopo riavvii o failure del
+       processo worker.
+       """
     def __init__(self, artifact_store: ArtifactStore, worker_id: str):
         self.store: ArtifactStore = artifact_store
         self.worker_id: str = worker_id
@@ -213,7 +241,7 @@ class WorkerProgressStore:
         metadata: Dict[str, Any]
     ) -> str:
         """
-        Idempotent start.
+        start idempotente
 
         Returns:
             - "STARTED"
@@ -228,15 +256,15 @@ class WorkerProgressStore:
         attempt_id = metadata.get("attempt_id")
 
         if existing is not None:
-            # 🔴 Task già completato → idempotenza forte
+            # Task già completato → idempotenza forte
             if existing.status == "COMPLETED":
                 return "ALREADY_COMPLETED"
 
-            # 🔴 Stesso attempt → retry
+            # Stesso attempt → retry
             if existing.attempt_id == attempt_id:
                 return "RETRY"
 
-            # 🔴 Nuovo attempt → overwrite controllato
+            # Nuovo attempt → overwrite controllato
             # (puoi in futuro loggare o gestire diversamente)
 
         # Nuovo task

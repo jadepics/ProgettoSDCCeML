@@ -13,8 +13,8 @@ class ArtifactStore(ABC):
     def save_tree_artifact_if_not_exists(self, path: str, model: Any) -> bool:
         """
         Returns:
-            True -> artifact was created
-            False -> artifact already existed
+            True -> artifact è stato creato
+            False -> artifact già esistente
         """
         pass
 

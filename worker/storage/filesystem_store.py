@@ -6,7 +6,11 @@ from typing import Any, Dict
 from worker.storage.artifact_store import ArtifactStore
 
 class FilesystemArtifactStore(ArtifactStore):
-
+    """
+       Implementazione di ArtifactStore basata su filesystem, usata per
+       persistere e recuperare gli artifact del worker in modo semplice e affidabile,
+       con supporto a scritture atomiche per file JSON e modelli.
+       """
     def __init__(self, root_dir: str):
         self.root_dir = root_dir
 
@@ -22,7 +26,7 @@ class FilesystemArtifactStore(ArtifactStore):
     def rename(self, src: str, dst: str) -> None:
         os.replace(self._full_path(src), self._full_path(dst))  # atomico POSIX
 
-    # 🔴 IMPLEMENTAZIONE ATOMICA
+    #  IMPLEMENTAZIONE ATOMICA
     def save_json_atomic(self, key: str, data: Dict[str, Any]) -> None:
         tmp_key = key + ".tmp"
 

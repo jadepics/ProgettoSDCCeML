@@ -5,7 +5,9 @@ from common.chaos import maybe_fail
 
 
 class HeartbeatLoop:
-
+    # Loop in background che invia periodicamente al master l'heartbeat del worker,
+    # includendo numero e stato dei task attivi, così il master può monitorarne
+    # liveness e progresso; se il master non riconosce più il worker, tenta la ri-registrazione.
     def __init__(
         self,
         master_client,
