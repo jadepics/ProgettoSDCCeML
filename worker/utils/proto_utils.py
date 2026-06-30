@@ -4,20 +4,16 @@ import numpy as np
 
 def matrix_from_proto(matrix_proto: Any) -> np.ndarray:
     """
-    Converte un DenseMatrix protobuf in una numpy ndarray.
-
-    Args:
-        matrix_proto: oggetto protobuf con:
-            - values: lista piatta di float
-            - n_rows: numero di righe
-            - n_cols: numero di colonne
-
-    Returns:
-        np.ndarray con shape (n_rows, n_cols)
-
-    Raises:
-        ValueError: se la dimensione dei dati non è coerente
-    """
+Converti un protocollo DenseMatrix in un numpy ndarray.
+Argomenti:
+matrice_proto: oggetto protobuf con:
+- valori: lista piatta di float
+- n_rows: numero di righe
+- n_cols: numero di colonne
+Resi:
+np.ndarray con forma (n_rows, n_cols)
+Rilanci:
+ValueError: se la dimensione dei dati non è coerente """
 
     # Estrazione dati grezzi
     values = matrix_proto.values

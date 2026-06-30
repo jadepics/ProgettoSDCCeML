@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 def current_time_seconds() -> float:
     """
-    Returns current time in seconds (monotonic-safe for measurements if needed).
+restituisce il time corrente in secondi
     """
     return time.time()
 
@@ -14,12 +14,7 @@ def now_ts() -> float:
 @contextmanager
 def timer():
     """
-    Context manager to measure execution time.
-
-    Usage:
-        with timer() as t:
-            # do work
-        print(t.duration)
+    Context manager per misurare il tempo di esecuzione
     """
     start = time.time()
 

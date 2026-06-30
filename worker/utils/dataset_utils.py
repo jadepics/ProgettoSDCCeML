@@ -7,14 +7,14 @@ def split_features_labels(
     y: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Utility to validate and return features and labels.
+    Utility per validare e restituire feature ed etichette
 
-    Parameters:
+    parametri:
     - X: feature matrix
     - y: labels vector
 
-    Returns:
-    - X, y as numpy arrays (ensured format)
+    ritorno:
+    - X, y come numpy array
     """
     if X is None or y is None:
         raise ValueError("X and y must not be None")
@@ -33,7 +33,7 @@ def get_shard_indices(
     shard_id: int
 ) -> np.ndarray:
     """
-    Returns indices of samples belonging to a specific shard.
+   Restituisce gli indici dei campioni appartenenti a uno specifico shard.
     """
     if shard_id >= num_shards:
         raise ValueError("shard_id must be < num_shards")

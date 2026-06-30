@@ -5,22 +5,20 @@ import uuid
 
 def generate_worker_id() -> str:
     """
-    Generates a unique worker identifier.
+  Genera un identificatore univoco per il worker.
 
-    Priority:
-    1. If WORKER_ID env variable is set → use it (useful for deterministic deployment)
-    2. Otherwise → generate an ID based on hostname + random suffix
+Priorità:
+Se la variabile d'ambiente WORKER_ID è impostata → utilizzala
+Altrimenti → genera un ID basato sul nome host + suffisso casuale
 
-    Returns:
-        str: unique worker identifier
     """
 
-    # 1. Allow explicit override (useful in Docker / Kubernetes)
+    # consente override esplciito
     explicit = os.getenv("WORKER_ID")
     if explicit:
         return explicit
 
-    # 2. Fallback: hostname + random UUID suffix
+    # Fallback: hostname + random UUID suffix
     hostname = socket.gethostname()
     random_suffix = uuid.uuid4().hex[:8]
 

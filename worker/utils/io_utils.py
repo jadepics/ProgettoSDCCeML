@@ -10,12 +10,11 @@ import pandas as pd
 
 def atomic_json_write(path: Path, payload: dict) -> None:
     """
-    Writes a JSON file atomically to avoid corruption in case of failures.
-
-    Strategy:
-    - Write to a temporary file
-    - Flush + fsync to disk
-    - Atomically replace the target file
+    Scrive un file JSON in modo atomico per evitare la corruzione in caso di errori.
+Strategia:
+- Scrive su un file temporaneo
+- Esegue il flush e la sincronizzazione con fsync su disco
+- Sostituisce in modo atomico il file di destinazione
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

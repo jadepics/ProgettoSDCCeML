@@ -4,13 +4,12 @@ import socket
 
 def detect_advertise_host(master_host: str, master_port: int) -> str:
     """
-    Detects the IP address that the worker should advertise to the master.
-
-    Priority:
-    1. Environment variable WORKER_ADVERTISE_HOST
-    2. OS routing decision via UDP socket
-    3. Hostname resolution
-    4. Fallback to localhost
+Rileva l'indirizzo IP che il worker deve pubblicizzare al master.
+Priorità:
+1. Variabile d'ambiente WORKER_ADVERTISE_HOST
+2. Decisione di routing del sistema operativo tramite socket UDP
+3. Risoluzione del nome host
+4. Fallback a localhost
     """
 
     # 1. Explicit override via environment variable
