@@ -216,33 +216,36 @@ class WorkerRegistry:
 
 class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     """
-    Facciata RPC del master.
+       Facciata RPC del master e punto di ingresso del control plane.
 
-    Stato coerente col proto rf_v2.proto:
-    - RegisterWorker
-    - Heartbeat
-    - SubmitTraining
+       Questa classe espone le RPC gRPC definite nel proto e traduce le richieste
+       di rete in operazioni applicative sui servizi interni del master.
 
-    Responsabilità:
-    - ricevere le RPC esposte dal CoordinatorService
-    - validare input minimi a livello RPC
-    - applicare leader-only execution dove richiesto
-    - tradurre protobuf -> contratti di dominio
-    - delegare ai servizi applicativi del control plane
+       Responsabilità principali:
+       - registrare e monitorare i worker;
+       - accettare richieste di training/inferenza dal client;
+       - far rispettare la regola leader-only sulle operazioni critiche;
+       - costruire i componenti core del master (repository, orchestrator, planner,
+         validator, export, recovery);
+       - avviare il recovery automatico dei job incompleti allo startup.
 
-    Non deve:
-    - orchestrare direttamente training o validation
-    - contenere logica di inferenza distribuita
-    - sostituire TrainingJobService / TrainingOrchestrator
-    """
+       Importante:
+       questa classe NON contiene la logica completa di training distribuito.
+       Il suo compito è validare, coordinare e delegare ai servizi applicativi
+       specializzati, ad esempio TrainingJobService e TrainingOrchestrator.
+       """
 
     def __init__(self, artifact_root: str = "/mnt/efs/gp_artifacts") -> None:
+        # Root persistente condivisa del master.
+        # Qui vengono salvati job, modelli, ledger e file temporanei di supporto.
         self.artifact_root = Path(artifact_root)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
 
-        # stato condiviso del master
-        self.registry = WorkerRegistry()
 
+    # Registro in-memory dei worker noti al master.
+    # Tiene traccia di endpoint, heartbeat e stato di liveness.
+        self.registry = WorkerRegistry()
+        # Storage/repository applicativi persistiti su artifact store condiviso.
         self.store = SharedArtifactStore(str(self.artifact_root))
         self.layout = StorageLayout(str(self.artifact_root))
 
@@ -250,30 +253,33 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         self.model_repository = ModelRepository(self.store)
         self.task_ledger = TaskLedger(self.store)
 
-        # leadership / consenso
+        # Servizi di consenso e guardia leader-only.
+        # Solo il leader può accettare operazioni che modificano lo stato del sistema.
         self.consensus = self._build_consensus_service()
         self.consensus.start()
         self.leadership_guard = LeadershipGuard(self.consensus)
 
-        # monitor heartbeat: va creato PRIMA di orchestrator/recovery
+        # Monitor dei heartbeat dei worker.
+        # Oltre al semplice heartbeat, controlla se un worker è "zombie":
+        # vivo dal punto di vista della connessione, ma bloccato sui task.
         self.worker_heartbeat_monitor = WorkerHeartbeatMonitor(
             worker_registry=self.registry,
             heartbeat_timeout_seconds=HEARTBEAT_TIMEOUT_SECONDS,
 
             ###########################################################################
-            # introdotto temporaneamente per rendere il timeout per gli zombie più breve
+            # introdotto per rendere il timeout per gli zombie più breve
             ###########################################################################
             task_progress_timeout_seconds=300,
         )
 
-        # data prep
+        # Pipeline di preparazione dati centralizzata lato master.
         self.data_preparation_service = DataPreparationService(
             dataset_loader=DatasetLoader(),
             dataset_validator=DatasetValidator(),
             split_manager=SplitManager(),
             artifact_store=self.store,
         )
-
+        # Componenti della pipeline ML del control plane.
         self.experiment_planner = ExperimentPlanner()
         self.model_selector = ModelSelector(selection_metric="auto")
         self.model_manifest_builder = ModelManifestBuilder()
@@ -281,6 +287,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             model_repository=self.model_repository,
             artifact_store=self.store,
         )
+        # Planner degli shard e client RPC verso i worker.
         self.shard_planner = ShardPlanner(
             self.layout,
 
@@ -293,7 +300,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             timeout_train_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,
             timeout_predict_seconds=DEFAULT_RPC_TIMEOUT_SECONDS,
         )
-
+        # Coordinatori applicativi per inferenza, validation e test distribuiti.
         self.inference_coordinator = InferenceCoordinator(
             leadership_guard=self.leadership_guard,
             worker_registry=self.registry,
@@ -314,12 +321,15 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             worker_client=self.worker_client,
             storage_layout=self.layout,
         )
+        # Planner di recovery: decide come recuperare alberi/shard mancanti
+        # in presenza di failure o lease scadute.
         self.recovery_planner = RecoveryPlanner(
             task_ledger=self.task_ledger,
             shard_planner=self.shard_planner,
             worker_heartbeat_monitor=self.worker_heartbeat_monitor,
         )
-
+        # Orchestratore del training distribuito:
+        # schedula shard, gestisce retry, lease e recovery runtime.
         self.training_orchestrator = TrainingOrchestrator(
             leadership_guard=self.leadership_guard,
             worker_registry=self.registry,
@@ -341,6 +351,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             ),
             worker_heartbeat_monitor=self.worker_heartbeat_monitor,
             recovery_planner=self.recovery_planner)
+        # Servizio di alto livello che avvia e riprende i training job.
         self.training_job_service = TrainingJobService(
             leadership_guard=self.leadership_guard,
             job_repository=self.job_repository,
@@ -360,6 +371,13 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     # --------------------------------------------------------
 
     def RegisterWorker(self, request, context):
+        """
+        Registra un nuovo worker presso il master leader.
+
+        La registrazione è ammessa solo sul leader corrente, perché modifica
+        lo stato operativo del cluster. Il metodo valida i campi minimi
+        dell'endpoint worker e poi aggiorna il WorkerRegistry.
+        """
         if not self.consensus.is_leader():
             return rf_pb2.RegisterWorkerResponse(
                 accepted=False,
@@ -397,6 +415,19 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         )
 
     def Heartbeat(self, request, context):
+        """
+          Aggiorna lo stato di vita di un worker già registrato.
+
+          Oltre al semplice heartbeat, il master riceve:
+          - numero di task in esecuzione;
+          - lista dei task attivi;
+          - ultimo timestamp di progresso per ciascun task.
+
+          Dopo l'aggiornamento, il master verifica tramite
+          WorkerHeartbeatMonitor se il worker è diventato "zombie",
+          cioè ancora raggiungibile ma senza progresso reale.
+          In quel caso il worker viene quarantinato.
+          """
         if not self.consensus.is_leader():
             return rf_pb2.HeartbeatResponse(ok=False)
 
@@ -444,6 +475,16 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     #               consenso
     # ----------------------------------------------------------
     def _build_consensus_service(self):
+        """
+          Costruisce il backend di consenso del master.
+
+          Supporta due modalità:
+          - memory: utile per test locali o run semplificate;
+          - raft: abilita leader election reale tra più master.
+
+          In ogni caso, la classe usa sempre LeadershipGuard per impedire
+          che un follower esegua operazioni leader-only.
+          """
         backend = os.getenv("CONSENSUS_BACKEND", "memory").strip().lower()
 
         if backend == "raft":
@@ -464,6 +505,16 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     # --------------------------------------------------------
 
     def SubmitTraining(self, request, context):
+        """
+        Punto di ingresso RPC per l'avvio di un nuovo training job.
+
+        Flusso:
+        1. verifica che il master corrente sia leader;
+        2. valida i parametri della richiesta;
+        3. verifica la presenza di worker vivi;
+        4. converte la request protobuf in TrainingRequest di dominio;
+        5. delega l'avvio reale del job al TrainingJobService.
+        """
         try:
             self.leadership_guard.require_leader()
         except Exception as exc:
@@ -491,6 +542,13 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         )
 
     def ResumeTraining(self, request, context):
+        """
+          Riavvia un job già esistente ma non concluso.
+
+          È usato soprattutto nei casi di recovery:
+          il master carica il job persistito, controlla che non sia già COMPLETED
+          e, se sono presenti worker vivi, delega il resume al TrainingJobService.
+          """
         try:
             self.leadership_guard.require_leader()
         except Exception as exc:
@@ -557,6 +615,12 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             )
 
     def SubmitInference(self, request, context):
+        """
+        Avvia un'inferenza distribuita a partire da un modello già pubblicato.
+
+        Il metodo verifica leadership, input minimi e disponibilità dei worker,
+        poi delega l'esecuzione all'InferenceCoordinator.
+        """
         try:
             self.leadership_guard.require_leader()
         except Exception as exc:
@@ -593,6 +657,12 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             return self._failed_submit_inference_response(str(exc))
 
     def DownloadModel(self, request, context):
+        """
+            Esporta un modello addestrato in un formato scaricabile.
+
+            Se richiesto, può includere i bytes direttamente nella risposta gRPC;
+            in caso contrario restituisce soltanto l'URI dell'artifact esportato.
+            """
         try:
             self.leadership_guard.require_leader()
         except Exception as exc:
@@ -1267,6 +1337,7 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         )
 
     def _validate_submit_training_request(self, request) -> Optional[str]:
+       # valida i parametri del train a livello rpc
         task_type = request.task_type.strip().lower()
         if task_type not in {"classification", "regression"}:
             return "task_type must be 'classification' or 'regression'"
@@ -1337,6 +1408,8 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         )
 
     def _build_training_request(self, request) -> TrainingRequest:
+        # traduce la request protobuf in un oggetto trainingRequest
+        #vengono applicati default ragionevoli per hyperparametri
         task_type = request.task_type.strip().lower()
         job_id = self._generate_job_id()
 
@@ -1529,6 +1602,13 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
     # --------------------------------------------------------
 
     def _start_recovery_on_startup_if_enabled(self) -> None:
+        """
+           Avvia in background il watcher di recovery allo startup del master.
+
+           Il recovery non parte in linea con il bootstrap del server,
+           per non bloccare l'avvio delle RPC: viene lanciato in un thread daemon
+           solo se la feature è abilitata da configurazione.
+           """
         enabled = os.getenv("RECOVER_INCOMPLETE_JOBS_ON_STARTUP", "true").lower()
 
         if enabled not in {"1", "true", "yes", "y"}:
@@ -1542,6 +1622,15 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         thread.start()
 
     def _recover_incomplete_jobs_on_startup(self) -> None:
+        """
+        Effettua il recovery automatico dei job incompleti quando questo nodo
+        diventa leader.
+
+
+        Questo implementa una fault tolerance recovery-based:
+        il nuovo leader non eredita lo stato in memoria del vecchio leader,
+        ma lo ricostruisce da repository, ledger e artifact persistiti.
+        """
         startup_delay_seconds = float(
             os.getenv("RECOVERY_STARTUP_DELAY_SECONDS", "10")
         )
@@ -1648,6 +1737,13 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
             time.sleep(poll_seconds)
 
     def _wait_for_at_least_one_worker(self) -> bool:
+        """
+          Attende per un intervallo limitato la presenza di almeno un worker vivo.
+
+          Serve a evitare che il recovery venga tentato troppo presto,
+          quando il nuovo leader è già attivo ma i worker non si sono ancora
+          registrati o non hanno ancora ripreso a inviare heartbeat.
+          """
         timeout_seconds = float(
             os.getenv("RECOVERY_WAIT_WORKERS_TIMEOUT_SECONDS", "60")
         )
@@ -1687,6 +1783,12 @@ class MasterCoordinator(rf_pb2_grpc.CoordinatorServiceServicer):
         return False
 
     def _list_recoverable_jobs(self):
+        """
+            Restituisce i job che possono essere ripresi automaticamente allo startup.
+
+            Per default include solo job non terminati; opzionalmente può includere
+            anche job FAILED, se configurato esplicitamente via environment.
+            """
         jobs = self._list_all_jobs_from_repository()
 
         recover_failed_jobs = os.getenv(
@@ -1741,6 +1843,11 @@ def serve(
         port: int = 50051,
         artifact_root: str = "/mnt/efs/gp_artifacts",
 ):
+    """
+       Bootstrap del server gRPC del master.
+       Crea il CoordinatorService, lo registra sul server gRPC
+       e avvia il listener sulla porta configurata.
+       """
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=32),
         options=GRPC_OPTIONS,
