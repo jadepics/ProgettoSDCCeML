@@ -7,7 +7,7 @@ def matrix_from_proto(matrix_proto: Any) -> np.ndarray:
 Converti un protocollo DenseMatrix in un numpy ndarray.
 Argomenti:
 matrice_proto: oggetto protobuf con:
-- valori: lista piatta di float
+- valori: lista di float
 - n_rows: numero di righe
 - n_cols: numero di colonne
 Resi:
